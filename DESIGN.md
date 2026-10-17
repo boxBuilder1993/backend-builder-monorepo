@@ -255,6 +255,13 @@ Deferred reactions run after commit, each in its own context and transaction.
 
 **Scheduler.** `OnSchedule` entries are evaluated by a scheduler that writes an outbox row with the fire time as input when a cron expression is due. No separate mechanism.
 
+**Backfill and replay.** A backfill is a trigger started from outside a run. Two entry points, both of which write ordinary outbox rows so the deferred worker's batching, retries and pooling apply:
+
+- `bb trigger <reaction> --input <json>` writes one row with the given input. A reaction written as a backfiller reads a range from its input, loads rows, and triggers other reactions with whatever inputs they expect. Explicit triggers fan out as they would in any run.
+- `bb backfill <reaction> --entity <Entity> --sql <select of ids>` reads matching rows in batches and writes rows whose input is a list of `Change` records with `before` as `None` and `after` as the current row. The reaction cannot distinguish these from WAL-produced changes, so any config-driven reaction is replayable without modification.
+
+A backfill of millions of rows is therefore a queue, not a long-lived process, and runs at whatever rate the deferred workers provide.
+
 ## 10. Transactions and concurrency
 
 **Isolation.** `SERIALIZABLE` by default, configurable.
