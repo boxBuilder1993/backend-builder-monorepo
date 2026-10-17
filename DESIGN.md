@@ -16,6 +16,11 @@ What the company gets from this:
 - **Whole-operation transactions.** A request that touches orders, ledgers and stock is one commit. No sagas, no compensation logic.
 - **Uniform testing.** Every reaction is tested by building a context, calling it, and inspecting the store. No HTTP, no service mocks, no queue fakes.
 - **A small deployment surface.** One API process type, one deferred worker type, one WAL worker, one database. Scaling is adding workers and assigning them reaction subsets.
+- **Incremental analytics with the same machinery.** Analytics tables are entities. Their maintenance is deferred reactions subscribed to source fields. The WAL worker delivers exactly the rows that changed, with before and after, so a metric is updated by removing the old contribution and adding the new one, never by rescanning. The config is the lineage. Backfill is replaying synthetic changes through the same reaction. This replaces a separate change-data-capture pipeline and warehouse transformation layer with configuration.
+
+Two contracts apply to analytics reactions wherever they run. First, only aggregates that decompose are incremental: sums, counts, averages as sum and count, min and max with tombstones. Distinct counts, medians, percentiles and funnels do not decompose and need sketches such as HyperLogLog or t-digest, or periodic full recomputation. Second, a change arriving late must be bucketed by the event's own timestamp, not the time it was processed.
+
+Separating analytics onto its own database, with a columnar or timeseries extension, is a later concern. It would need only an entity-level database tag and a lookup when the deferred worker opens a transaction, with eager reactions remaining single-database. Nothing in a reaction changes when that happens.
 
 The database is an abstraction the engine owns. v1 assumes PostgreSQL and uses it fully. Scaling past a single database, or evaluating alternatives, is a later concern, and the engine's coupling to Postgres is documented in section 12 so that work is informed when it comes. What must be protected as the system grows is the purity of the reaction contract, because every benefit above depends on reactions remaining functions of input and store and nothing else.
 
