@@ -9,6 +9,7 @@ dependencies = [
     "asyncpg>=0.32.0",
     "croniter>=6.2.4",
     "fastapi>=0.156.8",
+    "prometheus-client>=0.26.0",
     "pydantic>=2.14.1",
     "sqlalchemy[asyncio]>=2.1.5",
     "typer>=0.27.3",

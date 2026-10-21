@@ -51,7 +51,7 @@ async def wait_total(client: AsyncClient, order_id: str, expected: int) -> dict[
 async def test_every_service_is_up_and_migrated(stack: Stack, client: AsyncClient) -> None:
     status = stack.status()
     assert "healthy" in status["api"]
-    assert status["worker"].startswith("Up") and status["scheduler"].startswith("Up")
+    assert "healthy" in status["worker"] and "healthy" in status["scheduler"]
     assert status["migrate"].startswith("Exited (0)")
 
     res = await client.get("/health")
@@ -265,6 +265,34 @@ async def test_scheduler_seeds_the_schedule_and_the_worker_delivers_it(
     )
     assert reseeded[0]["scheduled_for"] is not None
     assert "scheduler seeded app=shop rows=1" in stack.logs("scheduler")
+
+
+# --- metrics ----------------------------------------------------------------------------------
+
+
+async def test_every_process_serves_metrics_on_its_own_port(
+    stack: Stack, client: AsyncClient
+) -> None:
+    order = (await create_order(client))["order"]
+    await wait_total(client, order["id"], 25)
+
+    async with AsyncClient(timeout=5) as scraper:
+        api = (await scraper.get(stack.metrics_url("api"))).text
+        worker = (await scraper.get(stack.metrics_url("worker"))).text
+        scheduler = (await scraper.get(stack.metrics_url("scheduler"))).text
+        for service in ("api", "worker", "scheduler"):
+            health = await scraper.get(stack.metrics_url(service).replace("/metrics", "/health"))
+            assert health.json() == {"status": "ok"}
+
+    create_run = 'reaction="shop.api.CreateOrderApi",source="endpoint POST /orders"'
+    assert f'bb_runs_total{{outcome="ok",{create_run}}}' in api
+    assert 'bb_http_requests_total{method="POST",route="/orders",status="200"}' in api
+    assert 'bb_outbox_deliveries_total{outcome="ok",reaction="shop.reactions.OrderTotal"}' in worker
+    assert "bb_outbox_pending " in worker and "bb_outbox_oldest_pending_seconds " in worker
+    assert (
+        'bb_runs_total{outcome="ok",reaction="shop.reactions.OrderTotal",source="outbox"}' in worker
+    )
+    assert "bb_schedule_seeds_total " in scheduler
 
 
 # --- failure handling in the worker -----------------------------------------------------------

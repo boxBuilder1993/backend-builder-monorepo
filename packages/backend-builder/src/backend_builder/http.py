@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any
@@ -32,6 +33,7 @@ from fastapi import FastAPI, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from backend_builder import metrics
 from backend_builder.context import Context
 from backend_builder.engine import DEFAULT_MAX_ATTEMPTS, DEFAULT_TIMEOUT, run
 from backend_builder.log import get_logger
@@ -122,6 +124,22 @@ def create_app(
     a reaction for that route; an ``App`` passes one scoped to its package."""
     app = FastAPI(title=title)
     app.add_exception_handler(RunFailed, _run_failed)
+
+    @app.middleware("http")
+    async def _observe(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        started = time.perf_counter()
+        response = await call_next(request)
+        route = request.scope.get("route")
+        template = getattr(route, "path", request.url.path)
+        metrics.http_requests_total.labels(
+            route=template, method=request.method, status=str(response.status_code)
+        ).inc()
+        metrics.http_request_duration_seconds.labels(route=template, method=request.method).observe(
+            time.perf_counter() - started
+        )
+        return response
 
     async def health() -> JSONResponse:
         ok = await store.ping()
