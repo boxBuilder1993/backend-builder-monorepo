@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from backend_builder.store import Store
+from backend_builder.trace import Trace
 
 if TYPE_CHECKING:
     from backend_builder.entity import Entity
@@ -19,7 +20,7 @@ class Context:
     Every invocation gets its own ``reaction_id``. A context created by
     ``trigger`` records the triggering invocation as ``parent_reaction_id``;
     the seed invocation of a run has none. All invocations in a run share the
-    same store.
+    same store and the same trace.
     """
 
     def __init__(
@@ -29,11 +30,13 @@ class Context:
         *,
         reaction_id: str | None = None,
         parent_reaction_id: str | None = None,
+        trace: Trace | None = None,
     ) -> None:
         self._session = store
         self.input = input
         self.reaction_id = reaction_id or str(uuid4())
         self.parent_reaction_id = parent_reaction_id
+        self.trace = trace if trace is not None else Trace()
 
     def get[E: Entity](
         self,
@@ -59,6 +62,6 @@ class Context:
         """
         from backend_builder.reaction import invoke
 
-        child = Context(self._session, input, parent_reaction_id=self.reaction_id)
+        child = Context(self._session, input, parent_reaction_id=self.reaction_id, trace=self.trace)
         await invoke(reaction, child)
         return child

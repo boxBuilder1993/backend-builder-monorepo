@@ -7,7 +7,6 @@ argument, and is populated automatically when a subclass is defined.
 
 from __future__ import annotations
 
-import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -45,10 +44,8 @@ class Reaction(ABC):
 
 
 async def invoke(reaction: type[Reaction], ctx: Context) -> None:
-    """Run ``reaction`` in ``ctx``, logging start, end and failure.
-
-    Every invocation, seed or triggered, goes through here.
-    """
+    """Run ``reaction`` in ``ctx``, recording a span and logging start, end
+    and failure. Every invocation, seed or triggered, goes through here."""
     name = reaction.__name__
     logger.info(
         "reaction started reaction=%s reaction_id=%s parent_reaction_id=%s",
@@ -57,20 +54,22 @@ async def invoke(reaction: type[Reaction], ctx: Context) -> None:
         ctx.parent_reaction_id,
     )
     logger.debug("reaction input reaction_id=%s input=%r", ctx.reaction_id, ctx.input)
-    started = time.perf_counter()
     try:
-        await reaction().calculate(ctx)
+        with ctx.trace.span(name, ctx.reaction_id, ctx.parent_reaction_id):
+            await reaction().calculate(ctx)
     except Exception:
+        span = ctx.trace.spans[-1]
         logger.error(
             "reaction failed reaction=%s reaction_id=%s duration_ms=%.1f",
             name,
             ctx.reaction_id,
-            (time.perf_counter() - started) * 1000,
+            span.duration_ms,
         )
         raise
+    span = ctx.trace.spans[-1]
     logger.info(
         "reaction finished reaction=%s reaction_id=%s duration_ms=%.1f",
         name,
         ctx.reaction_id,
-        (time.perf_counter() - started) * 1000,
+        span.duration_ms,
     )
