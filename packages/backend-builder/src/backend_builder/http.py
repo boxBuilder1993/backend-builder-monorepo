@@ -36,6 +36,7 @@ from backend_builder.context import Context
 from backend_builder.engine import DEFAULT_MAX_ATTEMPTS, DEFAULT_TIMEOUT, run
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, resolve
+from backend_builder.records import RecordLevel
 from backend_builder.store import Store
 from backend_builder.triggers import Trigger
 
@@ -114,6 +115,7 @@ def create_app(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     timeout: float = DEFAULT_TIMEOUT,
     triggers: Sequence[Trigger] = (),
+    records: RecordLevel = "full",
 ) -> FastAPI:
     """A FastAPI app over ``store`` exposing ``endpoints`` and, if ``generic``,
     the ``POST /reactions/{name}`` route. ``resolver`` maps a qualified name to
@@ -133,7 +135,7 @@ def create_app(
     for endpoint in endpoints:
         app.add_api_route(
             endpoint.path,
-            _handler(store, endpoint, max_attempts, timeout, triggers),
+            _handler(store, endpoint, max_attempts, timeout, triggers, records),
             methods=[endpoint.method],
             response_model=endpoint.response,
             responses={status: {"model": model} for status, model in endpoint.responses.items()},
@@ -153,7 +155,9 @@ def create_app(
                 return JSONResponse(
                     status_code=404, content={"error": "LookupError", "message": str(exc)}
                 )
-            ctx = await _run(store, reaction, input, max_attempts, timeout, triggers)
+            ctx = await _run(
+                store, reaction, input, max_attempts, timeout, triggers, "generic", records
+            )
             response.headers[REACTION_ID_HEADER] = ctx.reaction_id
             return {}
 
@@ -168,6 +172,7 @@ def _handler(
     max_attempts: int,
     timeout: float,
     triggers: Sequence[Trigger],
+    records: RecordLevel,
 ) -> Callable[..., Any]:
     path_names = _PATH_PARAM.findall(endpoint.path)
     sources = {"query": endpoint.query, "body": endpoint.body, "headers": endpoint.headers}
@@ -198,6 +203,8 @@ def _handler(
                     max_attempts=max_attempts,
                     timeout=budget,
                     triggers=triggers,
+                    source=f"endpoint {endpoint.method.upper()} {endpoint.path}",
+                    records=records,
                 )
                 body: Any = await endpoint.build(ctx) if endpoint.build is not None else {}
         except Exception as exc:
@@ -239,6 +246,8 @@ async def _run(
     max_attempts: int,
     timeout: float,
     triggers: Sequence[Trigger],
+    source: str,
+    records: RecordLevel,
 ) -> Context:
     reaction_id = str(uuid4())
     try:
@@ -250,6 +259,8 @@ async def _run(
             max_attempts=max_attempts,
             timeout=timeout,
             triggers=triggers,
+            source=source,
+            records=records,
         )
     except Exception as exc:
         raise RunFailed(reaction_id, exc) from exc

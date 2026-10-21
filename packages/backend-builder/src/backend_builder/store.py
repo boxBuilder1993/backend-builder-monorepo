@@ -16,10 +16,11 @@ from backend_builder.codec import to_jsonable
 from backend_builder.entity import Entity
 from backend_builder.log import get_logger
 from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
+from backend_builder.records import RunRecord
 from backend_builder.schema import persisted_fields
 
 if TYPE_CHECKING:
-    from backend_builder.triggers import OnSchedule, Trigger
+    from backend_builder.triggers import Change, OnSchedule, Trigger
 
 logger = get_logger(__name__)
 
@@ -124,6 +125,16 @@ class Store(ABC):
         whether a row was enqueued. Safe to call from several processes."""
         raise NotSupported(f"{type(self).__name__} has no outbox")
 
+    # --- run records -----------------------------------------------------------------
+
+    async def record_run(self, record: RunRecord) -> None:
+        """Store a run record in a transaction of its own. Never inside a run."""
+        raise NotSupported(f"{type(self).__name__} keeps no run records")
+
+    async def purge_runs(self, before: _datetime) -> int:
+        """Delete run records started before ``before``. Returns how many."""
+        raise NotSupported(f"{type(self).__name__} keeps no run records")
+
     async def ping(self) -> bool:
         """Whether the backend is reachable. Used by the health endpoint."""
         return True
@@ -152,6 +163,17 @@ class InMemoryStore(Store):
     def __init__(self) -> None:
         self._rows: dict[type[Entity], dict[str, Entity]] = {}
         self._lock = asyncio.Lock()
+        self.records: list[RunRecord] = []
+        """Run records, newest last. Native: a list, inspectable by tests."""
+
+    async def record_run(self, record: RunRecord) -> None:
+        self.records.append(record)
+
+    async def purge_runs(self, before: _datetime) -> int:
+        keep = [r for r in self.records if r.started_at >= before]
+        purged = len(self.records) - len(keep)
+        self.records = keep
+        return purged
 
     @asynccontextmanager
     async def run_scope(self) -> AsyncGenerator[None]:
@@ -225,6 +247,10 @@ class Session:
         Flush compares against these and writes only what changed."""
         self._fully_loaded: set[type[Entity]] = set()
         self._deferred: list[OutboxEntry] = []
+        self.changes_made: list[Change] = []
+        """Every change written by this session's flushes, for the run record."""
+        self.enqueued: list[str] = []
+        """Ids of every outbox row this session's flushes wrote."""
         self.vars: dict[str, Any] = {}
         """Free-form values kept for the run. Shared by every reaction in the
         run and readable afterwards. Never flushed to the backing store."""
@@ -393,6 +419,7 @@ class Session:
             for row in table.values():
                 self._snapshots[(entity, row.id)] = _field_values(_clone(row))
         self._created.clear()
+        self.changes_made.extend(changes)
         if self._triggers and changes:
             self._deferred.extend(match(self._triggers, changes))
         if self._deferred:
@@ -404,5 +431,6 @@ class Session:
             ]
             logger.debug("flush enqueue reaction_id=%s entries=%r", reaction_id, entries)
             await self._backing.enqueue(entries)
+            self.enqueued.extend(e.id for e in entries)
             self._deferred = []
         return inserted, updated, unchanged

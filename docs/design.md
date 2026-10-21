@@ -227,7 +227,7 @@ An app is any importable package. The monorepo keeps apps under `apps/`, but the
 | `trigger <package> <reaction> --input <json>` | one reaction against a fresh store from the app's factory |
 | `graph <package>` | prints entities, reactions, endpoints, triggers |
 | `worker <package> [--once]` | delivers outbox rows |
-| `scheduler <package> [--once]` | keeps each schedule's next occurrence in the outbox |
+| `scheduler <package> [--once]` | keeps each schedule's next occurrence in the outbox; purges old run records |
 | `outbox <package>` | prints pending, claimed and dead counts |
 | `makemigration <package> [-m] [--empty] [--check] [--merge]` | decided, section 13 |
 | `migrate <package>` | decided, section 13 |
@@ -398,7 +398,17 @@ Built.
 
 **Triggers are sequential.** A run has one connection and one connection executes one statement at a time, so sub-reactions run one after another. The earlier idea of gathering several triggers concurrently is dropped.
 
-## 18. The image, the stack and the end-to-end suite
+## 18. Run records
+
+Built.
+
+Every run leaves a record: what it was, where it came from, what came in, what the reactions saved, what was written, what was deferred, how it ended, and every attempt's spans. Two system tables hold them, `_run` and `_span`, written in a short transaction of their own after the run finishes, never on the run's transaction, so a failed or timed-out run is recorded with its error and a committed run with its changes. Recording never fails a run: an error while writing a record is logged and swallowed, and a store without records, the in-memory one keeps a plain list, is simply skipped.
+
+A `_run` row: the run's reaction id as key, the reaction, `source` (`endpoint POST /orders`, `generic`, `cli`, `outbox`, `schedule`, `direct`), `outcome` (`ok`, `error`, `timeout`), the error, attempt count, start time, duration, `input`, `vars`, `changes` (entity, id, kind, changed fields per row written) and `enqueued` (the outbox rows produced). A `_span` row per span of every attempt, tagged with the attempt number, so a retried run shows why its first attempt failed. Vars are encoded like `jsonb`; a value the codec rejects is stored as its `repr`.
+
+`BACKEND_BUILDER_RUN_RECORDS` is `full` (default), `summary` (no input or vars) or `off`. `BACKEND_BUILDER_RUN_RETENTION_DAYS` (default 7) bounds the tables; the scheduler purges older records once an hour. These tables are what the admin console reads; they are never returned by the API.
+
+## 19. The image, the stack and the end-to-end suite
 
 Built.
 
@@ -408,7 +418,7 @@ Built.
 
 **The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a missing order answered with a 404 reply from a run that committed; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
 
-## 19. Decisions
+## 20. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 

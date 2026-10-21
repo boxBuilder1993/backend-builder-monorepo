@@ -36,6 +36,7 @@ from backend_builder.outbox import (
     OutboxStats,
     now,
 )
+from backend_builder.records import RUN_TABLE, SPAN_TABLE, RunRecord
 from backend_builder.schema import build_metadata, persisted_fields, table_name
 from backend_builder.store import DuplicateKeyError, MissingRowError, Store, TransientError
 
@@ -377,6 +378,56 @@ class PostgresStore(Store):
                 .values(cron=schedule.cron, last_scheduled_for=occurrence, updated_at=moment)
             )
         return True
+
+    # --- run records ---------------------------------------------------------------------
+
+    async def record_run(self, record: RunRecord) -> None:
+        runs = self.metadata.tables[RUN_TABLE]
+        spans = self.metadata.tables[SPAN_TABLE]
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                sa.insert(runs).values(
+                    id=record.id,
+                    reaction=record.reaction,
+                    source=record.source,
+                    outcome=record.outcome,
+                    error=record.error,
+                    attempts=record.attempts,
+                    started_at=record.started_at,
+                    duration_ms=record.duration_ms,
+                    input=record.input,
+                    vars=record.vars,
+                    changes=record.changes,
+                    enqueued=record.enqueued,
+                )
+            )
+            if record.spans:
+                await connection.execute(
+                    sa.insert(spans),
+                    [
+                        {
+                            "id": s.id,
+                            "run_id": record.id,
+                            "attempt": s.attempt,
+                            "name": s.name,
+                            "reaction_id": s.reaction_id,
+                            "parent_reaction_id": s.parent_reaction_id,
+                            "started_at": s.started_at,
+                            "duration_ms": s.duration_ms,
+                            "ok": s.ok,
+                        }
+                        for s in record.spans
+                    ],
+                )
+
+    async def purge_runs(self, before: datetime) -> int:
+        runs = self.metadata.tables[RUN_TABLE]
+        spans = self.metadata.tables[SPAN_TABLE]
+        async with self.engine.begin() as connection:
+            old = sa.select(runs.c.id).where(runs.c.started_at < before)
+            await connection.execute(sa.delete(spans).where(spans.c.run_id.in_(old)))
+            result = await connection.execute(sa.delete(runs).where(runs.c.started_at < before))
+        return int(result.rowcount)
 
     async def update(self, entity: type[Entity], row_id: str, changes: dict[str, Any]) -> None:
         if not changes:
