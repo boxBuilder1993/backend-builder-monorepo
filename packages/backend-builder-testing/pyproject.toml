@@ -1,0 +1,17 @@
+[project]
+name = "backend-builder-testing"
+version = "0.1.0"
+description = "pytest fixtures for apps built on backend-builder"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["backend-builder", "pytest>=8", "sqlalchemy[asyncio]"]
+
+[project.entry-points.pytest11]
+backend_builder = "backend_builder_testing.fixtures"
+
+[tool.uv.sources]
+backend-builder = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"

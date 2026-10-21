@@ -10,8 +10,12 @@ members = [
     "apps/shop",
 ]
 
+[tool.uv.sources]
+backend-builder-testing = { workspace = true }
+
 [dependency-groups]
 dev = [
+    "backend-builder-testing",
     "httpx2>=2.16.0",
     "pyright>=1.1.414",
     "pytest>=9.1.1",

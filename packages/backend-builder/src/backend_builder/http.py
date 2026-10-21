@@ -97,7 +97,7 @@ def create_app(
     app.add_exception_handler(RunFailed, _run_failed)
 
     async def health() -> JSONResponse:
-        ok = store.ping()
+        ok = await store.ping()
         return JSONResponse(
             status_code=200 if ok else 503,
             content={"status": "ok" if ok else "unavailable", "store": type(store).__name__},

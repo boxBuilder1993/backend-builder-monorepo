@@ -117,7 +117,7 @@ class OrderTotal(Reaction):
 
 ## 5. Context API
 
-Built, except `query`, which is decided.
+Built.
 
 ```python
 ctx.input                                   # dict[str, Any], the invocation's input
@@ -150,7 +150,7 @@ Built.
 
 The session is an `InMemoryStore` with a backing store and a flush.
 
-**Loading.** `get_by_id` checks the working set, then the backing store, and copies a found row in. `get` loads the whole entity from the backing store once per run, then filters locally; this is why it is in-memory only. `query`, when built, merges the rows the statement returns. In every case, an instance already in the working set is kept and the freshly loaded copy discarded, so earlier mutations in the run are never overwritten.
+**Loading.** `get_by_id` checks the working set, then the backing store, and copies a found row in. `get` loads the whole entity from the backing store once per run, then filters locally; this is why it is in-memory only. `query` and `query_raw` first flush the session's pending writes to the backing store, inside the run's transaction, so the statement sees everything the run has done so far, then `query` merges the rows the statement returns. In every case, an instance already in the working set is kept and the freshly loaded copy discarded, so earlier mutations in the run are never overwritten.
 
 **Creating.** `create` constructs the instance and registers it as created. It never touches the backing store.
 
@@ -162,7 +162,7 @@ The session is an `InMemoryStore` with a backing store and a flush.
 
 ## 7. Stores
 
-The in-memory store is built. The Postgres store is decided.
+Both stores are built.
 
 **The interface** is what the session needs and nothing more:
 
@@ -180,7 +180,7 @@ Each store keeps its native reads native. The interface does not define a portab
 
 **In-memory store.** `entity -> id -> instance`. Rows returned by reference. `run_scope` holds an `asyncio.Lock`, so runs on one store execute one at a time; that is what makes concurrent requests safe without transactions, and it is the throughput ceiling of this backend. Enforces the primary key and nothing else. Does not serialize values. State lives in the process and dies with it.
 
-**Postgres store.** SQLAlchemy Core with asyncpg. `run_scope` opens a transaction at `SERIALIZABLE`; the session's loads and the flush use its connection; it commits on exit. A serialization failure, or a unique violation on `id`, aborts the run and the engine retries it from the seed with a fresh session, three attempts by default with jittered backoff. `get` raises `NotSupported`. `query` and `query_raw` run statements with bound parameters. Identifiers are always quoted, because `order` is a table name here.
+**Postgres store.** Built. SQLAlchemy Core with asyncpg. `run_scope` opens a transaction at `SERIALIZABLE` and holds its connection in a context variable; every store call inside the run uses it; it commits on exit. Calls outside a run use their own short transaction. A serialization failure, a deadlock, or a primary key violation on `id` raise `TransientError`, and the engine retries the run from the seed with a fresh session, three attempts with jittered backoff. `get` raises `NotSupported`. `query` and `query_raw` run statements with bound parameters and return exactly what the statement returns, with no `deleted_at` filter added; `uuid` values from raw statements are normalised to strings. One engine, so one connection pool, per running event loop, because asyncpg connections are loop-bound. Reactions writing raw SQL quote `"order"` themselves.
 
 ## 8. Run lifecycle
 
@@ -321,7 +321,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 1. Async reads and `query` on the interface, in-memory raising on `query`; shop and fixture apps updated.
 2. Snapshot-and-compare flush. Done.
 3. Field-to-column mapping and Alembic: `makemigration`, `migrate --check`, `--empty`; the shop app's first migration committed. Done.
-4. `PostgresStore` with `run_scope`, retry, `query`; the `pgserver` test harness; the shop suite running on both stores.
+4. `PostgresStore` with `run_scope`, retry, `query`; the `backend_builder_testing` pytest plugin with per-test databases; the shop suite on Postgres. Done.
 5. Settings and the store factory.
 
 ## 15. Later

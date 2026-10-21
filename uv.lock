@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 members = [
     "backend-builder",
     "backend-builder-monorepo",
+    "backend-builder-testing",
     "shop",
 ]
 
@@ -139,6 +140,7 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "backend-builder-testing" },
     { name = "httpx2" },
     { name = "pyright" },
     { name = "pytest" },
@@ -150,11 +152,29 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "backend-builder-testing", editable = "packages/backend-builder-testing" },
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "pyright", specifier = ">=1.1.414" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "ruff", specifier = ">=0.17.1" },
+]
+
+[[package]]
+name = "backend-builder-testing"
+version = "0.1.0"
+source = { editable = "packages/backend-builder-testing" }
+dependencies = [
+    { name = "backend-builder" },
+    { name = "pytest" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "backend-builder", editable = "packages/backend-builder" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "sqlalchemy", extras = ["asyncio"] },
 ]
 
 [[package]]

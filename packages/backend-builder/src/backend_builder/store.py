@@ -29,14 +29,24 @@ class NotSupported(Exception):
     """Raised when a read is asked of a store that has no native way to do it."""
 
 
+class TransientError(Exception):
+    """The run failed for a reason that a fresh attempt may not hit: a
+    serialization conflict, a deadlock. The engine retries the run."""
+
+
 class Store(ABC):
     """Where rows live between runs. Each backend implements this.
+
+    ``max_attempts`` is how many times the engine runs a run before giving up
+    on ``TransientError``. One means no retry.
 
     Reads are awaited because some backends do I/O. Each backend keeps its
     native reads native: ``get`` takes a Python predicate and exists only on
     the in-memory store; ``query`` takes a native statement and exists only
     on SQL stores. ``get_by_id``, ``create`` and ``update`` exist everywhere.
     """
+
+    max_attempts: int = 1
 
     async def get[E: Entity](
         self,
@@ -81,7 +91,7 @@ class Store(ABC):
         never load, mutate and flush the same row over each other."""
         yield
 
-    def ping(self) -> bool:
+    async def ping(self) -> bool:
         """Whether the backend is reachable. Used by the health endpoint."""
         return True
 
@@ -229,15 +239,21 @@ class Session:
         """Rows returned by a native statement on the backing store, merged
         into the working set. Returned in statement order; an instance already
         in the working set is returned in place of the freshly loaded row.
-        No deleted-row filtering: the statement decides."""
+        No deleted-row filtering: the statement decides.
+
+        Pending writes are flushed to the backing store first, so the
+        statement sees everything the run has done so far."""
         if self._backing is None:
             raise NotSupported("no backing store")
+        await self._write_pending()
         rows = await self._backing.query(entity, statement, **params)
         return [self._merge(entity, row) for row in rows]
 
     async def query_raw(self, statement: str, **params: Any) -> list[dict[str, Any]]:
+        """Untracked rows from a native statement, after flushing pending writes."""
         if self._backing is None:
             raise NotSupported("no backing store")
+        await self._write_pending()
         return await self._backing.query_raw(statement, **params)
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
@@ -270,8 +286,21 @@ class Session:
         that did not change produce no write."""
         if self._backing is None:
             return
-        inserted = updated = unchanged = 0
         logger.info("flush started reaction_id=%s", reaction_id)
+        inserted, updated, unchanged = await self._write_pending(reaction_id)
+        logger.info(
+            "flush finished reaction_id=%s inserted=%d updated=%d unchanged=%d",
+            reaction_id,
+            inserted,
+            updated,
+            unchanged,
+        )
+
+    async def _write_pending(self, reaction_id: str | None = None) -> tuple[int, int, int]:
+        """Insert created rows and update changed fields of loaded rows, then
+        treat every row as loaded with a fresh snapshot. Returns the counts."""
+        assert self._backing is not None
+        inserted = updated = unchanged = 0
         for entity, table in self._rows.items():
             for row in table.values():
                 if (entity, row.id) in self._created:
@@ -295,10 +324,4 @@ class Session:
             for row in table.values():
                 self._snapshots[(entity, row.id)] = _field_values(_clone(row))
         self._created.clear()
-        logger.info(
-            "flush finished reaction_id=%s inserted=%d updated=%d unchanged=%d",
-            reaction_id,
-            inserted,
-            updated,
-            unchanged,
-        )
+        return inserted, updated, unchanged

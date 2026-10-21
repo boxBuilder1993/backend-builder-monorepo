@@ -178,14 +178,18 @@ async def test_query_merges_into_the_working_set() -> None:
     assert first is not None
     first.balance = 99
 
+    # Pending writes are flushed before the statement runs, so the store
+    # already sees balance 99 for ``a`` and the query no longer matches it.
     rows = await session.query(Account, "irrelevant", balance=1)
-    assert {r.id for r in rows} == {a.id, b.id}
-    assert next(r for r in rows if r.id == a.id) is first
-    assert first.balance == 99
+    assert {r.id for r in rows} == {b.id}
+    assert (await store.get_by_id(Account, a.id)).balance == 99  # type: ignore[union-attr]
+
+    # A row the session already holds is returned as that same instance.
+    (same,) = await session.query(Account, "irrelevant", balance=99)
+    assert same is first
 
     again = await session.query(Account, "irrelevant", balance=1)
     assert [id(r) for r in again] == [id(r) for r in rows]
 
     await session.flush()
-    assert (await store.get_by_id(Account, a.id)).balance == 99  # type: ignore[union-attr]
     assert await session.query_raw("select 1", x=2) == [{"statement": "select 1", "x": 2}]

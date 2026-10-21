@@ -5,6 +5,7 @@ from backend_builder.engine import run
 from backend_builder.entity import Entity
 from backend_builder.http import Endpoint, create_app, serve
 from backend_builder.log import configure as configure_logging
+from backend_builder.postgres import PostgresStore
 from backend_builder.reaction import Reaction
 from backend_builder.store import (
     DuplicateKeyError,
@@ -13,6 +14,7 @@ from backend_builder.store import (
     NotSupported,
     Session,
     Store,
+    TransientError,
 )
 from backend_builder.trace import Span, Trace
 
@@ -26,11 +28,13 @@ __all__ = [
     "InMemoryStore",
     "MissingRowError",
     "NotSupported",
+    "PostgresStore",
     "Reaction",
     "Session",
     "Span",
     "Store",
     "Trace",
+    "TransientError",
     "migrations",
     "create_app",
     "run",
