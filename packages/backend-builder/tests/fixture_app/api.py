@@ -21,7 +21,7 @@ class MakeWidgetApi(Reaction):
         await ctx.trigger(MakeWidget, {"name": ctx.input["body"]["name"]})
 
 
-def widget_response(ctx: Context) -> WidgetOut:
+async def widget_response(ctx: Context) -> WidgetOut:
     return WidgetOut.model_validate(ctx.load("widget"))
 
 

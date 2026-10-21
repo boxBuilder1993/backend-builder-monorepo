@@ -23,8 +23,8 @@ class OrderTotal(Reaction):
     async def calculate(self, ctx: Context) -> None:
         seen.append((ctx.reaction_id, ctx.parent_reaction_id))
         order_id: str = ctx.input["order_id"]
-        lines = ctx.get(OrderLine, lambda line: line.order_id == order_id)
-        order = ctx.get_by_id(Order, order_id)
+        lines = await ctx.get(OrderLine, lambda line: line.order_id == order_id)
+        order = await ctx.get_by_id(Order, order_id)
         assert order is not None
         order.total = sum(line.price * line.qty for line in lines)
 
@@ -48,9 +48,9 @@ async def test_create_order_computes_total(store: InMemoryStore) -> None:
 
     await run(store, CreateOrder, request)
 
-    (order,) = store.get(Order)
+    (order,) = await store.get(Order)
     assert (order.user_id, order.total) == ("u7", 25)
-    assert [line.order_id for line in store.get(OrderLine)] == [order.id] * 2
+    assert [line.order_id for line in await store.get(OrderLine)] == [order.id] * 2
 
 
 async def test_every_invocation_has_a_reaction_id_and_parent(store: InMemoryStore) -> None:
@@ -63,44 +63,45 @@ async def test_every_invocation_has_a_reaction_id_and_parent(store: InMemoryStor
     assert child[0] != root.reaction_id
 
 
-def test_rows_are_returned_by_reference(store: InMemoryStore) -> None:
-    created = store.create(Order, user_id="u1")
+async def test_rows_are_returned_by_reference(store: InMemoryStore) -> None:
+    created = await store.create(Order, user_id="u1")
     created.total = 99
-    assert store.get(Order)[0] is created
-    assert store.get(Order)[0].total == 99
+    assert (await store.get(Order))[0] is created
+    assert (await store.get(Order))[0].total == 99
 
 
-def test_ids_are_unique_uuid_strings(store: InMemoryStore) -> None:
-    ids = {store.create(Order, user_id="u").id for _ in range(3)}
-    ids.add(store.create(OrderLine, order_id="o", price=1, qty=1).id)
+async def test_ids_are_unique_uuid_strings(store: InMemoryStore) -> None:
+    ids = {(await store.create(Order, user_id="u")).id for _ in range(3)}
+    ids.add((await store.create(OrderLine, order_id="o", price=1, qty=1)).id)
     assert len(ids) == 4
     assert all(len(i) == 36 for i in ids)
 
 
-def test_explicit_id_is_honoured_and_must_be_unique(store: InMemoryStore) -> None:
-    row = store.create(Order, id="order-1", user_id="u1")
+async def test_explicit_id_is_honoured_and_must_be_unique(store: InMemoryStore) -> None:
+    row = await store.create(Order, id="order-1", user_id="u1")
     assert row.id == "order-1"
     with pytest.raises(DuplicateKeyError):
-        store.create(Order, id="order-1", user_id="u2")
-    assert store.create(OrderLine, id="order-1", order_id="o", price=1, qty=1).id == "order-1"
+        await store.create(Order, id="order-1", user_id="u2")
+    line = await store.create(OrderLine, id="order-1", order_id="o", price=1, qty=1)
+    assert line.id == "order-1"
 
 
-def test_get_by_id(store: InMemoryStore) -> None:
-    row = store.create(Order, user_id="u1")
-    assert store.get_by_id(Order, row.id) is row
-    assert store.get_by_id(Order, "missing") is None
-    assert store.get_by_id(OrderLine, row.id) is None
+async def test_get_by_id(store: InMemoryStore) -> None:
+    row = await store.create(Order, user_id="u1")
+    assert await store.get_by_id(Order, row.id) is row
+    assert await store.get_by_id(Order, "missing") is None
+    assert await store.get_by_id(OrderLine, row.id) is None
 
 
-def test_system_fields_and_soft_delete(store: InMemoryStore) -> None:
-    row = store.create(Order, user_id="u1")
+async def test_system_fields_and_soft_delete(store: InMemoryStore) -> None:
+    row = await store.create(Order, user_id="u1")
     assert row.created_at.tzinfo is UTC
     assert row.deleted_at is None
     row.deleted_at = datetime.now(UTC)
-    assert store.get(Order) == []
-    assert store.get_by_id(Order, row.id) is None
-    assert store.get(Order, include_deleted=True) == [row]
-    assert store.get_by_id(Order, row.id, include_deleted=True) is row
+    assert await store.get(Order) == []
+    assert await store.get_by_id(Order, row.id) is None
+    assert await store.get(Order, include_deleted=True) == [row]
+    assert await store.get_by_id(Order, row.id, include_deleted=True) is row
 
 
 def test_registry_resolves_qualified_name() -> None:

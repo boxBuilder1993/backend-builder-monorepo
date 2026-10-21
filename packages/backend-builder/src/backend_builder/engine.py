@@ -32,7 +32,7 @@ async def run(
             with ctx.trace.span("run", ctx.reaction_id, None):
                 await invoke(reaction, ctx)
                 with ctx.trace.span("flush", ctx.reaction_id, None):
-                    session.flush(reaction_id=ctx.reaction_id)
+                    await session.flush(reaction_id=ctx.reaction_id)
     finally:
         ctx.trace.log(ctx.reaction_id)
     return ctx

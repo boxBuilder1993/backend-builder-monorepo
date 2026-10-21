@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import uuid4
@@ -58,9 +58,9 @@ class Endpoint:
     insensitive: ``x_tenant_id`` reads ``X-Tenant-Id``."""
     response: type[BaseModel] | None = None
     """Validates and documents what ``build`` returns."""
-    build: Callable[[Context], Any] | None = None
-    """Reads the root context after the run and returns the response body.
-    Absent means an empty object."""
+    build: Callable[[Context], Awaitable[Any]] | None = None
+    """Async; reads the root context after the run and returns the response
+    body. Absent means an empty object."""
 
     def __post_init__(self) -> None:
         names: set[str] = set(_PATH_PARAM.findall(self.path))
@@ -149,7 +149,7 @@ def _handler(store: Store, endpoint: Endpoint) -> Callable[..., Any]:
 
         ctx = await _run(store, endpoint.reaction, input)
         response.headers[REACTION_ID_HEADER] = ctx.reaction_id
-        return endpoint.build(ctx) if endpoint.build is not None else {}
+        return await endpoint.build(ctx) if endpoint.build is not None else {}
 
     kw = inspect.Parameter.KEYWORD_ONLY
     params: list[inspect.Parameter] = []

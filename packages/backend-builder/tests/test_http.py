@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -6,6 +7,15 @@ from backend_builder.http import REACTION_ID_HEADER
 from backend_builder.reaction import qualified_name
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
+
+
+def rows[E: Entity](store: InMemoryStore, entity: type[E], **kw: Any) -> list[E]:
+    return asyncio.run(store.get(entity, **kw))
+
+
+def row[E: Entity](store: InMemoryStore, entity: type[E], row_id: str) -> E | None:
+    return asyncio.run(store.get_by_id(entity, row_id))
+
 
 # --- entities ---------------------------------------------------------------
 
@@ -82,9 +92,9 @@ class LineResponse(BaseModel):
 
 class OrderTotal(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        order = ctx.get_by_id(Order, ctx.input["order_id"])
+        order = await ctx.get_by_id(Order, ctx.input["order_id"])
         assert order is not None
-        lines = ctx.get(OrderLine, lambda line: line.order_id == order.id)
+        lines = await ctx.get(OrderLine, lambda line: line.order_id == order.id)
         order.total = sum(line.price * line.qty for line in lines)
 
 
@@ -117,7 +127,7 @@ class CreateOrderApi(Reaction):
 class GetOrderApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         order_id = ctx.input["path"]["order_id"]
-        order = ctx.get_by_id(Order, order_id)
+        order = await ctx.get_by_id(Order, order_id)
         if order is None:
             raise LookupError(f"no order {order_id}")
         ctx.save("order", order)
@@ -127,7 +137,7 @@ class GetOrderApi(Reaction):
 class GetLineApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         path = ctx.input["path"]
-        lines = ctx.get(OrderLine, lambda line: line.order_id == path["order_id"])
+        lines = await ctx.get(OrderLine, lambda line: line.order_id == path["order_id"])
         ctx.save("line", lines[path["position"]])
         ctx.save("position", path["position"])
 
@@ -140,17 +150,17 @@ class Ping(Reaction):
 # --- builders -----------------------------------------------------------------
 
 
-def order_response(ctx: Context) -> OrderResponse:
+async def order_response(ctx: Context) -> OrderResponse:
     order: Order = ctx.load("order")
     lines: list[OrderLine] = []
     if ctx.load("include_lines"):
-        lines = ctx.get(OrderLine, lambda line: line.order_id == order.id)
+        lines = await ctx.get(OrderLine, lambda line: line.order_id == order.id)
     return OrderResponse(
         order=OrderOut.model_validate(order), lines=[LineOut.model_validate(line) for line in lines]
     )
 
 
-def line_response(ctx: Context) -> LineResponse:
+async def line_response(ctx: Context) -> LineResponse:
     return LineResponse(
         line=LineOut.model_validate(ctx.load("line")), position=ctx.load("position")
     )
@@ -212,7 +222,7 @@ def test_body_and_headers_reach_the_api_reaction_separately(
     assert data["order"]["total"] == 25
     assert sorted(line["price"] for line in data["lines"]) == [5, 10]
     assert len(res.headers[REACTION_ID_HEADER]) == 36
-    assert store.get_by_id(Order, data["order"]["id"]) is not None
+    assert row(store, Order, data["order"]["id"]) is not None
 
 
 def test_header_default_applies_when_absent(client: TestClient) -> None:
@@ -223,8 +233,8 @@ def test_header_default_applies_when_absent(client: TestClient) -> None:
 def test_path_and_query_reach_the_api_reaction_separately(
     client: TestClient, store: InMemoryStore
 ) -> None:
-    order = store.create(Order, user_id="u1", total=3)
-    store.create(OrderLine, order_id=order.id, price=3, qty=1)
+    order = asyncio.run(store.create(Order, user_id="u1", total=3))
+    asyncio.run(store.create(OrderLine, order_id=order.id, price=3, qty=1))
 
     without = client.get(f"/orders/{order.id}").json()
     with_lines = client.get(f"/orders/{order.id}", params={"include_lines": "true"}).json()
@@ -234,9 +244,9 @@ def test_path_and_query_reach_the_api_reaction_separately(
 
 
 def test_path_model_converts_types(client: TestClient, store: InMemoryStore) -> None:
-    order = store.create(Order, user_id="u1")
-    store.create(OrderLine, order_id=order.id, price=1, qty=1)
-    store.create(OrderLine, order_id=order.id, price=2, qty=1)
+    order = asyncio.run(store.create(Order, user_id="u1"))
+    asyncio.run(store.create(OrderLine, order_id=order.id, price=1, qty=1))
+    asyncio.run(store.create(OrderLine, order_id=order.id, price=2, qty=1))
 
     res = client.get(f"/orders/{order.id}/lines/1")
     assert res.status_code == 200, res.text
@@ -271,13 +281,13 @@ def test_run_failure_is_500_with_reaction_id_and_store_untouched(
     data = res.json()
     assert data["error"] == "LookupError" and "missing" in data["message"]
     assert data["reaction_id"] == res.headers[REACTION_ID_HEADER]
-    assert store.get(Order) == []
+    assert rows(store, Order) == []
 
 
 def test_generic_trigger_by_qualified_name(client: TestClient, store: InMemoryStore) -> None:
     res = client.post(f"/reactions/{qualified_name(Ping)}", json={"user_id": "via-generic"})
     assert res.status_code == 200 and res.json() == {}
-    assert [o.user_id for o in store.get(Order)] == ["via-generic"]
+    assert [o.user_id for o in rows(store, Order)] == ["via-generic"]
 
     assert client.post("/reactions/nowhere.Missing", json={}).status_code == 500
     assert client.post(f"/reactions/{qualified_name(Ping)}", json=[1]).status_code == 400

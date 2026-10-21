@@ -14,7 +14,7 @@ class SlowDeposit(Reaction):
     """Loads, waits, writes: the shape that loses updates without a run lock."""
 
     async def calculate(self, ctx: Context) -> None:
-        account = ctx.get_by_id(Account, ctx.input["account_id"])
+        account = await ctx.get_by_id(Account, ctx.input["account_id"])
         assert account is not None
         await asyncio.sleep(0.01)
         account.balance += ctx.input["amount"]
@@ -22,11 +22,11 @@ class SlowDeposit(Reaction):
 
 class CloseAccount(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        account = ctx.get_by_id(Account, ctx.input["account_id"])
+        account = await ctx.get_by_id(Account, ctx.input["account_id"])
         assert account is not None
         ctx.delete(account)
-        assert ctx.get_by_id(Account, account.id) is None
-        assert ctx.get_by_id(Account, account.id, include_deleted=True) is account
+        assert await ctx.get_by_id(Account, account.id) is None
+        assert await ctx.get_by_id(Account, account.id, include_deleted=True) is account
 
 
 class Explode(Reaction):
@@ -36,23 +36,23 @@ class Explode(Reaction):
 
 async def test_concurrent_runs_on_one_store_do_not_lose_updates() -> None:
     store = InMemoryStore()
-    account = store.create(Account, balance=0)
+    account = await store.create(Account, balance=0)
     inputs = [{"account_id": account.id, "amount": 1} for _ in range(10)]
 
     await asyncio.gather(*(run(store, SlowDeposit, i) for i in inputs))
 
-    after = store.get_by_id(Account, account.id)
+    after = await store.get_by_id(Account, account.id)
     assert after is not None and after.balance == 10
 
 
-async def test_delete_is_soft_and_flushes(caplog: pytest.LogCaptureFixture) -> None:
+async def test_delete_is_soft_and_flushes() -> None:
     store = InMemoryStore()
-    account = store.create(Account, balance=5)
+    account = await store.create(Account, balance=5)
 
     await run(store, CloseAccount, {"account_id": account.id})
 
-    assert store.get(Account) == []
-    gone = store.get_by_id(Account, account.id, include_deleted=True)
+    assert await store.get(Account) == []
+    gone = await store.get_by_id(Account, account.id, include_deleted=True)
     assert gone is not None and gone.deleted_at is not None
 
 
@@ -67,16 +67,13 @@ def test_health_endpoint() -> None:
 async def test_run_logs_a_summary_and_debug_span_tree(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.DEBUG, logger="backend_builder")
     store = InMemoryStore()
-    account = store.create(Account)
+    account = await store.create(Account)
     ctx = await run(store, SlowDeposit, {"account_id": account.id, "amount": 1})
 
     messages = [r.getMessage() for r in caplog.records]
     summary = next(m for m in messages if m.startswith("run finished"))
-    assert (
-        f"reaction_id={ctx.reaction_id}" in summary
-        and "spans=3" in summary
-        and "failed=none" in summary
-    )
+    assert f"reaction_id={ctx.reaction_id}" in summary
+    assert "spans=3" in summary and "failed=none" in summary
     spans = [m for m in messages if m.startswith("span ")]
     assert [m.split()[1] for m in spans] == ["run", "SlowDeposit", "flush"]
 
