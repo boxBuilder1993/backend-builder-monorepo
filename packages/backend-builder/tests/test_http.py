@@ -7,9 +7,12 @@ from backend_builder.reaction import qualified_name
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 
+# --- entities ---------------------------------------------------------------
+
 
 class Order(Entity):
     user_id: str
+    tenant: str = "default"
     total: int = 0
 
 
@@ -19,18 +22,34 @@ class OrderLine(Entity):
     qty: int
 
 
+# --- request and response models -------------------------------------------
+
+
 class LineIn(BaseModel):
     price: int
     qty: int
 
 
-class CreateOrderRequest(BaseModel):
+class CreateOrderBody(BaseModel):
     user_id: str
     lines: list[LineIn]
 
 
-class GetOrderRequest(BaseModel):
+class TenantHeaders(BaseModel):
+    x_tenant_id: str = "default"
+
+
+class OrderPath(BaseModel):
+    order_id: str
+
+
+class GetOrderQuery(BaseModel):
     include_lines: bool = False
+
+
+class LinePath(BaseModel):
+    order_id: str
+    position: int
 
 
 class LineOut(BaseModel):
@@ -44,12 +63,21 @@ class OrderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     user_id: str
+    tenant: str
     total: int
 
 
 class OrderResponse(BaseModel):
     order: OrderOut
     lines: list[LineOut]
+
+
+class LineResponse(BaseModel):
+    line: LineOut
+    position: int
+
+
+# --- domain reactions: never see HTTP shapes ----------------------------------
 
 
 class OrderTotal(Reaction):
@@ -62,26 +90,54 @@ class OrderTotal(Reaction):
 
 class CreateOrder(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        order = ctx.create(Order, user_id=ctx.input["user_id"])
+        order = ctx.create(Order, user_id=ctx.input["user_id"], tenant=ctx.input["tenant"])
         for line in ctx.input["lines"]:
             ctx.create(OrderLine, order_id=order.id, price=line["price"], qty=line["qty"])
         await ctx.trigger(OrderTotal, {"order_id": order.id})
         ctx.save("order", order)
+
+
+# --- API reactions: translate the structured input into domain inputs --------
+
+
+class CreateOrderApi(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        body = ctx.input["body"]
+        await ctx.trigger(
+            CreateOrder,
+            {
+                "user_id": body["user_id"],
+                "lines": body["lines"],
+                "tenant": ctx.input["headers"]["x_tenant_id"],
+            },
+        )
         ctx.save("include_lines", True)
 
 
-class GetOrder(Reaction):
+class GetOrderApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        order = ctx.get_by_id(Order, ctx.input["order_id"])
+        order_id = ctx.input["path"]["order_id"]
+        order = ctx.get_by_id(Order, order_id)
         if order is None:
-            raise LookupError(f"no order {ctx.input['order_id']}")
+            raise LookupError(f"no order {order_id}")
         ctx.save("order", order)
-        ctx.save("include_lines", ctx.input["include_lines"])
+        ctx.save("include_lines", ctx.input["query"]["include_lines"])
+
+
+class GetLineApi(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        path = ctx.input["path"]
+        lines = ctx.get(OrderLine, lambda line: line.order_id == path["order_id"])
+        ctx.save("line", lines[path["position"]])
+        ctx.save("position", path["position"])
 
 
 class Ping(Reaction):
     async def calculate(self, ctx: Context) -> None:
         ctx.create(Order, user_id=ctx.input.get("user_id", "ping"))
+
+
+# --- builders -----------------------------------------------------------------
 
 
 def order_response(ctx: Context) -> OrderResponse:
@@ -94,22 +150,38 @@ def order_response(ctx: Context) -> OrderResponse:
     )
 
 
+def line_response(ctx: Context) -> LineResponse:
+    return LineResponse(
+        line=LineOut.model_validate(ctx.load("line")), position=ctx.load("position")
+    )
+
+
 endpoints = [
     Endpoint(
         method="POST",
         path="/orders",
-        reaction=CreateOrder,
-        request=CreateOrderRequest,
+        reaction=CreateOrderApi,
+        body=CreateOrderBody,
+        headers=TenantHeaders,
         response=OrderResponse,
         build=order_response,
     ),
     Endpoint(
         method="GET",
         path="/orders/{order_id}",
-        reaction=GetOrder,
-        request=GetOrderRequest,
+        reaction=GetOrderApi,
+        path_model=OrderPath,
+        query=GetOrderQuery,
         response=OrderResponse,
         build=order_response,
+    ),
+    Endpoint(
+        method="GET",
+        path="/orders/{order_id}/lines/{position}",
+        reaction=GetLineApi,
+        path_model=LinePath,
+        response=LineResponse,
+        build=line_response,
     ),
 ]
 
@@ -124,22 +196,33 @@ def client(store: InMemoryStore) -> TestClient:
     return TestClient(create_app(store, endpoints), raise_server_exceptions=False)
 
 
-def test_post_creates_and_builds_response(client: TestClient, store: InMemoryStore) -> None:
+def test_body_and_headers_reach_the_api_reaction_separately(
+    client: TestClient, store: InMemoryStore
+) -> None:
     body: dict[str, Any] = {
         "user_id": "u7",
         "lines": [{"price": 10, "qty": 2}, {"price": 5, "qty": 1}],
     }
-    res = client.post("/orders", json=body)
+    res = client.post("/orders", json=body, headers={"X-Tenant-Id": "acme"})
 
     assert res.status_code == 200, res.text
     data = res.json()
-    assert data["order"]["user_id"] == "u7" and data["order"]["total"] == 25
+    assert data["order"]["user_id"] == "u7"
+    assert data["order"]["tenant"] == "acme"
+    assert data["order"]["total"] == 25
     assert sorted(line["price"] for line in data["lines"]) == [5, 10]
     assert len(res.headers[REACTION_ID_HEADER]) == 36
     assert store.get_by_id(Order, data["order"]["id"]) is not None
 
 
-def test_get_merges_path_and_query_into_input(client: TestClient, store: InMemoryStore) -> None:
+def test_header_default_applies_when_absent(client: TestClient) -> None:
+    res = client.post("/orders", json={"user_id": "u1", "lines": []})
+    assert res.json()["order"]["tenant"] == "default"
+
+
+def test_path_and_query_reach_the_api_reaction_separately(
+    client: TestClient, store: InMemoryStore
+) -> None:
     order = store.create(Order, user_id="u1", total=3)
     store.create(OrderLine, order_id=order.id, price=3, qty=1)
 
@@ -150,9 +233,33 @@ def test_get_merges_path_and_query_into_input(client: TestClient, store: InMemor
     assert len(with_lines["lines"]) == 1
 
 
-def test_validation_errors_are_422(client: TestClient) -> None:
+def test_path_model_converts_types(client: TestClient, store: InMemoryStore) -> None:
+    order = store.create(Order, user_id="u1")
+    store.create(OrderLine, order_id=order.id, price=1, qty=1)
+    store.create(OrderLine, order_id=order.id, price=2, qty=1)
+
+    res = client.get(f"/orders/{order.id}/lines/1")
+    assert res.status_code == 200, res.text
+    assert res.json()["position"] == 1 and res.json()["line"]["price"] == 2
+
+    res = client.get(f"/orders/{order.id}/lines/one")
+    assert res.status_code == 422
+    assert res.json()["detail"][0]["loc"] == ["path", "position"]
+
+
+def test_validation_errors_name_their_source(client: TestClient) -> None:
     res = client.post("/orders", json={"user_id": "u7"})
     assert res.status_code == 422
+    assert res.json()["detail"][0]["loc"] == ["body", "lines"]
+
+    res = client.get("/orders/x", params={"include_lines": "maybe"})
+    assert res.status_code == 422
+    assert res.json()["detail"][0]["loc"] == ["query", "include_lines"]
+
+
+def test_path_model_must_match_path_parameters() -> None:
+    with pytest.raises(ValueError, match="do not match"):
+        Endpoint(method="GET", path="/orders/{order_id}", reaction=Ping, path_model=LinePath)
 
 
 def test_run_failure_is_500_with_reaction_id_and_store_untouched(
@@ -181,10 +288,25 @@ def test_generic_can_be_disabled(store: InMemoryStore) -> None:
     assert client.post(f"/reactions/{qualified_name(Ping)}", json={}).status_code == 404
 
 
-def test_openapi_documents_request_and_response_models(client: TestClient) -> None:
+def test_openapi_documents_every_source(client: TestClient) -> None:
     schema = client.get("/openapi.json").json()
-    assert "/orders" in schema["paths"] and "/orders/{order_id}" in schema["paths"]
     components = schema["components"]["schemas"]
-    assert {"CreateOrderRequest", "OrderResponse", "OrderOut", "LineOut"} <= set(components)
-    get_params = {p["name"] for p in schema["paths"]["/orders/{order_id}"]["get"]["parameters"]}
-    assert get_params == {"order_id", "include_lines"}
+    assert {"CreateOrderBody", "OrderResponse", "OrderOut", "LineOut", "LineResponse"} <= set(
+        components
+    )
+
+    post = schema["paths"]["/orders"]["post"]
+    assert post["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "CreateOrderBody"
+    )
+    assert {(p["name"], p["in"]) for p in post["parameters"]} == {("x-tenant-id", "header")}
+
+    get = schema["paths"]["/orders/{order_id}"]["get"]
+    assert {(p["name"], p["in"]) for p in get["parameters"]} == {
+        ("order_id", "path"),
+        ("include_lines", "query"),
+    }
+
+    line = schema["paths"]["/orders/{order_id}/lines/{position}"]["get"]
+    position = next(p for p in line["parameters"] if p["name"] == "position")
+    assert position["schema"]["type"] == "integer"

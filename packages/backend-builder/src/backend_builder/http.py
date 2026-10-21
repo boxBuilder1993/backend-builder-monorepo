@@ -1,13 +1,19 @@
 """HTTP layer: endpoints that trigger reactions, on FastAPI.
 
-An ``Endpoint`` binds a method and path to a reaction. The request is
-validated against a Pydantic model, dumped to a dict and merged with the path
-parameters to form the reaction input. After the run, a builder reads the
-root context and returns the response, validated against the response model.
-Reactions never see HTTP shapes; builders never write.
+An ``Endpoint`` binds a method and path to a reaction. The request's four
+sources, path parameters, query string, body and headers, are each declared
+as their own Pydantic model, each optional on any method. FastAPI validates
+and documents every source as declared. The reaction input keeps them apart::
+
+    {"path": {...}, "query": {...}, "body": {...}, "headers": {...}}
+
+with only declared sources present. The endpoint's reaction is the API
+reaction: it reads that structure and builds the inputs of whatever domain
+reactions it triggers. After the run, ``build`` reads the root context and
+returns the response, validated against ``response``.
 
 A generic ``POST /reactions/{name}`` route triggers any registered reaction by
-qualified name with the JSON body as input and returns an empty object.
+qualified name with the JSON body as its input and returns an empty object.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import FastAPI, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -33,7 +39,6 @@ logger = get_logger(__name__)
 
 REACTION_ID_HEADER = "X-Reaction-Id"
 
-_BODY_METHODS = {"POST", "PUT", "PATCH"}
 _PATH_PARAM = re.compile(r"{(\w+)}")
 
 
@@ -42,14 +47,29 @@ class Endpoint:
     method: str
     path: str
     reaction: type[Reaction]
-    request: type[BaseModel] | None = None
-    """Validates the body (POST, PUT, PATCH) or the query string (other
-    methods). Its fields, plus path parameters, form the reaction input."""
+    """The API reaction. Receives the structured input and triggers domain
+    reactions with inputs it builds itself."""
+    path_model: type[BaseModel] | None = None
+    """One field per ``{name}`` in ``path``; types convert and validate."""
+    query: type[BaseModel] | None = None
+    body: type[BaseModel] | None = None
+    headers: type[BaseModel] | None = None
+    """Field names map to header names with underscores as hyphens, case
+    insensitive: ``x_tenant_id`` reads ``X-Tenant-Id``."""
     response: type[BaseModel] | None = None
     """Validates and documents what ``build`` returns."""
     build: Callable[[Context], Any] | None = None
     """Reads the root context after the run and returns the response body.
     Absent means an empty object."""
+
+    def __post_init__(self) -> None:
+        names: set[str] = set(_PATH_PARAM.findall(self.path))
+        declared: set[str] = set(self.path_model.model_fields) if self.path_model else set()
+        if self.path_model is not None and names != declared:
+            raise ValueError(
+                f"{self.method} {self.path}: path parameters {sorted(names)} "
+                f"do not match path_model fields {sorted(declared)}"
+            )
 
 
 class RunFailed(Exception):
@@ -96,31 +116,42 @@ def create_app(
 
 
 def _handler(store: Store, endpoint: Endpoint) -> Callable[..., Any]:
-    path_params = _PATH_PARAM.findall(endpoint.path)
-    takes_body = endpoint.method.upper() in _BODY_METHODS
+    path_names = _PATH_PARAM.findall(endpoint.path)
+    sources = {"query": endpoint.query, "body": endpoint.body, "headers": endpoint.headers}
 
     async def handler(**kwargs: Any) -> Any:
         response: Response = kwargs.pop("response")
-        model: BaseModel | None = kwargs.pop("request", None)
-        input: dict[str, Any] = {name: kwargs[name] for name in path_params}
-        if model is not None:
-            input.update(model.model_dump())
+        input: dict[str, Any] = {}
+        if endpoint.path_model is not None:
+            raw = {name: kwargs[name] for name in path_names}
+            input["path"] = endpoint.path_model.model_validate(raw).model_dump()
+        elif path_names:
+            input["path"] = {name: kwargs[name] for name in path_names}
+        for source in sources:
+            model: BaseModel | None = kwargs.get(source)
+            if model is not None:
+                input[source] = model.model_dump()
+
         ctx = await _run(store, endpoint.reaction, input)
         response.headers[REACTION_ID_HEADER] = ctx.reaction_id
         return endpoint.build(ctx) if endpoint.build is not None else {}
 
-    params = [
-        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=str)
-        for name in path_params
-    ]
-    if endpoint.request is not None:
-        annotation: Any = endpoint.request if takes_body else Annotated[endpoint.request, Query()]
+    kw = inspect.Parameter.KEYWORD_ONLY
+    params: list[inspect.Parameter] = []
+    for name in path_names:
+        annotation: Any = str
+        if endpoint.path_model is not None:
+            annotation = endpoint.path_model.model_fields[name].annotation or str
+        params.append(inspect.Parameter(name, kw, annotation=annotation))
+    if endpoint.query is not None:
+        params.append(inspect.Parameter("query", kw, annotation=Annotated[endpoint.query, Query()]))
+    if endpoint.body is not None:
+        params.append(inspect.Parameter("body", kw, annotation=endpoint.body))
+    if endpoint.headers is not None:
         params.append(
-            inspect.Parameter("request", inspect.Parameter.KEYWORD_ONLY, annotation=annotation)
+            inspect.Parameter("headers", kw, annotation=Annotated[endpoint.headers, Header()])
         )
-    params.append(
-        inspect.Parameter("response", inspect.Parameter.KEYWORD_ONLY, annotation=Response)
-    )
+    params.append(inspect.Parameter("response", kw, annotation=Response))
     handler.__signature__ = inspect.Signature(params)  # type: ignore[attr-defined]
     return handler
 
