@@ -9,16 +9,22 @@ from backend_builder.reaction import Reaction, invoke
 from backend_builder.store import Session, Store
 
 
-async def run(store: Store, reaction: type[Reaction], input: dict[str, Any]) -> Context:
+async def run(
+    store: Store,
+    reaction: type[Reaction],
+    input: dict[str, Any],
+    *,
+    reaction_id: str | None = None,
+) -> Context:
     """Run ``reaction`` as the seed of a new run against ``store``.
 
-    Opens a session over ``store``, runs the reaction in a root context with a
-    fresh ``reaction_id`` and no parent, and flushes the session on success.
-    Any exception propagates and the session is discarded, leaving ``store``
-    untouched. Returns the root context.
+    Opens a session over ``store``, runs the reaction in a root context with
+    ``reaction_id`` (fresh if not given) and no parent, and flushes the session
+    on success. Any exception propagates and the session is discarded, leaving
+    ``store`` untouched. Returns the root context.
     """
     session = Session(store)
-    ctx = Context(session, input)
+    ctx = Context(session, input, reaction_id=reaction_id)
     with ctx.trace.span("run", ctx.reaction_id, None):
         await invoke(reaction, ctx)
         with ctx.trace.span("flush", ctx.reaction_id, None):

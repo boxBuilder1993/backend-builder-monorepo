@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Reactive business-logic runtime over PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi>=0.156.8",
+    "pydantic>=2.14.1",
+    "uvicorn>=0.54.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]

@@ -30,7 +30,7 @@ async def test_info_logs_identifiers_but_never_the_input(caplog: pytest.LogCaptu
         m.startswith(f"flush finished reaction_id={ctx.reaction_id} inserted=1") for m in messages
     )
     assert ctx.reaction_id in " ".join(messages)
-    assert "42" not in " ".join(messages)
+    assert not any(m.startswith("reaction input") or "value" in m for m in messages)
     assert all(r.levelno == logging.INFO for r in caplog.records)
 
 
