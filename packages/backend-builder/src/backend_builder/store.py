@@ -125,6 +125,22 @@ class Session(InMemoryStore):
         self._backing = backing
         self._created: set[tuple[type[Entity], str]] = set()
         self._fully_loaded: set[type[Entity]] = set()
+        self._vars: dict[str, Any] = {}
+
+    def save(self, name: str, value: Any) -> None:
+        """Keep an arbitrary object under ``name`` for the rest of the run.
+
+        Shared by every reaction in the run and by whatever consumes the run
+        afterwards. Never flushed to the backing store.
+        """
+        self._vars[name] = value
+
+    def load(self, name: str) -> Any:
+        """The object saved under ``name``. Raises ``KeyError`` if none."""
+        return self._vars[name]
+
+    def has(self, name: str) -> bool:
+        return name in self._vars
 
     def get[E: Entity](
         self,
