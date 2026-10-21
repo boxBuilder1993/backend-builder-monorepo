@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from backend_builder.context import Context
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, invoke
 from backend_builder.store import Session, Store
+
+if TYPE_CHECKING:
+    from backend_builder.triggers import Trigger
 
 logger = get_logger(__name__)
 
@@ -25,6 +29,7 @@ async def run(
     reaction_id: str | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     outbox_row_id: str | None = None,
+    triggers: Sequence[Trigger] = (),
 ) -> Context:
     """Run ``reaction`` as the seed of a new run against ``store``.
 
@@ -40,12 +45,13 @@ async def run(
 
     ``outbox_row_id`` names the outbox row this run delivers; it is deleted
     inside the run's transaction after the flush, so the run's writes and
-    the row's removal commit together.
+    the row's removal commit together. ``triggers`` are the app's data-change
+    triggers, matched at flush.
     """
     attempts = max(1, max_attempts)
     reaction_id = reaction_id or str(uuid4())  # one id for the run, whatever the attempt count
     for attempt in range(1, attempts + 1):
-        session = Session(store)
+        session = Session(store, triggers=triggers)
         ctx = Context(session, input, reaction_id=reaction_id)
         try:
             async with store.run_scope():

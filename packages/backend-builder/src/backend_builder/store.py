@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import copy
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import fields
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend_builder.codec import to_jsonable
 from backend_builder.entity import Entity
 from backend_builder.log import get_logger
 from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
+from backend_builder.schema import persisted_fields
+
+if TYPE_CHECKING:
+    from backend_builder.triggers import Trigger
 
 logger = get_logger(__name__)
 
@@ -196,8 +200,9 @@ class Session:
     run. With no backing store the session is simply an in-memory store.
     """
 
-    def __init__(self, backing: Store | None = None) -> None:
+    def __init__(self, backing: Store | None = None, *, triggers: Sequence[Trigger] = ()) -> None:
         self._backing = backing
+        self._triggers = list(triggers)
         self._rows: dict[type[Entity], dict[str, Entity]] = {}
         self._created: set[tuple[type[Entity], str]] = set()
         self._snapshots: dict[tuple[type[Entity], str], dict[str, Any]] = {}
@@ -328,21 +333,36 @@ class Session:
         )
 
     async def _write_pending(self, reaction_id: str | None = None) -> tuple[int, int, int]:
-        """Insert created rows and update changed fields of loaded rows, then
-        treat every row as loaded with a fresh snapshot. Returns the counts."""
+        """Insert created rows and update changed fields of loaded rows, match
+        the app's data-change triggers against what was written, then treat
+        every row as loaded with a fresh snapshot. Returns the counts."""
+        from backend_builder.triggers import Change, match
+
         assert self._backing is not None
         inserted = updated = unchanged = 0
+        changes: list[Change] = []
         for entity, table in self._rows.items():
             for row in table.values():
                 if (entity, row.id) in self._created:
                     logger.debug("flush insert reaction_id=%s row=%r", reaction_id, row)
                     await self._backing.create(entity, **_field_values(_clone(row)))
                     inserted += 1
+                    changes.append(Change(entity=entity, id=row.id, kind="created"))
                     continue
                 changed = self.changes(row)
                 if not changed:
                     unchanged += 1
                     continue
+                snapshot = self._snapshots[(entity, row.id)]
+                if "deleted_at" in changed and snapshot["deleted_at"] is None and row.deleted_at:
+                    changes.append(Change(entity=entity, id=row.id, kind="deleted"))
+                else:
+                    persisted = {f.name for f in persisted_fields(entity)}
+                    names = tuple(n for n in changed if n in persisted)
+                    if names:
+                        changes.append(
+                            Change(entity=entity, id=row.id, kind="updated", changed=names)
+                        )
                 logger.debug(
                     "flush update reaction_id=%s entity=%s id=%s changes=%r",
                     reaction_id,
@@ -355,6 +375,8 @@ class Session:
             for row in table.values():
                 self._snapshots[(entity, row.id)] = _field_values(_clone(row))
         self._created.clear()
+        if self._triggers and changes:
+            self._deferred.extend(match(self._triggers, changes))
         if self._deferred:
             logger.debug("flush enqueue reaction_id=%s entries=%r", reaction_id, self._deferred)
             await self._backing.enqueue(self._deferred)

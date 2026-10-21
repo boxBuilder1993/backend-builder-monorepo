@@ -17,7 +17,8 @@ from uuid import uuid4
 from backend_builder.app import App
 from backend_builder.engine import run
 from backend_builder.log import get_logger
-from backend_builder.outbox import OutboxRow
+from backend_builder.outbox import OutboxRow, now
+from backend_builder.reaction import qualified_name
 from backend_builder.settings import Settings
 from backend_builder.store import Store
 
@@ -31,8 +32,20 @@ class Worker:
         self.settings = settings if settings is not None else Settings.from_env()
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:6]}"
 
+    async def seed_schedules(self) -> None:
+        """Ensure each schedule has its next occurrence enqueued. Idempotent:
+        the outbox's unique index on (reaction, scheduled_for) makes a second
+        seed of the same occurrence a no-op, so any number of workers may
+        call this at any time."""
+        moment = now()
+        entries = [s.entry(s.next_after(moment)) for s in self.app.schedules]
+        if entries:
+            await self.store.enqueue(entries)
+
     async def run_once(self) -> int:
-        """Claim one batch and deliver it. Returns how many rows were claimed."""
+        """Seed schedules, claim one batch and deliver it. Returns how many
+        rows were claimed."""
+        await self.seed_schedules()
         rows = await self.store.claim(
             self.settings.outbox_batch, self.worker_id, self.settings.outbox_lease_seconds
         )
@@ -63,6 +76,14 @@ class Worker:
             if claimed == 0:
                 await asyncio.sleep(self.settings.outbox_poll_seconds)
 
+    async def _enqueue_next(self, row: OutboxRow) -> None:
+        """After a scheduled delivery, enqueue the occurrence after it. The
+        unique index makes this safe if seeding already did."""
+        assert row.scheduled_for is not None
+        for schedule in self.app.schedules:
+            if qualified_name(schedule.reaction) == row.reaction:
+                await self.store.enqueue([schedule.entry(schedule.next_after(row.scheduled_for))])
+
     async def _deliver(self, row: OutboxRow) -> None:
         try:
             reaction = self.app.resolve(row.reaction)
@@ -77,8 +98,11 @@ class Worker:
                 row.input,
                 max_attempts=self.app.max_attempts,
                 outbox_row_id=row.id,
+                triggers=self.app.triggers,
             )
             logger.info("worker delivered row=%s reaction=%s", row.id, reaction.__name__)
+            if row.scheduled_for is not None:
+                await self._enqueue_next(row)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             await self.store.release(row.id, error, self.settings.outbox_max_attempts)

@@ -19,10 +19,12 @@ from backend_builder.store import (
     TransientError,
 )
 from backend_builder.trace import Span, Trace
+from backend_builder.triggers import Change, OnChange, OnCreate, OnDelete, OnSchedule, TriggerError
 from backend_builder.worker import Worker
 
 __all__ = [
     "App",
+    "Change",
     "Context",
     "configure_logging",
     "DuplicateKeyError",
@@ -31,6 +33,10 @@ __all__ = [
     "InMemoryStore",
     "MissingRowError",
     "NotSupported",
+    "OnChange",
+    "OnCreate",
+    "OnDelete",
+    "OnSchedule",
     "OutboxEntry",
     "OutboxRow",
     "OutboxStats",
@@ -44,6 +50,7 @@ __all__ = [
     "Store",
     "Trace",
     "TransientError",
+    "TriggerError",
     "Worker",
     "migrations",
     "create_app",

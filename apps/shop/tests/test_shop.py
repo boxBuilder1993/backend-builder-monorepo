@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from backend_builder import PostgresStore, migrations
+from backend_builder import PostgresStore, Worker, migrations
 from httpx2 import ASGITransport, AsyncClient
 from shop import app
 from shop.entities import Order, OrderLine
@@ -29,13 +29,20 @@ def test_app_scope() -> None:
         "GetOrderApi",
     }
     assert [e.path for e in app.endpoints] == ["/orders", "/orders/{order_id}"]
+    assert [t.split(" -> ")[0] for t in app.describe()["triggers"]] == [
+        "OnCreate(OrderLine)",
+        "OnChange(OrderLine, ['price', 'qty'])",
+        "OnDelete(OrderLine)",
+    ]
 
 
 def test_migrations_match_entities(migrated_database_url: str) -> None:
     migrations.check(app, migrated_database_url)
 
 
-async def test_create_then_get(client: AsyncClient, store: PostgresStore) -> None:
+async def test_create_then_total_arrives_through_the_worker(
+    client: AsyncClient, store: PostgresStore, worker: Worker
+) -> None:
     body: dict[str, Any] = {
         "user_id": "u7",
         "lines": [{"price": 10, "qty": 2}, {"price": 5, "qty": 1}],
@@ -43,12 +50,16 @@ async def test_create_then_get(client: AsyncClient, store: PostgresStore) -> Non
     created = await client.post("/orders", json=body, headers={"X-Tenant-Id": "acme"})
     assert created.status_code == 200, created.text
     order = created.json()["order"]
-    assert (order["tenant"], order["total"]) == ("acme", 25)
+    assert (order["tenant"], order["total"]) == ("acme", 0)  # total is computed after commit
     assert await count(store, "order_line") == 2
+    assert await count(store, "_outbox") == 2  # one row per created line
+
+    assert await worker.run_once() == 2
+    assert await count(store, "_outbox") == 0
 
     fetched = await client.get(f"/orders/{order['id']}", params={"include_lines": "true"})
     assert fetched.status_code == 200, fetched.text
-    assert fetched.json()["order"] == order
+    assert fetched.json()["order"]["total"] == 25
     assert len(fetched.json()["lines"]) == 2
 
     stored = await store.get_by_id(Order, order["id"])

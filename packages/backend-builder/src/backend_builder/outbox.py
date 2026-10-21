@@ -34,7 +34,15 @@ def outbox_table(metadata: sa.MetaData) -> sa.Table:
         sa.Column("claimed_by", sa.Text(), nullable=True),
         sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("dead_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("scheduled_for", sa.DateTime(timezone=True), nullable=True),
         sa.Index("_outbox_claim_idx", "available_at", postgresql_where=sa.text("dead_at IS NULL")),
+        sa.Index(
+            "_outbox_schedule_idx",
+            "reaction",
+            "scheduled_for",
+            unique=True,
+            postgresql_where=sa.text("scheduled_for IS NOT NULL"),
+        ),
     )
 
 
@@ -48,6 +56,9 @@ class OutboxEntry:
     """JSON-encodable."""
     available_at: datetime | None = None
     """Not before this time; ``None`` means as soon as possible."""
+    scheduled_for: datetime | None = None
+    """Set for rows produced by a schedule. Unique per reaction, so two
+    workers seeding the same occurrence write one row."""
     id: str = field(default_factory=lambda: str(uuid4()))
 
 
@@ -61,6 +72,7 @@ class OutboxRow:
     attempts: int
     available_at: datetime
     created_at: datetime
+    scheduled_for: datetime | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
