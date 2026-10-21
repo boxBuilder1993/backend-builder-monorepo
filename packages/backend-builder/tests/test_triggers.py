@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from backend_builder import (
@@ -14,6 +14,7 @@ from backend_builder import (
     OnSchedule,
     PostgresStore,
     Reaction,
+    Scheduler,
     Settings,
     TriggerError,
     Worker,
@@ -212,26 +213,56 @@ async def test_failed_run_enqueues_nothing(store: PostgresStore) -> None:
 # --- schedules, through the worker ------------------------------------------------------------
 
 
-async def test_schedule_seeds_once_delivers_and_reenqueues(store: PostgresStore) -> None:
+async def test_scheduler_seeds_once_and_worker_delivers(store: PostgresStore) -> None:
     app = App(
         package="fixture_app",
         include=[Account, Tick],
         triggers=[OnSchedule("* * * * *", Tick)],
         max_attempts=1,
     )
+    scheduler = Scheduler(app, store, Settings())
     worker = Worker(app, store, Settings(outbox_batch=5))
 
-    assert await worker.run_once() == 0  # seeded, nothing due yet
-    assert await worker.run_once() == 0  # seeding again adds nothing
+    assert await scheduler.tick() == 1
+    assert await scheduler.tick() == 0  # last seeded occurrence is still ahead
     rows = await _outbox(store)
     assert len(rows) == 1 and rows[0]["scheduled_for"] is not None
     first: datetime = rows[0]["scheduled_for"]  # type: ignore[assignment]
     assert first > datetime.now(UTC) and first.second == 0
+    record = await store.query_raw("select reaction, cron, last_scheduled_for from _schedule")
+    assert record == [
+        {"reaction": qualified_name(Tick), "cron": "* * * * *", "last_scheduled_for": first}
+    ]
 
     await store.query_raw("update _outbox set available_at = now() returning id")
     assert await worker.run_once() == 1
-
     ticks = await store.query(Account, "select * from account")
     assert [t.owner for t in ticks] == [f"tick {first.isoformat()}"]
-    rows = await _outbox(store)
-    assert len(rows) == 1 and rows[0]["scheduled_for"] == first + timedelta(minutes=1)
+
+    # The worker does not re-seed; the scheduler does, once the seeded time has passed.
+    assert await _outbox(store) == []
+    assert await scheduler.tick() == 0
+    await store.query_raw(
+        "update _schedule set last_scheduled_for = now() - interval '1 minute' returning reaction"
+    )
+    assert await scheduler.tick() == 1
+    (nxt,) = await _outbox(store)
+    later: datetime = nxt["scheduled_for"]  # type: ignore[assignment]
+    assert later > datetime.now(UTC)
+
+
+async def test_scheduler_reseeds_when_the_cron_changes(store: PostgresStore) -> None:
+    app = App(
+        package="fixture_app",
+        include=[Account, Tick],
+        triggers=[OnSchedule("* * * * *", Tick)],
+    )
+    assert await Scheduler(app, store, Settings()).tick() == 1
+    changed = App(
+        package="fixture_app",
+        include=[Account, Tick],
+        triggers=[OnSchedule("*/5 * * * *", Tick)],
+    )
+    assert await Scheduler(changed, store, Settings()).tick() == 1
+    record = await store.query_raw("select cron from _schedule")
+    assert record == [{"cron": "*/5 * * * *"}]

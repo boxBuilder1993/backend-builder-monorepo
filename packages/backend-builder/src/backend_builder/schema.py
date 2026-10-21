@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as pg
 
 from backend_builder.entity import Entity
-from backend_builder.outbox import outbox_table
+from backend_builder.outbox import outbox_table, schedule_table
 
 
 class SchemaError(Exception):
@@ -111,4 +111,5 @@ def build_metadata(entities: Iterable[type[Entity]]) -> sa.MetaData:
     for entity in entities:
         table(entity, metadata)
     outbox_table(metadata)
+    schedule_table(metadata)
     return metadata

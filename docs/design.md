@@ -225,7 +225,8 @@ An app is any importable package. The monorepo keeps apps under `apps/`, but the
 | `serve <package> [--host --port --reload --log-level]` | the HTTP process |
 | `trigger <package> <reaction> --input <json>` | one reaction against a fresh store from the app's factory |
 | `graph <package>` | prints entities, reactions, endpoints, triggers |
-| `worker <package> [--once]` | delivers outbox rows and keeps schedules seeded |
+| `worker <package> [--once]` | delivers outbox rows |
+| `scheduler <package> [--once]` | keeps each schedule's next occurrence in the outbox |
 | `outbox <package>` | prints pending, claimed and dead counts |
 | `makemigration <package> [-m] [--empty] [--check] [--merge]` | decided, section 13 |
 | `migrate <package>` | decided, section 13 |
@@ -255,7 +256,7 @@ Each source is optional on any method. FastAPI validates and documents each one 
 
 **Builders** are async functions that run after the run, read the root context, and return the response, validated against the response model. They read `ctx.load`, `ctx.get_by_id` and the rest; they do not write. A reaction that produced something for the response saves it under a name; the builder loads it.
 
-**Generic route.** `POST /reactions/{qualified_name}` triggers any of the app's reactions with the JSON body as input and returns `{}`. Off with `generic=False`.
+**Generic route.** `POST /reactions/{qualified_name}` triggers any of the app's reactions with the JSON body as input and returns `{}`. A name that is not one of the app's reactions is a 404. Off with `generic=False`.
 
 **Responses** carry `X-Reaction-Id`. A run failure is a 500 with the exception type, message and reaction id; the store is untouched. Nothing about the run's internals is returned; that goes to logs.
 
@@ -336,7 +337,7 @@ Each of these was designed in the earlier draft and is parked, with what has to 
 - **Deferred execution.** Built; see section 16.
 - **Data-change triggers and schedules.** Built; see section 16.
 - **Timeouts and concurrent triggers.** A task group per context and a per-trigger timeout.
-- **Docker and Kubernetes.** Per [infrastructure.md](infrastructure.md), after settings.
+- **Kubernetes.** Per [infrastructure.md](infrastructure.md). Docker is built; see section 17.
 
 ## 16. Deferred execution
 
@@ -374,11 +375,21 @@ triggers = [
 
 Declarations are validated when the `App` is built: fields must exist on the entity, and the entity and reaction must belong to the app. An app that declares triggers refuses the in-memory store, since it has no outbox and they would silently never fire.
 
-**Schedules.** `OnSchedule("0 3 * * *", NightlyRollup)` is declared alongside the others. The outbox carries time, so no scheduler process exists: the worker keeps exactly one pending row per schedule at its next occurrence, seeding on every poll with an insert that the unique index on `(reaction, scheduled_for)` turns into a no-op when the row is already there, so any number of workers may seed. When a scheduled row is delivered, the worker enqueues the occurrence after it. The reaction's input is `{"scheduled_for": "<ISO timestamp>"}`. A failed scheduled run follows the ordinary release and dead path, and the next occurrence is already queued, so one failure does not stop the schedule.
+**Schedules.** `OnSchedule("0 3 * * *", NightlyRollup)` is declared alongside the others. The outbox carries time, so a scheduled occurrence is an outbox row with `available_at` and `scheduled_for` set to that time, and the worker delivers it like any row; the worker knows nothing about schedules. A separate process, `backend-builder scheduler <app>`, keeps the rows coming: on every tick, `BACKEND_BUILDER_SCHEDULER_TICK_SECONDS` (default 15, which must stay under cron's one-minute granularity), it reads each schedule's `last_scheduled_for` from the `_schedule` system table under a row lock and, if that time has passed or the cron expression changed, enqueues the next occurrence after now and advances the record. The unique index on `(reaction, scheduled_for)` makes this safe for any number of schedulers and across restarts. Occurrences that fall while no scheduler runs are skipped, as cron does. The reaction's input is `{"scheduled_for": "<ISO timestamp>"}`. A failed scheduled run follows the ordinary release and dead path and does not stop the schedule.
 
 **The eight ways a reaction runs.** Endpoint, generic endpoint or CLI, immediate trigger from a reaction, deferred trigger from a reaction, `OnCreate`, `OnChange`, `OnDelete`, `OnSchedule`. Every one ends in the same `run` with the app's retry policy and the app's triggers, so a deferred or scheduled reaction can trigger immediately, defer further work, or cause more data-change rows exactly as a request-driven one can. The reaction never knows which started it.
 
-## 17. Decisions
+## 17. The image, the stack and the end-to-end suite
+
+Built.
+
+**One image per app.** The `Dockerfile` builds `backend-builder-<app>` from the lock file with `uv`, third-party dependencies as a cached layer, the workspace sources on top, a non-root user, and the `backend-builder` CLI as the entrypoint. The process is the command: `serve`, `worker`, `scheduler`, `migrate`.
+
+**The stack.** `compose.yaml` has a `shop` profile with `migrate` as a one-shot service, then `api`, `worker` and `scheduler` from the same image, each depending on `migrate` having completed, all pointed at the `postgres` service with `RUNTIME_ENV=prod`. `docker compose --profile shop up --build` is the whole system.
+
+**The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
+
+## 18. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 

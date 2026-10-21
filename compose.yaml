@@ -1,5 +1,26 @@
-# Local services. `docker compose up -d` starts Postgres for tests and
-# development; the test harness creates and drops a database per test on it.
+# Local services.
+#
+#   docker compose up -d                      Postgres only, for tests and `backend-builder serve`
+#   docker compose --profile shop up --build  the whole shop: migrate, api, worker, scheduler
+#
+# The test harness creates and drops a database per test on the Postgres
+# service. The shop profile is what the end-to-end suite brings up.
+
+x-shop: &shop
+  build:
+    context: .
+    args:
+      APP: shop
+  image: backend-builder-shop:local
+  profiles: [shop]
+  environment:
+    RUNTIME_ENV: ${RUNTIME_ENV:-prod}
+    BACKEND_BUILDER_DATABASE_URL: postgresql://backend_builder:backend_builder@postgres:5432/backend_builder
+    BACKEND_BUILDER_LOG_LEVEL: ${BACKEND_BUILDER_LOG_LEVEL:-INFO}
+    BACKEND_BUILDER_OUTBOX_POLL_SECONDS: ${BACKEND_BUILDER_OUTBOX_POLL_SECONDS:-1}
+    BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS: ${BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS:-5}
+    BACKEND_BUILDER_SCHEDULER_TICK_SECONDS: ${BACKEND_BUILDER_SCHEDULER_TICK_SECONDS:-15}
+
 services:
   postgres:
     image: postgres:17
@@ -16,6 +37,42 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
+
+  migrate:
+    <<: *shop
+    command: ["migrate", "shop"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *shop
+    command: ["serve", "shop", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  worker:
+    <<: *shop
+    command: ["worker", "shop"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *shop
+    command: ["scheduler", "shop"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres:

@@ -25,14 +25,25 @@ def test_app_scope() -> None:
     assert {r.__name__ for r in app.reactions} == {
         "OrderTotal",
         "CreateOrder",
+        "UpdateLine",
+        "DeleteLine",
+        "ExpireUnpaidOrders",
         "CreateOrderApi",
         "GetOrderApi",
+        "UpdateLineApi",
+        "DeleteLineApi",
     }
-    assert [e.path for e in app.endpoints] == ["/orders", "/orders/{order_id}"]
+    assert [f"{e.method} {e.path}" for e in app.endpoints] == [
+        "POST /orders",
+        "GET /orders/{order_id}",
+        "PATCH /orders/{order_id}/lines/{line_id}",
+        "DELETE /orders/{order_id}/lines/{line_id}",
+    ]
     assert [t.split(" -> ")[0] for t in app.describe()["triggers"]] == [
         "OnCreate(OrderLine)",
         "OnChange(OrderLine, ['price', 'qty'])",
         "OnDelete(OrderLine)",
+        "OnSchedule('* * * * *')",
     ]
 
 

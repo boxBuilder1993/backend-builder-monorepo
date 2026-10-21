@@ -185,6 +185,26 @@ def worker(package: str, once: bool = False, log_level: str | None = None) -> No
 
 
 @cli.command()
+def scheduler(package: str, once: bool = False, log_level: str | None = None) -> None:
+    """Keep each schedule's next occurrence in the outbox. Ticks forever unless --once."""
+    from backend_builder.scheduler import Scheduler
+
+    current = settings()
+    configure((log_level or current.log_level).upper())
+    app = load_app(package)
+    store = app.check_store(app.create_store())
+    scheduler = Scheduler(app, store, current)
+    if once:
+        seeded = asyncio.run(scheduler.tick())
+        typer.echo(f"seeded={seeded}")
+        return
+    try:
+        asyncio.run(scheduler.run_forever())
+    except KeyboardInterrupt:
+        pass
+
+
+@cli.command()
 def outbox(package: str) -> None:
     """Print outbox depth: pending, claimed and dead rows, and the oldest pending."""
     app = load_app(package)

@@ -16,7 +16,7 @@ import uuid
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
@@ -28,9 +28,19 @@ from backend_builder.codec import EncodeError, from_jsonable, to_jsonable
 from backend_builder.entity import Entity
 from backend_builder.log import get_logger
 from backend_builder.migrations import async_url
-from backend_builder.outbox import OUTBOX_TABLE, OutboxEntry, OutboxRow, OutboxStats, now
+from backend_builder.outbox import (
+    OUTBOX_TABLE,
+    SCHEDULE_TABLE,
+    OutboxEntry,
+    OutboxRow,
+    OutboxStats,
+    now,
+)
 from backend_builder.schema import build_metadata, persisted_fields, table_name
 from backend_builder.store import DuplicateKeyError, MissingRowError, Store, TransientError
+
+if typing.TYPE_CHECKING:
+    from backend_builder.triggers import OnSchedule
 
 logger = get_logger(__name__)
 
@@ -313,6 +323,51 @@ class PostgresStore(Store):
             dead=int(dead_count),
             oldest_pending=oldest,
         )
+
+    async def seed_schedule(self, schedule: OnSchedule, moment: datetime) -> bool:
+        from backend_builder.reaction import qualified_name
+
+        name = qualified_name(schedule.reaction)
+        table = self.metadata.tables[SCHEDULE_TABLE]
+        async with self.engine.begin() as connection:
+            upsert = pg.insert(table).values(
+                reaction=name, cron=schedule.cron, last_scheduled_for=None, updated_at=moment
+            )
+            await connection.execute(upsert.on_conflict_do_nothing(index_elements=["reaction"]))
+            row = (
+                await connection.execute(
+                    sa.select(table.c.cron, table.c.last_scheduled_for)
+                    .where(table.c.reaction == name)
+                    .with_for_update()
+                )
+            ).one()
+            last: datetime | None = row.last_scheduled_for
+            cron_changed = row.cron != schedule.cron
+            if last is not None and last >= moment and not cron_changed:
+                return False
+            occurrence = schedule.next_after(moment)
+            entry = schedule.entry(occurrence)
+            await connection.execute(
+                pg.insert(self._outbox)
+                .values(
+                    id=entry.id,
+                    reaction=entry.reaction,
+                    input=entry.input,
+                    created_at=moment,
+                    available_at=occurrence,
+                    scheduled_for=occurrence,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["reaction", "scheduled_for"],
+                    index_where=sa.text("scheduled_for IS NOT NULL"),
+                )
+            )
+            await connection.execute(
+                sa.update(table)
+                .where(table.c.reaction == name)
+                .values(cron=schedule.cron, last_scheduled_for=occurrence, updated_at=moment)
+            )
+        return True
 
     async def update(self, entity: type[Entity], row_id: str, changes: dict[str, Any]) -> None:
         if not changes:
