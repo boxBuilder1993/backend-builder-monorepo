@@ -109,10 +109,12 @@ Every instance has an `id` of type `Key`: a resolved integer or a pending marker
 ```python
 class order_total(Reaction):
     async def calculate(ctx):
-        changes = ctx.input                                   # list of Change(entity, id, before, after)
+        changes = ctx.input  # list of Change(entity, id, before, after)
         order_ids = {c.after["order_id"] for c in changes}
         orders = await ctx[Order].many(order_ids)
-        await ctx.load("select 'order_line', id, '*' from order_line where order_id = any(:ids)", ids=order_ids)
+        await ctx.load(
+            "select 'order_line', id, '*' from order_line where order_id = any(:ids)", ids=order_ids
+        )
         lines = ctx[OrderLine].loaded()
         for order in orders:
             order.total = sum(l.price * l.qty for l in lines.filter(order_id=order.id))
@@ -319,14 +321,17 @@ Foreign keys only where declared, always `DEFERRABLE INITIALLY DEFERRED`. Indexe
 class User(Entity):
     email: str
 
+
 class Order(Entity):
     user_id: int
     total: Decimal = Numeric(12, 2)
+
 
 class OrderLine(Entity):
     order_id: int = Field(foreign_key=Order)
     price: Decimal = Numeric(12, 2)
     qty: int
+
 
 class CreateOrder(Entity, api=True):
     user_id: int
@@ -334,11 +339,13 @@ class CreateOrder(Entity, api=True):
     order: Order | None = Field(persist=False, default=None)
     reaction = create_order
 
+
 class GetOrder(Entity, api=True):
     order_id: int
     order: Order | None = Field(persist=False, default=None)
     lines: list[OrderLine] = Field(persist=False, default_factory=list)
     reaction = get_order
+
 
 consumers = [
     OnCreate(User, email_unique),
@@ -360,25 +367,33 @@ class create_order(Reaction):
             ctx.new(OrderLine, order_id=order.id, price=l["price"], qty=l["qty"])
         req.order = order
 
+
 class order_total(Reaction):
     async def calculate(ctx):
         order_ids = {c.after["order_id"] for c in ctx.input}
         orders = await ctx[Order].many(order_ids)
-        await ctx.load("select 'order_line', id, '*' from order_line where order_id = any(:ids)", ids=order_ids)
+        await ctx.load(
+            "select 'order_line', id, '*' from order_line where order_id = any(:ids)", ids=order_ids
+        )
         lines = ctx[OrderLine].loaded()
         for order in orders:
             order.total = sum(l.price * l.qty for l in lines.filter(order_id=order.id))
 
+
 class email_unique(Reaction):
     async def calculate(ctx):
         ids = [c.id for c in ctx.input]
-        rows = await ctx.query("""
+        rows = await ctx.query(
+            """
             select u.email from "user" u
             join "user" o on o.email = u.email and o.id <> u.id
             where u.id = any(:ids)
-        """, ids=ids)
+        """,
+            ids=ids,
+        )
         if rows:
             raise ValueError(f"email {rows[0].email} already in use")
+
 
 class notify_total_changed(Reaction):
     async def calculate(ctx):
@@ -386,11 +401,14 @@ class notify_total_changed(Reaction):
             order = await ctx[Order].get(c.id)
             send_email(order.user_id, before=c.before["total"], after=c.after["total"])
 
+
 class get_order(Reaction):
     async def calculate(ctx):
         req = ctx.input
         req.order = await ctx[Order].get(req.order_id)
-        await ctx.load("select 'order_line', id, '*' from order_line where order_id = :id", id=req.order_id)
+        await ctx.load(
+            "select 'order_line', id, '*' from order_line where order_id = :id", id=req.order_id
+        )
         req.lines = ctx[OrderLine].loaded()
 ```
 
