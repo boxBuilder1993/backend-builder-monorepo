@@ -16,7 +16,7 @@ class Context:
     """An input plus a store. One is built per reaction invocation; all
     invocations in a run share the same store."""
 
-    def __init__(self, store: Store, input: Any) -> None:
+    def __init__(self, store: Store, input: dict[str, Any]) -> None:
         self.store = store
         self.input = input
 
@@ -37,6 +37,6 @@ class Context:
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         return self.store.create(entity, **fields)
 
-    async def trigger(self, reaction: type[Reaction], input: Any) -> None:
+    async def trigger(self, reaction: type[Reaction], input: dict[str, Any]) -> None:
         """Run ``reaction`` now, against this store, with ``input``."""
         await reaction().calculate(Context(self.store, input))

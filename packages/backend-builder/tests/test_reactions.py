@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 from backend_builder import Context, DuplicateKeyError, Entity, InMemoryStore, Reaction
@@ -19,7 +18,7 @@ class OrderLine(Entity):
 
 class OrderTotal(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        order_id: str = ctx.input
+        order_id: str = ctx.input["order_id"]
         lines = ctx.get(OrderLine, lambda line: line.order_id == order_id)
         order = ctx.get_by_id(Order, order_id)
         assert order is not None
@@ -28,11 +27,10 @@ class OrderTotal(Reaction):
 
 class CreateOrder(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        request: dict[str, Any] = ctx.input
-        order = ctx.create(Order, user_id=request["user_id"])
-        for line in request["lines"]:
+        order = ctx.create(Order, user_id=ctx.input["user_id"])
+        for line in ctx.input["lines"]:
             ctx.create(OrderLine, order_id=order.id, price=line["price"], qty=line["qty"])
-        await ctx.trigger(OrderTotal, order.id)
+        await ctx.trigger(OrderTotal, {"order_id": order.id})
 
 
 @pytest.fixture
