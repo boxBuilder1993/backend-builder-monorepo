@@ -18,12 +18,22 @@ class Store(ABC):
     and are always returned by reference."""
 
     @abstractmethod
-    def get[E: Entity](self, entity: type[E], where: Callable[[E], bool] | None = None) -> list[E]:
-        """Live rows of ``entity``, optionally filtered."""
+    def get[E: Entity](
+        self,
+        entity: type[E],
+        where: Callable[[E], bool] | None = None,
+        *,
+        include_deleted: bool = False,
+    ) -> list[E]:
+        """Rows of ``entity``, optionally filtered. Soft-deleted rows are
+        excluded unless ``include_deleted`` is set."""
 
     @abstractmethod
-    def get_by_id[E: Entity](self, entity: type[E], row_id: str) -> E | None:
-        """The live row of ``entity`` with this ``id``, or ``None``."""
+    def get_by_id[E: Entity](
+        self, entity: type[E], row_id: str, *, include_deleted: bool = False
+    ) -> E | None:
+        """The row of ``entity`` with this ``id``, or ``None``. A soft-deleted
+        row is ``None`` unless ``include_deleted`` is set."""
 
     @abstractmethod
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
@@ -44,15 +54,26 @@ class InMemoryStore(Store):
         table: dict[str, E] = self._rows.setdefault(entity, {})  # type: ignore[assignment]
         return table
 
-    def get[E: Entity](self, entity: type[E], where: Callable[[E], bool] | None = None) -> list[E]:
-        rows = (row for row in self._table(entity).values() if row.deleted_at is None)
-        if where is None:
-            return list(rows)
-        return [row for row in rows if where(row)]
+    def get[E: Entity](
+        self,
+        entity: type[E],
+        where: Callable[[E], bool] | None = None,
+        *,
+        include_deleted: bool = False,
+    ) -> list[E]:
+        return [
+            row
+            for row in self._table(entity).values()
+            if (include_deleted or row.deleted_at is None) and (where is None or where(row))
+        ]
 
-    def get_by_id[E: Entity](self, entity: type[E], row_id: str) -> E | None:
+    def get_by_id[E: Entity](
+        self, entity: type[E], row_id: str, *, include_deleted: bool = False
+    ) -> E | None:
         row = self._table(entity).get(row_id)
-        return row if row is not None and row.deleted_at is None else None
+        if row is None or (row.deleted_at is not None and not include_deleted):
+            return None
+        return row
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         table = self._table(entity)

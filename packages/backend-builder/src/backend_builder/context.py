@@ -20,11 +20,19 @@ class Context:
         self.store = store
         self.input = input
 
-    def get[E: Entity](self, entity: type[E], where: Callable[[E], bool] | None = None) -> list[E]:
-        return self.store.get(entity, where)
+    def get[E: Entity](
+        self,
+        entity: type[E],
+        where: Callable[[E], bool] | None = None,
+        *,
+        include_deleted: bool = False,
+    ) -> list[E]:
+        return self.store.get(entity, where, include_deleted=include_deleted)
 
-    def get_by_id[E: Entity](self, entity: type[E], row_id: str) -> E | None:
-        return self.store.get_by_id(entity, row_id)
+    def get_by_id[E: Entity](
+        self, entity: type[E], row_id: str, *, include_deleted: bool = False
+    ) -> E | None:
+        return self.store.get_by_id(entity, row_id, include_deleted=include_deleted)
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         return self.store.create(entity, **fields)
