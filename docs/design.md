@@ -427,6 +427,8 @@ Every process serves Prometheus-format metrics and a health check on its own por
 | `bb_outbox_pending`, `bb_outbox_claimed`, `bb_outbox_dead`, `bb_outbox_oldest_pending_seconds` | gauges | worker, refreshed on every poll |
 | `bb_schedule_seeds_total`, `bb_run_records_purged_total` | counters | scheduler |
 
+**No application metrics.** These are the runtime's metrics and the only ones. A reaction that wants to record that something happened creates an entity: an event is a row, committed with the run, so a retried attempt never double-counts, consumers hang off `OnCreate`, SQL answers the questions, and a scheduled reaction rolls it up or purges it. A reaction that wants to measure something is itself a reaction, scheduled or triggered. There is no `ctx.metric`, no free-form counters, and no registry of app metrics to review; decided, see §22.
+
 Outbox depth and the oldest row's age are the worker autoscaling signals; runs by outcome is the error-rate alert; dead rows above zero is a page. The compose stack publishes each process's metrics port, and the e2e suite scrapes all three.
 
 ## 20. The admin console
@@ -487,3 +489,4 @@ Settled in discussion, listed so they are not reopened by accident.
 - The CLI is in the core library and is the only process launcher.
 - Migrations are written by developers and reviewed in pull requests. The pipeline verifies, tests, applies and deploys; it never generates.
 - Secrets are environment variables under `SECRET_`, read on access. The library redacts what it has read from records and logs; it stores nothing.
+- No application metrics API. Anything worth recording is an entity; anything worth measuring is a reaction. Prometheus carries the runtime's metrics only.
