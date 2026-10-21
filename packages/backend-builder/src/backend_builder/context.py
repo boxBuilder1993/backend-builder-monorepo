@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from backend_builder.store import Store
 
@@ -13,12 +14,26 @@ if TYPE_CHECKING:
 
 
 class Context:
-    """An input plus a store. One is built per reaction invocation; all
-    invocations in a run share the same store."""
+    """An input plus a store, for one reaction invocation.
 
-    def __init__(self, store: Store, input: dict[str, Any]) -> None:
+    Every invocation gets its own ``reaction_id``. A context created by
+    ``trigger`` records the triggering invocation as ``parent_reaction_id``;
+    the seed invocation of a run has none. All invocations in a run share the
+    same store.
+    """
+
+    def __init__(
+        self,
+        store: Store,
+        input: dict[str, Any],
+        *,
+        reaction_id: str | None = None,
+        parent_reaction_id: str | None = None,
+    ) -> None:
         self.store = store
         self.input = input
+        self.reaction_id = reaction_id or str(uuid4())
+        self.parent_reaction_id = parent_reaction_id
 
     def get[E: Entity](
         self,
@@ -37,6 +52,11 @@ class Context:
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         return self.store.create(entity, **fields)
 
-    async def trigger(self, reaction: type[Reaction], input: dict[str, Any]) -> None:
-        """Run ``reaction`` now, against this store, with ``input``."""
-        await reaction().calculate(Context(self.store, input))
+    async def trigger(self, reaction: type[Reaction], input: dict[str, Any]) -> Context:
+        """Run ``reaction`` now, against this store, with ``input``.
+
+        Returns the child context the reaction ran in.
+        """
+        child = Context(self.store, input, parent_reaction_id=self.reaction_id)
+        await reaction().calculate(child)
+        return child

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from backend_builder import Context, DuplicateKeyError, Entity, InMemoryStore, Reaction
+from backend_builder import Context, DuplicateKeyError, Entity, InMemoryStore, Reaction, run
 from backend_builder.reaction import qualified_name, resolve
 
 
@@ -16,8 +16,12 @@ class OrderLine(Entity):
     qty: int
 
 
+seen: list[tuple[str, str | None]] = []
+
+
 class OrderTotal(Reaction):
     async def calculate(self, ctx: Context) -> None:
+        seen.append((ctx.reaction_id, ctx.parent_reaction_id))
         order_id: str = ctx.input["order_id"]
         lines = ctx.get(OrderLine, lambda line: line.order_id == order_id)
         order = ctx.get_by_id(Order, order_id)
@@ -27,6 +31,7 @@ class OrderTotal(Reaction):
 
 class CreateOrder(Reaction):
     async def calculate(self, ctx: Context) -> None:
+        seen.append((ctx.reaction_id, ctx.parent_reaction_id))
         order = ctx.create(Order, user_id=ctx.input["user_id"])
         for line in ctx.input["lines"]:
             ctx.create(OrderLine, order_id=order.id, price=line["price"], qty=line["qty"])
@@ -41,11 +46,21 @@ def store() -> InMemoryStore:
 async def test_create_order_computes_total(store: InMemoryStore) -> None:
     request = {"user_id": "u7", "lines": [{"price": 10, "qty": 2}, {"price": 5, "qty": 1}]}
 
-    await Context(store, request).trigger(CreateOrder, request)
+    await run(store, CreateOrder, request)
 
     (order,) = store.get(Order)
     assert (order.user_id, order.total) == ("u7", 25)
     assert [line.order_id for line in store.get(OrderLine)] == [order.id] * 2
+
+
+async def test_every_invocation_has_a_reaction_id_and_parent(store: InMemoryStore) -> None:
+    seen.clear()
+    root = await run(store, CreateOrder, {"user_id": "u1", "lines": []})
+
+    (seed, child) = seen
+    assert seed == (root.reaction_id, None)
+    assert child[1] == root.reaction_id
+    assert child[0] != root.reaction_id
 
 
 def test_rows_are_returned_by_reference(store: InMemoryStore) -> None:
