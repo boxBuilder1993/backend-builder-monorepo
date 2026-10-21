@@ -7,14 +7,17 @@ Entities are plain dataclasses. Reactions are small async classes that read and 
 ```python
 from backend_builder import Entity, Reaction, Context, App, OnCreate
 
+
 class Order(Entity):
     user_id: str
     total: int = 0
+
 
 class OrderLine(Entity):
     order_id: str
     price: int
     qty: int
+
 
 class CreateOrder(Reaction):
     async def calculate(self, ctx: Context) -> None:
@@ -23,13 +26,18 @@ class CreateOrder(Reaction):
             ctx.create(OrderLine, order_id=order.id, price=line["price"], qty=line["qty"])
         ctx.save("order", order)
 
+
 class OrderTotal(Reaction):
     """Runs after commit, by a worker, whenever a line is created."""
+
     async def calculate(self, ctx: Context) -> None:
         line = await ctx.get_by_id(OrderLine, ctx.input["id"])
         order = await ctx.get_by_id(Order, line.order_id)
-        lines = await ctx.query(OrderLine, "select * from order_line where order_id = :o", o=order.id)
+        lines = await ctx.query(
+            OrderLine, "select * from order_line where order_id = :o", o=order.id
+        )
         order.total = sum(l.price * l.qty for l in lines)
+
 
 app = App(package="myshop", triggers=[OnCreate(OrderLine, OrderTotal)])
 ```
