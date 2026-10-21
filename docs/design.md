@@ -1,6 +1,6 @@
 # Backend Builder Design
 
-Status: current as of 2026-10-21. Describes what is built on `main` and what is decided but not yet built. Each section says which. The earlier draft, with the reconcile loop, consumer config and WAL worker, is superseded; those ideas are listed under "Later" with what has to be true before they return.
+Status: current as of 2026-10-22. This is the rationale and the record of decisions; [guide.md](guide.md) is the how-to for building an app. Describes what is built on `main` and what is decided but not yet built. Each section says which. The earlier draft, with the reconcile loop, consumer config and WAL worker, is superseded; those ideas are listed under "Later" with what has to be true before they return.
 
 ## Intent
 
