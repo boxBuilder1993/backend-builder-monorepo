@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True, kw_only=True)
 class Span:
     name: str
-    """What ran: a reaction class name, or ``"flush"``."""
+    """What ran: a reaction class name, ``"flush"``, or ``"run"`` for the whole run."""
     reaction_id: str
     parent_reaction_id: str | None
     duration_ms: float
@@ -48,10 +48,14 @@ class Trace:
 
     def by_reaction_id(self, reaction_id: str) -> Span:
         for span in self.spans:
-            if span.reaction_id == reaction_id and span.name != "flush":
+            if span.reaction_id == reaction_id and span.name not in ("flush", "run"):
                 return span
         raise LookupError(reaction_id)
 
     def total_ms(self) -> float:
-        """Wall time of the whole run: the seed span plus the flush span."""
-        return sum(s.duration_ms for s in self.spans if s.parent_reaction_id is None)
+        """Wall time of the whole run, measured as one span around the seed
+        reaction and the flush."""
+        for span in self.spans:
+            if span.name == "run":
+                return span.duration_ms
+        raise LookupError("no run span; the trace did not come from run()")
