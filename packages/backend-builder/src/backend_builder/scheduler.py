@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+from backend_builder import metrics
 from backend_builder.app import App
 from backend_builder.log import get_logger
 from backend_builder.outbox import now
@@ -39,6 +40,7 @@ class Scheduler:
             if await self.store.seed_schedule(schedule, moment):
                 seeded += 1
         if seeded:
+            metrics.schedule_seeds_total.inc(seeded)
             logger.info("scheduler seeded app=%s rows=%d", self.app.name, seeded)
         return seeded
 
@@ -67,5 +69,6 @@ class Scheduler:
         except NotSupported:
             return 0
         if purged:
+            metrics.run_records_purged_total.inc(purged)
             logger.info("scheduler purged run records app=%s rows=%d", self.app.name, purged)
         return purged

@@ -15,6 +15,7 @@ import os
 import socket
 from uuid import uuid4
 
+from backend_builder import metrics
 from backend_builder.app import App
 from backend_builder.engine import run
 from backend_builder.log import get_logger
@@ -37,6 +38,10 @@ class Worker:
         rows = await self.store.claim(
             self.settings.outbox_batch, self.worker_id, self.settings.outbox_lease_grace_seconds
         )
+        try:
+            metrics.observe_outbox(await self.store.outbox_stats())
+        except Exception:  # never let a stats query stop deliveries
+            logger.debug("outbox stats unavailable", exc_info=True)
         if not rows:
             return 0
         logger.info("worker claimed worker_id=%s rows=%d", self.worker_id, len(rows))
@@ -69,6 +74,7 @@ class Worker:
             reaction = self.app.resolve(row.reaction)
         except LookupError as exc:
             await self.store.release(row.id, str(exc), self.settings.outbox_max_attempts)
+            metrics.outbox_deliveries_total.labels(reaction=row.reaction, outcome="unknown").inc()
             logger.error("worker unknown reaction row=%s reaction=%s", row.id, row.reaction)
             return
         try:
@@ -83,9 +89,11 @@ class Worker:
                 source="schedule" if row.scheduled_for is not None else "outbox",
                 records=self.settings.run_records,
             )
+            metrics.outbox_deliveries_total.labels(reaction=row.reaction, outcome="ok").inc()
             logger.info("worker delivered row=%s reaction=%s", row.id, reaction.__name__)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            metrics.outbox_deliveries_total.labels(reaction=row.reaction, outcome="error").inc()
             await self.store.release(row.id, error, self.settings.outbox_max_attempts)
             logger.error(
                 "worker delivery failed row=%s reaction=%s attempt=%d error=%s",

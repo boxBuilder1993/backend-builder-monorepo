@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from backend_builder import metrics
 from backend_builder.context import Context
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, invoke, qualified_name
@@ -98,6 +99,16 @@ async def run(
         outcome, error = "error", f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        metrics.observe_run(
+            qualified_name(reaction),
+            source,
+            outcome,
+            (time.perf_counter() - state.clock) * 1000,
+            state.attempts,
+        )
+        for trace in state.traces:
+            for span in trace.spans:
+                metrics.observe_span(span.name, span.duration_ms)
         if records != "off":
             await _record(
                 store, reaction, reaction_id, input, source, records, state, outcome, error
