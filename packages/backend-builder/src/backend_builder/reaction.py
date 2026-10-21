@@ -24,6 +24,10 @@ def qualified_name(reaction: type[Reaction]) -> str:
     return f"{reaction.__module__}.{reaction.__qualname__}"
 
 
+def registered_reactions() -> list[type[Reaction]]:
+    return list(_registry.values())
+
+
 def resolve(name: str) -> type[Reaction]:
     try:
         return _registry[name]

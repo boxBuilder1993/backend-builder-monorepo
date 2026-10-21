@@ -1,8 +1,10 @@
-"""Entity base class.
+"""Entity base class and registry.
 
 An entity is a dataclass. Subclasses declare their fields as annotations and
 are turned into keyword-only dataclasses automatically. Instances are the rows
-a store holds, keyed by their entity class and ``id``.
+a store holds, keyed by their entity class and ``id``. Every subclass is
+registered by qualified name so an ``App`` can derive the entities defined
+under its package.
 """
 
 from __future__ import annotations
@@ -19,6 +21,17 @@ def _new_id() -> str:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+_registry: dict[str, type[Entity]] = {}
+
+
+def qualified_name(entity: type[Entity]) -> str:
+    return f"{entity.__module__}.{entity.__qualname__}"
+
+
+def registered_entities() -> list[type[Entity]]:
+    return list(_registry.values())
 
 
 @dataclass_transform(kw_only_default=True)
@@ -39,3 +52,4 @@ class Entity:
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         dataclass(kw_only=True)(cls)
+        _registry[qualified_name(cls)] = cls

@@ -5,7 +5,10 @@ requires-python = ">=3.13"
 dependencies = []
 
 [tool.uv.workspace]
-members = ["packages/*"]
+members = [
+    "packages/*",
+    "apps/shop",
+]
 
 [dependency-groups]
 dev = [
@@ -18,7 +21,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages"]
+testpaths = ["packages", "apps"]
 
 [tool.ruff]
 extend-exclude = ["docs"]
@@ -29,6 +32,6 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pyright]
-include = ["packages"]
-strict = ["packages"]
+include = ["packages", "apps"]
+strict = ["packages", "apps"]
 pythonVersion = "3.13"

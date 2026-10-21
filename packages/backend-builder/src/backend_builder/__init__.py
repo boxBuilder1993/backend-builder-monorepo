@@ -1,3 +1,4 @@
+from backend_builder.app import App
 from backend_builder.context import Context
 from backend_builder.engine import run
 from backend_builder.entity import Entity
@@ -8,6 +9,7 @@ from backend_builder.store import DuplicateKeyError, InMemoryStore, MissingRowEr
 from backend_builder.trace import Span, Trace
 
 __all__ = [
+    "App",
     "Context",
     "configure_logging",
     "DuplicateKeyError",
