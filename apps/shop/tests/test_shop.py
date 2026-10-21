@@ -79,11 +79,14 @@ async def test_create_then_total_arrives_through_the_worker(
     assert {line.order_id for line in lines} == {order["id"]}
 
 
-async def test_missing_order_is_500_and_store_untouched(
-    client: AsyncClient, store: PostgresStore
-) -> None:
+async def test_missing_order_is_a_404_reply(client: AsyncClient, store: PostgresStore) -> None:
     res = await client.get("/orders/00000000-0000-0000-0000-000000000000")
-    assert res.status_code == 500 and res.json()["error"] == "LookupError"
+    assert res.status_code == 404
+    assert res.json() == {
+        "error": "NotFound",
+        "message": "no order 00000000-0000-0000-0000-000000000000",
+    }
+    assert len(res.headers["X-Reaction-Id"]) == 36
     assert await count(store, "order") == 0
 
 

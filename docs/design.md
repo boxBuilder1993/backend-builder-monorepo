@@ -134,6 +134,7 @@ ctx.delete(row)                             # deleted_at = now()
 
 ctx.save(name, value)                       # free-form, held by the session for the run
 ctx.load(name) -> Any                       # KeyError if absent
+ctx.vars                                    # the dict behind save and load, for `name in ctx.vars`
 
 await ctx.trigger(Reaction, input, timeout=None) -> Context        # runs now; returns the child context
 await ctx.trigger(Reaction, input, deferred=True, timeout=None)   # outbox row at flush; runs after commit
@@ -255,11 +256,13 @@ Each source is optional on any method. FastAPI validates and documents each one 
 
 **API reactions** translate the structured input into domain inputs and trigger domain reactions. Domain reactions never see HTTP shapes. The translation has its own reaction id and span.
 
-**Builders** are async functions that run after the run, read the root context, and return the response, validated against the response model. They read `ctx.load`, `ctx.get_by_id` and the rest; they do not write. A reaction that produced something for the response saves it under a name; the builder loads it.
+**Builders** are async functions that run after the run, read the root context, and return the response, validated against the response model. They read `ctx.load`, `ctx.vars`, `ctx.get_by_id` and the rest; they do not write. A reaction that produced something for the response saves it under a name; the builder loads it.
+
+**Outcomes versus failures.** A run either commits or is a 500. Everything a reaction understands, an authentication failure, a missing resource, a rejected input, is an outcome, not a failure: the reaction records it with `ctx.save` and returns, the run commits having written nothing, and the builder returns `Reply(status=404, body=ErrorOut(...))` instead of the response model. `Endpoint(responses={404: ErrorOut})` documents the alternatives in the OpenAPI document. Authentication and authorization are written this way, as ordinary reactions an app defines once and its API reactions trigger first; the engine has no auth of its own and no 401 of its own.
 
 **Generic route.** `POST /reactions/{qualified_name}` triggers any of the app's reactions with the JSON body as input and returns `{}`. A name that is not one of the app's reactions is a 404. Off with `generic=False`.
 
-**Responses** carry `X-Reaction-Id`. A run failure is a 500 with the exception type, message and reaction id; the store is untouched. Nothing about the run's internals is returned; that goes to logs.
+**Responses** carry `X-Reaction-Id`. A run failure is a 500 with the exception type, message and reaction id; the store is untouched. Every other status is a `Reply` from a builder; the engine does no mapping of its own. Nothing about the run's internals is returned; that goes to logs.
 
 **`GET /health`** returns the store's name and `ok`, or 503. Hidden from the schema.
 
@@ -403,7 +406,7 @@ Built.
 
 **The stack.** `compose.yaml` has a `shop` profile with `migrate` as a one-shot service, then `api`, `worker` and `scheduler` from the same image, each depending on `migrate` having completed, all pointed at the `postgres` service with `RUNTIME_ENV=prod`. `docker compose --profile shop up --build` is the whole system.
 
-**The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
+**The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a missing order answered with a 404 reply from a run that committed; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
 
 ## 19. Decisions
 
@@ -416,7 +419,7 @@ Settled in discussion, listed so they are not reopened by accident.
 - The in-memory store is native: Python predicates, references, no serialization, a run lock instead of transactions.
 - `get` with a predicate is in-memory only; `query` with SQL is Postgres only. No portable query language.
 - Flush inserts created rows and updates loaded rows. Never upserts.
-- Any exception aborts the run. Every exception is a 500 over HTTP. A REST layer above may map codes.
+- Any exception aborts the run. Every exception is a 500 over HTTP. Any other status is an outcome a reaction recorded and a builder replied with; there is no exception-to-status mapping.
 - Nothing about a run's internals is returned over HTTP. Traces go to logs.
 - Context input is a dict. API reactions build domain inputs from the structured request.
 - Reactions and entities belong to the app whose package defines them. Shared classes are included explicitly.

@@ -3,7 +3,7 @@ from backend_builder.app import App
 from backend_builder.context import Context
 from backend_builder.engine import run
 from backend_builder.entity import Entity
-from backend_builder.http import Endpoint, create_app, serve
+from backend_builder.http import Endpoint, Reply, create_app, serve
 from backend_builder.log import configure as configure_logging
 from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
 from backend_builder.postgres import PostgresStore
@@ -43,6 +43,7 @@ __all__ = [
     "OutboxStats",
     "PostgresStore",
     "Reaction",
+    "Reply",
     "RuntimeEnv",
     "Scheduler",
     "Session",

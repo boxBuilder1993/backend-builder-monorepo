@@ -4,7 +4,7 @@ API reactions translate the structured request into domain inputs. Builders
 read the root context after the run and shape the response.
 """
 
-from backend_builder import Context, Endpoint, Reaction
+from backend_builder import Context, Endpoint, Reaction, Reply
 from pydantic import BaseModel, ConfigDict
 
 from shop.entities import Order, OrderLine
@@ -74,6 +74,11 @@ class OrderResponse(BaseModel):
     lines: list[LineOut]
 
 
+class ErrorOut(BaseModel):
+    error: str
+    message: str
+
+
 # --- API reactions ------------------------------------------------------------
 
 
@@ -96,7 +101,9 @@ class GetOrderApi(Reaction):
         order_id = ctx.input["path"]["order_id"]
         order = await ctx.get_by_id(Order, order_id)
         if order is None:
-            raise LookupError(f"no order {order_id}")
+            # An outcome the run understood, not a failure: the builder replies 404.
+            ctx.save("not_found", {"error": "NotFound", "message": f"no order {order_id}"})
+            return
         ctx.save("order", order)
         ctx.save("include_lines", ctx.input["query"]["include_lines"])
 
@@ -119,7 +126,9 @@ class DeleteLineApi(Reaction):
 # --- builders -----------------------------------------------------------------
 
 
-async def order_response(ctx: Context) -> OrderResponse:
+async def order_response(ctx: Context) -> OrderResponse | Reply:
+    if "not_found" in ctx.vars:
+        return Reply(status=404, body=ErrorOut(**ctx.load("not_found")))
     order: Order = ctx.load("order")
     lines: list[OrderLine] = []
     if ctx.load("include_lines"):
@@ -156,6 +165,7 @@ endpoints = [
         path_model=OrderPath,
         query=GetOrderQuery,
         response=OrderResponse,
+        responses={404: ErrorOut},
         build=order_response,
     ),
     Endpoint(
