@@ -96,6 +96,15 @@ def create_app(
     app = FastAPI(title=title)
     app.add_exception_handler(RunFailed, _run_failed)
 
+    async def health() -> JSONResponse:
+        ok = store.ping()
+        return JSONResponse(
+            status_code=200 if ok else 503,
+            content={"status": "ok" if ok else "unavailable", "store": type(store).__name__},
+        )
+
+    app.add_api_route("/health", health, methods=["GET"], name="health", include_in_schema=False)
+
     for endpoint in endpoints:
         app.add_api_route(
             endpoint.path,
