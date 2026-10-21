@@ -24,6 +24,7 @@ async def run(
     *,
     reaction_id: str | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    outbox_row_id: str | None = None,
 ) -> Context:
     """Run ``reaction`` as the seed of a new run against ``store``.
 
@@ -36,6 +37,10 @@ async def run(
     ``max_attempts`` times with a short jittered pause between attempts. A run
     is a function of its input and the store, so a retry is safe. The last
     attempt's exception propagates. The trace is logged for every attempt.
+
+    ``outbox_row_id`` names the outbox row this run delivers; it is deleted
+    inside the run's transaction after the flush, so the run's writes and
+    the row's removal commit together.
     """
     attempts = max(1, max_attempts)
     reaction_id = reaction_id or str(uuid4())  # one id for the run, whatever the attempt count
@@ -48,6 +53,8 @@ async def run(
                     await invoke(reaction, ctx)
                     with ctx.trace.span("flush", ctx.reaction_id, None):
                         await session.flush(reaction_id=ctx.reaction_id)
+                    if outbox_row_id is not None:
+                        await store.ack(outbox_row_id)
             return ctx
         except Exception as exc:
             if attempt == attempts:

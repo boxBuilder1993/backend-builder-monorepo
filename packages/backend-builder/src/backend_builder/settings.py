@@ -15,6 +15,11 @@ from enum import StrEnum
 RUNTIME_ENV = "RUNTIME_ENV"
 DATABASE_URL = "BACKEND_BUILDER_DATABASE_URL"
 LOG_LEVEL = "BACKEND_BUILDER_LOG_LEVEL"
+OUTBOX_POLL_SECONDS = "BACKEND_BUILDER_OUTBOX_POLL_SECONDS"
+OUTBOX_BATCH = "BACKEND_BUILDER_OUTBOX_BATCH"
+OUTBOX_LEASE_SECONDS = "BACKEND_BUILDER_OUTBOX_LEASE_SECONDS"
+OUTBOX_MAX_ATTEMPTS = "BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS"
+OUTBOX_CONCURRENCY = "BACKEND_BUILDER_OUTBOX_CONCURRENCY"
 
 
 class RuntimeEnv(StrEnum):
@@ -32,6 +37,11 @@ class Settings:
     runtime_env: RuntimeEnv = RuntimeEnv.DEV
     database_url: str | None = None
     log_level: str = "INFO"
+    outbox_poll_seconds: float = 1.0
+    outbox_batch: int = 10
+    outbox_lease_seconds: float = 60.0
+    outbox_max_attempts: int = 5
+    outbox_concurrency: int = 4
 
     @property
     def store_name(self) -> str:
@@ -50,4 +60,26 @@ class Settings:
         if runtime_env is RuntimeEnv.PROD and database_url is None:
             raise SettingsError(f"{RUNTIME_ENV}=prod requires {DATABASE_URL}")
         log_level = env.get(LOG_LEVEL, "INFO").strip().upper() or "INFO"
-        return cls(runtime_env=runtime_env, database_url=database_url, log_level=log_level)
+        return cls(
+            runtime_env=runtime_env,
+            database_url=database_url,
+            log_level=log_level,
+            outbox_poll_seconds=_number(env, OUTBOX_POLL_SECONDS, 1.0),
+            outbox_batch=int(_number(env, OUTBOX_BATCH, 10)),
+            outbox_lease_seconds=_number(env, OUTBOX_LEASE_SECONDS, 60.0),
+            outbox_max_attempts=int(_number(env, OUTBOX_MAX_ATTEMPTS, 5)),
+            outbox_concurrency=int(_number(env, OUTBOX_CONCURRENCY, 4)),
+        )
+
+
+def _number(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SettingsError(f"{name}={raw!r} is not a number") from None
+    if value <= 0:
+        raise SettingsError(f"{name} must be positive")
+    return value

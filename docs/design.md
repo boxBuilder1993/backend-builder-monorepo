@@ -50,7 +50,7 @@ Design principles that settled the hard calls:
 
 **Store.** Where rows live between runs. The in-memory store and, when built, the Postgres store. A store provides `get_by_id`, `create`, `update`, a lifetime-of-run scope, and a health check, plus the reads that are native to it.
 
-**Trigger.** `await ctx.trigger(reaction, input)` runs a reaction now, with a child context on the same session. The only way one reaction causes another to run.
+**Trigger.** `await ctx.trigger(reaction, input)` runs a reaction now, with a child context on the same session. With `deferred=True` it records an outbox row instead, written with the run's flush and delivered after commit by a worker.
 
 **App.** The declaration of an application's scope: a Python package, the reactions and entities defined under it, its endpoints, and its store factory. The CLI derives every process from it.
 
@@ -135,7 +135,8 @@ ctx.delete(row)                             # deleted_at = now()
 ctx.save(name, value)                       # free-form, held by the session for the run
 ctx.load(name) -> Any                       # KeyError if absent
 
-await ctx.trigger(Reaction, input) -> Context   # runs now; returns the child context
+await ctx.trigger(Reaction, input) -> Context           # runs now; returns the child context
+await ctx.trigger(Reaction, input, deferred=True) -> None   # outbox row at flush; runs after commit
 ```
 
 `get` and `get_by_id` are awaited because the Postgres store does I/O and the interface has one shape. Today the in-memory implementation returns immediately.
@@ -330,13 +331,29 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 
 Each of these was designed in the earlier draft and is parked, with what has to exist first.
 
-- **Deferred execution.** `trigger(..., deferred=True)` writes a row to an outbox table in the same flush, and a worker process polls the table, runs each row as an ordinary run, and deletes it on success or releases it with backoff on failure. Needs the Postgres store, because an in-memory outbox cannot cross processes. Brings `backend-builder worker <app>` and the second container.
+- **Deferred execution.** Built; see section 16.
 - **Data-change triggers.** Reactions that run because a field changed, declared in a config rather than called. The earlier draft matched them against per-pass deltas before commit and against WAL-decoded changes after. The session can now detect changes by snapshot comparison at flush, which is the natural input for the synchronous half. The design will be redone on that basis once deferred execution exists.
 - **Scheduling.** Cron entries that enqueue an outbox row when due.
 - **Timeouts and concurrent triggers.** A task group per context and a per-trigger timeout.
 - **Docker and Kubernetes.** Per [infrastructure.md](infrastructure.md), after settings.
 
-## 16. Decisions
+## 16. Deferred execution
+
+Built.
+
+**The outbox** is a system table, `_outbox`, in every app's database, added to the metadata automatically and so to the app's migration chain. A row is `(id, reaction, input jsonb, created_at, available_at, attempts, last_error, claimed_by, claimed_at, dead_at)` with a partial index on `available_at` where `dead_at is null`. Rows are written by the run's flush, in the run's transaction, so a row exists if and only if the run committed.
+
+**Producing.** `await ctx.trigger(R, input, deferred=True)` records an entry in the session; the input is checked to be JSON-encodable at that line, not at flush. Flush writes the rows after the entity writes. Postgres only: the in-memory store raises `NotSupported`.
+
+**Delivering.** `backend-builder worker <app>` polls. Each poll claims up to `BACKEND_BUILDER_OUTBOX_BATCH` due rows with `FOR UPDATE SKIP LOCKED`, stamping `claimed_by` and `claimed_at`; a row whose lease, `BACKEND_BUILDER_OUTBOX_LEASE_SECONDS`, has lapsed is claimable again, which is how a crashed worker's rows return. Any number of workers may run against one database; they divide rows without coordination. Within a worker, a batch is delivered with `BACKEND_BUILDER_OUTBOX_CONCURRENCY` deliveries in flight. A delivery is an ordinary `run` with the app's retry policy; the outbox row is deleted inside that run's transaction after the flush, so the run's writes and the row's removal commit together, and the database effects of a deferred reaction happen exactly once. Anything a reaction does outside the database is at least once.
+
+**Failing.** A failed delivery, after the run's own retries, is released: `attempts` increments, `last_error` is recorded, the claim clears, and `available_at` moves out by an exponential jittered backoff capped at five minutes. At `BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS` the row is marked `dead_at` and never claimed again; it stays for inspection and is requeued by clearing `dead_at`. A row naming a reaction the app does not have is released the same way.
+
+**Chains.** A deferred reaction may trigger immediately, defer further work, and when data-change triggers exist, cause more rows; it is a run like any other.
+
+**Observing.** `backend-builder outbox <app>` prints pending, claimed and dead counts and the oldest pending time. The poll interval is `BACKEND_BUILDER_OUTBOX_POLL_SECONDS`.
+
+## 17. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 

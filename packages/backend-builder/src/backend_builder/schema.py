@@ -21,6 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as pg
 
 from backend_builder.entity import Entity
+from backend_builder.outbox import outbox_table
 
 
 class SchemaError(Exception):
@@ -104,8 +105,10 @@ def table(entity: type[Entity], metadata: sa.MetaData) -> sa.Table:
 
 
 def build_metadata(entities: Iterable[type[Entity]]) -> sa.MetaData:
-    """One table per entity. Raises ``SchemaError`` for an unmappable field."""
+    """One table per entity plus the system tables. Raises ``SchemaError``
+    for an unmappable field."""
     metadata = sa.MetaData()
     for entity in entities:
         table(entity, metadata)
+    outbox_table(metadata)
     return metadata

@@ -11,8 +11,10 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from typing import Any
 
+from backend_builder.codec import to_jsonable
 from backend_builder.entity import Entity
 from backend_builder.log import get_logger
+from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
 
 logger = get_logger(__name__)
 
@@ -86,6 +88,29 @@ class Store(ABC):
         yields immediately; one without serialises runs here so two runs can
         never load, mutate and flush the same row over each other."""
         yield
+
+    # --- outbox: deferred work. Postgres only. ---------------------------------
+
+    async def enqueue(self, entries: list[OutboxEntry]) -> None:
+        """Write outbox rows inside the current run's transaction."""
+        raise NotSupported(f"{type(self).__name__} has no outbox")
+
+    async def claim(self, limit: int, worker_id: str, lease_seconds: float) -> list[OutboxRow]:
+        """Lease up to ``limit`` due rows to ``worker_id``. Rows whose lease
+        has lapsed are claimable again. Own short transaction."""
+        raise NotSupported(f"{type(self).__name__} has no outbox")
+
+    async def ack(self, row_id: str) -> None:
+        """Delete a delivered row, inside the delivering run's transaction."""
+        raise NotSupported(f"{type(self).__name__} has no outbox")
+
+    async def release(self, row_id: str, error: str, max_attempts: int) -> None:
+        """A delivery failed: count the attempt, clear the claim, push
+        ``available_at`` out with backoff, or mark the row dead at the limit."""
+        raise NotSupported(f"{type(self).__name__} has no outbox")
+
+    async def outbox_stats(self) -> OutboxStats:
+        raise NotSupported(f"{type(self).__name__} has no outbox")
 
     async def ping(self) -> bool:
         """Whether the backend is reachable. Used by the health endpoint."""
@@ -179,6 +204,7 @@ class Session:
         """Field values of each loaded row as it came from the backing store.
         Flush compares against these and writes only what changed."""
         self._fully_loaded: set[type[Entity]] = set()
+        self._deferred: list[OutboxEntry] = []
         self.vars: dict[str, Any] = {}
         """Free-form values kept for the run. Shared by every reaction in the
         run and readable afterwards. Never flushed to the backing store."""
@@ -268,6 +294,15 @@ class Session:
         The row stays in the working set and is written back on flush."""
         row.deleted_at = datetime.now(UTC)
 
+    def defer(self, reaction: str, input: dict[str, Any]) -> None:
+        """Record deferred work. Written as an outbox row at flush, so it
+        exists only if the run commits. ``input`` must be JSON-encodable;
+        anything else raises ``EncodeError`` here, not at flush."""
+        if self._backing is None:
+            raise NotSupported("no backing store")
+        encoded: dict[str, Any] = to_jsonable(input, path=f"deferred {reaction} input")
+        self._deferred.append(OutboxEntry(reaction=reaction, input=encoded))
+
     def changes(self, row: Entity) -> dict[str, Any]:
         """Fields of a loaded ``row`` whose value differs from the snapshot
         taken at load, name to current value. Empty for an unchanged row.
@@ -320,4 +355,8 @@ class Session:
             for row in table.values():
                 self._snapshots[(entity, row.id)] = _field_values(_clone(row))
         self._created.clear()
+        if self._deferred:
+            logger.debug("flush enqueue reaction_id=%s entries=%r", reaction_id, self._deferred)
+            await self._backing.enqueue(self._deferred)
+            self._deferred = []
         return inserted, updated, unchanged

@@ -36,7 +36,7 @@ class CreateAccount(Reaction):
 class OpenAccount(Reaction):
     async def calculate(self, ctx: Context) -> None:
         child = await ctx.trigger(CreateAccount, {"balance": 7})
-        assert child.load("account") is ctx.load("account")
+        assert child is not None and child.load("account") is ctx.load("account")
         ctx.save("opened", True)
 
 
