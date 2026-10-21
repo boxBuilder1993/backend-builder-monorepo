@@ -57,6 +57,8 @@ class Context:
 
         Returns the child context the reaction ran in.
         """
+        from backend_builder.reaction import invoke
+
         child = Context(self._session, input, parent_reaction_id=self.reaction_id)
-        await reaction().calculate(child)
+        await invoke(reaction, child)
         return child

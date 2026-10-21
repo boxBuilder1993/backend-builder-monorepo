@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend_builder.context import Context
-from backend_builder.reaction import Reaction
+from backend_builder.reaction import Reaction, invoke
 from backend_builder.store import Session, Store
 
 
@@ -19,6 +19,6 @@ async def run(store: Store, reaction: type[Reaction], input: dict[str, Any]) -> 
     """
     session = Session(store)
     ctx = Context(session, input)
-    await reaction().calculate(ctx)
-    session.flush()
+    await invoke(reaction, ctx)
+    session.flush(reaction_id=ctx.reaction_id)
     return ctx

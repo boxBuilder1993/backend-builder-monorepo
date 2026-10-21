@@ -9,6 +9,9 @@ from dataclasses import fields
 from typing import Any
 
 from backend_builder.entity import Entity
+from backend_builder.log import get_logger
+
+logger = get_logger(__name__)
 
 
 class DuplicateKeyError(Exception):
@@ -157,15 +160,24 @@ class Session(InMemoryStore):
         self._created.add((entity, row.id))
         return row
 
-    def flush(self) -> None:
+    def flush(self, *, reaction_id: str | None = None) -> None:
         """Write every row in the working set to the backing store: created
         rows as inserts, loaded rows as updates."""
         if self._backing is None:
             return
+        inserted = updated = 0
+        logger.info("flush started reaction_id=%s", reaction_id)
         for entity, table in self._rows.items():
             for row in table.values():
                 if (entity, row.id) in self._created:
+                    logger.debug("flush insert reaction_id=%s row=%r", reaction_id, row)
                     self._backing.create(entity, **_field_values(_clone(row)))
+                    inserted += 1
                 else:
+                    logger.debug("flush update reaction_id=%s row=%r", reaction_id, row)
                     self._backing.update(entity, _clone(row))
+                    updated += 1
         self._created.clear()
+        logger.info(
+            "flush finished reaction_id=%s inserted=%d updated=%d", reaction_id, inserted, updated
+        )
