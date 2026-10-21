@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% set title = "run" %}
+{% block body %}
+<h1><span class="{{ record.outcome }}">{{ record.outcome }}</span> {{ record.reaction | reaction_short }} <span class="muted"><code>{{ record.id }}</code></span></h1>
+<div class="cards">
+  <div class="card"><div class="n">{{ record.duration_ms | ms }}</div><div class="l">duration</div></div>
+  <div class="card"><div class="n">{{ record.attempts }}</div><div class="l">attempts</div></div>
+  <div class="card"><div class="n" style="font-size:14px">{{ record.source }}</div><div class="l">source</div></div>
+  <div class="card"><div class="n" style="font-size:14px">{{ record.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</div><div class="l">started</div></div>
+</div>
+{% if record.error %}<h2>Error</h2><pre class="error">{{ record.error }}</pre>{% endif %}
+<h2>Spans</h2>
+{% for a in record.attempts_spans %}
+<p class="muted">attempt {{ a.attempt }}{% if a.run %} · run {{ a.run.duration_ms | ms }}{% endif %}{% if a.flush %} · flush {{ a.flush.duration_ms | ms }}{% endif %}</p>
+<table class="tree"><tr><th>reaction</th><th>reaction id</th><th>duration</th><th>ok</th></tr>
+{% for s in a.reactions %}<tr><td class="name">{{ ('&nbsp;' * (s.depth * 4)) | safe }}{{ '↳ ' if s.depth else '' }}{{ s.name }}</td><td><code>{{ s.reaction_id }}</code></td><td>{{ s.duration_ms | ms }}</td><td class="{{ 'ok' if s.ok else 'error' }}">{{ 'yes' if s.ok else 'no' }}</td></tr>{% endfor %}
+</table>
+{% endfor %}
+<h2>Input</h2><pre>{{ record.input | tojson(indent=2) if record.input is not none else '(not recorded)' }}</pre>
+<h2>Saved vars</h2><pre>{{ record.vars | tojson(indent=2) if record.vars is not none else '(not recorded)' }}</pre>
+<h2>Changes written</h2>
+<table><tr><th>entity</th><th>id</th><th>kind</th><th>changed</th></tr>
+{% for c in record.changes %}<tr><td>{{ c.entity }}</td><td><code>{{ c.id }}</code></td><td>{{ c.kind }}</td><td class="muted">{{ c.changed | join(', ') }}</td></tr>{% else %}<tr><td colspan="4" class="muted">none</td></tr>{% endfor %}
+</table>
+<h2>Deferred</h2>
+<table><tr><th>outbox row</th><th>reaction</th><th>state</th></tr>
+{% for o in record.outbox_rows %}<tr><td><a href="/outbox/{{ o.id }}"><code>{{ o.id }}</code></a></td><td>{{ o.reaction | reaction_short }}</td><td>{{ 'dead' if o.dead_at else ('claimed' if o.claimed_at else 'pending') }}</td></tr>{% endfor %}
+{% for id in record.enqueued %}{% if id not in (record.outbox_rows | map(attribute='id') | list) %}<tr><td><code>{{ id }}</code></td><td colspan="2" class="muted">delivered</td></tr>{% endif %}{% endfor %}
+{% if not record.enqueued %}<tr><td colspan="3" class="muted">none</td></tr>{% endif %}
+</table>
+{% endblock %}

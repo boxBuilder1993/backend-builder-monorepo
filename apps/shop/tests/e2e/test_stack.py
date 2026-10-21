@@ -295,6 +295,73 @@ async def test_every_process_serves_metrics_on_its_own_port(
     assert "bb_schedule_seeds_total " in scheduler
 
 
+# --- the admin console ----------------------------------------------------------------------------
+
+
+async def test_admin_console_shows_the_run_its_spans_and_the_outbox(
+    stack: Stack, client: AsyncClient
+) -> None:
+    order = (await create_order(client))["order"]
+    await wait_total(client, order["id"], 25)
+
+    async with AsyncClient(base_url=stack.admin_url, timeout=10) as admin:
+        for path in ("/", "/graph", "/runs", "/outbox", "/outbox?state=dead", "/schedules"):
+            page = await admin.get(path)
+            assert page.status_code == 200, path
+        graph = (await admin.get("/graph")).text
+        assert "OrderTotal" in graph and "POST /orders" in graph and "OnSchedule" in graph
+
+        runs = (await admin.get("/runs", params={"reaction": "shop.api.CreateOrderApi"})).text
+        assert "CreateOrderApi" in runs
+        run_rows = await stack.sql(
+            "select id from _run where reaction = 'shop.api.CreateOrderApi' "
+            "order by started_at desc limit 1"
+        )
+        page = (await admin.get(f"/runs/{run_rows[0]['id']}")).text
+        assert "CreateOrder" in page and "ok" in page
+        assert "order_line" in page and "created" in page  # changes written
+        assert '"user_id": "e2e"' in page  # input recorded in full
+
+        reaction_page = (await admin.get("/reactions/shop.reactions.OrderTotal")).text
+        assert "OnCreate(OrderLine)" in reaction_page and "p95" in reaction_page
+
+        schedules = (await admin.get("/schedules")).text
+        assert "ExpireUnpaidOrders" in schedules
+
+        missing = await admin.get("/runs/not-a-run")
+        assert missing.status_code == 200 and "No such run" in missing.text
+
+
+async def test_admin_console_requeues_a_dead_row(stack: Stack) -> None:
+    row_id = str(uuid4())
+    await stack.sql(
+        "insert into _outbox (id, reaction, input, created_at, available_at, attempts, "
+        "dead_at, last_error) values (:id, 'shop.reactions.OrderTotal', "
+        '\'{"id": "x", "kind": "updated"}\'::jsonb, now(), now(), 2, now(), \'gave up\')',
+        id=row_id,
+    )
+    async with AsyncClient(base_url=stack.admin_url, timeout=10) as admin:
+        dead = (await admin.get("/outbox", params={"state": "dead"})).text
+        assert row_id[:8] in dead
+        page = (await admin.get(f"/outbox/{row_id}")).text
+        assert "gave up" in page and "Requeue now" in page
+
+        res = await admin.post(f"/outbox/{row_id}/requeue")
+        assert res.status_code == 303
+        rows = await stack.sql("select dead_at, attempts from _outbox where id = :id", id=row_id)
+        assert rows[0]["dead_at"] is None and rows[0]["attempts"] == 0
+
+        # The worker picks it up; the input names a missing line, so it fails and dies again.
+        await wait_for(
+            lambda: stack.sql("select dead_at from _outbox where id = :id", id=row_id),
+            lambda r: bool(r) and r[0]["dead_at"] is not None,
+            timeout=30,
+        )
+        res = await admin.post(f"/outbox/{row_id}/discard")
+        assert res.status_code == 303
+        assert await stack.sql("select id from _outbox where id = :id", id=row_id) == []
+
+
 # --- failure handling in the worker -----------------------------------------------------------
 
 

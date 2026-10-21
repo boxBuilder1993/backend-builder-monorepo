@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% set title = "outbox" %}
+{% block body %}
+<h1>Outbox</h1>
+<div class="cards">
+  {% for s in ["pending", "claimed", "dead"] %}
+  <a class="card" href="/outbox?state={{ s }}" style="text-decoration:none;color:inherit;{{ 'outline:2px solid var(--line)' if state == s else '' }}"><div class="n {{ 'dead' if s == 'dead' and stats.dead else '' }}">{{ stats[s] }}</div><div class="l">{{ s }}</div></a>
+  {% endfor %}
+</div>
+<h2>{{ state }}</h2>
+<table><tr><th>row</th><th>reaction</th><th>attempts</th><th>available</th><th>{{ 'claimed by' if state == 'claimed' else 'last error' }}</th></tr>
+{% for r in rows %}<tr><td><a href="/outbox/{{ r.id }}"><code>{{ r.id[:8] }}</code></a>{% if r.scheduled_for %} <span class="muted">scheduled</span>{% endif %}</td><td>{{ r.reaction | reaction_short }}</td><td>{{ r.attempts }}</td><td>{{ r.available_at.strftime('%Y-%m-%d %H:%M:%S') }}</td><td class="muted">{{ r.claimed_by if state == 'claimed' else (r.last_error or '') }}</td></tr>
+{% else %}<tr><td colspan="5" class="muted">none</td></tr>{% endfor %}
+</table>
+{% endblock %}

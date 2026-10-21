@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% set title = "schedules" %}
+{% block body %}
+<h1>Schedules</h1>
+<table><tr><th>reaction</th><th>cron</th><th>last seeded for</th><th>next due</th></tr>
+{% for s in rows %}<tr><td><a href="/reactions/{{ s.reaction }}">{{ s.reaction | reaction_short }}</a></td><td><code>{{ s.cron }}</code></td><td>{{ s.last_scheduled_for.strftime('%Y-%m-%d %H:%M:%S') if s.last_scheduled_for else '–' }}</td><td>{{ s.next_due.strftime('%Y-%m-%d %H:%M:%S') if s.next_due else '–' }}</td></tr>{% endfor %}
+{% for s in unseeded %}<tr><td><a href="/reactions/{{ s.reaction }}">{{ s.reaction | reaction_short }}</a></td><td><code>{{ s.cron }}</code></td><td colspan="2" class="muted">not seeded yet; is the scheduler running?</td></tr>{% endfor %}
+{% if not rows and not unseeded %}<tr><td colspan="4" class="muted">no schedules declared</td></tr>{% endif %}
+</table>
+{% endblock %}

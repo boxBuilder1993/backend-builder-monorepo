@@ -76,6 +76,20 @@ services:
       timeout: 2s
       retries: 30
 
+  admin:
+    <<: *shop
+    command: ["admin", "shop", "--host", "0.0.0.0"]
+    ports:
+      - "${ADMIN_PORT:-9200}:9200"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9200/health').status == 200 else 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
   scheduler:
     <<: *shop
     command: ["scheduler", "shop"]

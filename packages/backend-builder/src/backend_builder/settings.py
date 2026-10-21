@@ -27,6 +27,8 @@ SCHEDULER_TICK_SECONDS = "BACKEND_BUILDER_SCHEDULER_TICK_SECONDS"
 RUN_RECORDS = "BACKEND_BUILDER_RUN_RECORDS"
 RUN_RETENTION_DAYS = "BACKEND_BUILDER_RUN_RETENTION_DAYS"
 METRICS_PORT = "BACKEND_BUILDER_METRICS_PORT"
+ADMIN_PORT = "BACKEND_BUILDER_ADMIN_PORT"
+ADMIN_TOKEN = "BACKEND_BUILDER_ADMIN_TOKEN"
 
 
 class RuntimeEnv(StrEnum):
@@ -59,6 +61,9 @@ class Settings:
     run_retention_days: float = 7.0
     metrics_port: int = 9100
     """Every process serves /metrics and /health here, apart from the API's own port."""
+    admin_port: int = 9200
+    admin_token: str | None = None
+    """When set, the console asks for it once and keeps it in a cookie."""
 
     @property
     def store_name(self) -> str:
@@ -90,6 +95,8 @@ class Settings:
             run_records=_level(env),
             run_retention_days=_number(env, RUN_RETENTION_DAYS, 7.0),
             metrics_port=int(_number(env, METRICS_PORT, 9100)),
+            admin_port=int(_number(env, ADMIN_PORT, 9200)),
+            admin_token=env.get(ADMIN_TOKEN, "").strip() or None,
         )
 
 

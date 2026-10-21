@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% set title = "runs" %}
+{% block body %}
+<h1>Runs</h1>
+<form method="get" action="/runs">
+  <select name="reaction"><option value="">any reaction</option>{% for r in reactions %}<option value="{{ r.qualified }}" {{ 'selected' if filters.reaction == r.qualified else '' }}>{{ r.name }}</option>{% endfor %}</select>
+  <select name="outcome"><option value="">any outcome</option>{% for o in ["ok", "error", "timeout"] %}<option {{ 'selected' if filters.outcome == o else '' }}>{{ o }}</option>{% endfor %}</select>
+  <input name="source" placeholder="source starts with" value="{{ filters.source }}">
+  <button>Filter</button>
+</form>
+<br>
+{% include "_runs_table.html" %}
+{% endblock %}

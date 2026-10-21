@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% set title = "outbox row" %}
+{% block body %}
+<h1>{{ row.reaction | reaction_short }} <span class="muted"><code>{{ row.id }}</code></span></h1>
+<div class="cards">
+  <div class="card"><div class="n {{ 'dead' if row.dead_at else '' }}">{{ 'dead' if row.dead_at else ('claimed' if row.claimed_at else 'pending') }}</div><div class="l">state</div></div>
+  <div class="card"><div class="n">{{ row.attempts }}</div><div class="l">attempts</div></div>
+  <div class="card"><div class="n" style="font-size:14px">{{ row.available_at.strftime('%Y-%m-%d %H:%M:%S') }}</div><div class="l">available</div></div>
+  <div class="card"><div class="n" style="font-size:14px">{{ row.timeout_seconds }}s</div><div class="l">budget</div></div>
+</div>
+{% if row.last_error %}<h2>Last error</h2><pre class="error">{{ row.last_error }}</pre>{% endif %}
+<h2>Input</h2><pre>{{ row.input | tojson(indent=2) }}</pre>
+<p>
+  <form class="inline" method="post" action="/outbox/{{ row.id }}/requeue"><button>Requeue now</button></form>
+  <form class="inline" method="post" action="/outbox/{{ row.id }}/discard" onsubmit="return confirm('Discard this row?')"><button>Discard</button></form>
+</p>
+{% endblock %}

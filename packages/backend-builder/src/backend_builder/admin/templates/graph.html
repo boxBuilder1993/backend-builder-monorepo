@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% set title = "graph" %}
+{% block body %}
+<h1>Graph</h1>
+<h2>Entities</h2>
+<table><tr><th>entity</th><th>table</th><th>fields</th></tr>
+{% for e in entities %}<tr><td>{{ e.name }}</td><td><code>{{ e.table }}</code></td><td class="muted">{{ e.fields | join(', ') }}</td></tr>{% endfor %}
+</table>
+<h2>Reactions</h2>
+<table><tr><th>reaction</th><th>reached by</th><th>about</th></tr>
+{% for r in reactions %}
+<tr><td><a href="/reactions/{{ r.qualified }}">{{ r.name }}</a></td>
+<td>{% for e in r.endpoints %}<code>{{ e }}</code><br>{% endfor %}{% for t in r.triggers %}<code>{{ t }}</code><br>{% endfor %}{% if not r.endpoints and not r.triggers %}<span class="muted">explicit triggers only</span>{% endif %}</td>
+<td class="muted">{{ r.doc }}</td></tr>
+{% endfor %}
+</table>
+<h2>Endpoints</h2>
+<table><tr><th>route</th><th>reaction</th><th>timeout</th></tr>
+{% for e in app.endpoints %}<tr><td><code>{{ e.method }} {{ e.path }}</code></td><td><a href="/reactions/{{ e.reaction.__module__ }}.{{ e.reaction.__qualname__ }}">{{ e.reaction.__name__ }}</a></td><td class="muted">{{ e.timeout if e.timeout is not none else 'app default' }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

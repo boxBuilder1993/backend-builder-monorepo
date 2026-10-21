@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% set title = "login" %}
+{% block body %}
+<h1>Admin token</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/login"><input type="password" name="value" autofocus> <button>Enter</button></form>
+{% endblock %}
