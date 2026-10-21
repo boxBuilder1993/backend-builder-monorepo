@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from backend_builder.store import Predicate, Row, Store
+from backend_builder.store import Store
 
 if TYPE_CHECKING:
     from backend_builder.entity import Entity
@@ -19,13 +20,13 @@ class Context:
         self.store = store
         self.input = input
 
-    def get(self, entity: type[Entity], where: Predicate | None = None) -> list[Row]:
+    def get[E: Entity](self, entity: type[E], where: Callable[[E], bool] | None = None) -> list[E]:
         return self.store.get(entity, where)
 
-    def get_by_id(self, entity: type[Entity], row_id: str) -> Row | None:
+    def get_by_id[E: Entity](self, entity: type[E], row_id: str) -> E | None:
         return self.store.get_by_id(entity, row_id)
 
-    def create(self, entity: type[Entity], **fields: Any) -> Row:
+    def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         return self.store.create(entity, **fields)
 
     async def trigger(self, reaction: type[Reaction], input: Any) -> None:

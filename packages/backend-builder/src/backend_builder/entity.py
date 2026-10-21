@@ -1,16 +1,41 @@
 """Entity base class.
 
-An entity class is the key under which its rows are stored. For now rows are
-plain dicts and the class carries no fields beyond the system ones; it exists
-so that every store and context operation is addressed by a type rather than
-a string.
+An entity is a dataclass. Subclasses declare their fields as annotations and
+are turned into keyword-only dataclasses automatically. Instances are the rows
+a store holds, keyed by their entity class and ``id``.
 """
 
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import dataclass_transform
+from uuid import uuid4
+
+
+def _new_id() -> str:
+    return str(uuid4())
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass_transform(kw_only_default=True)
+@dataclass(kw_only=True)
 class Entity:
-    """Base class for all entities. Subclass to declare a new entity.
+    """Base class for all entities.
 
-    Every row carries ``id``, a UUID string assigned by the store on create.
+    System fields:
+      ``id``          primary key, a UUID string, generated unless supplied.
+      ``created_at``  UTC time the instance was constructed.
+      ``deleted_at``  set by a soft delete; ``None`` while the row is live.
     """
 
-    id: str
+    id: str = field(default_factory=_new_id)
+    created_at: datetime = field(default_factory=_now)
+    deleted_at: datetime | None = None
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        dataclass(kw_only=True)(cls)

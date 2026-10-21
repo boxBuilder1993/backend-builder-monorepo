@@ -5,12 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
-from uuid import uuid4
 
 from backend_builder.entity import Entity
-
-Row = dict[str, Any]
-Predicate = Callable[[Row], bool]
 
 
 class DuplicateKeyError(Exception):
@@ -18,50 +14,50 @@ class DuplicateKeyError(Exception):
 
 
 class Store(ABC):
-    """Where rows live. Each backend implements this."""
+    """Where rows live. Each backend implements this. Rows are entity instances
+    and are always returned by reference."""
 
     @abstractmethod
-    def get(self, entity: type[Entity], where: Predicate | None = None) -> list[Row]:
-        """Rows of ``entity``, optionally filtered. Rows are returned by reference."""
+    def get[E: Entity](self, entity: type[E], where: Callable[[E], bool] | None = None) -> list[E]:
+        """Live rows of ``entity``, optionally filtered."""
 
     @abstractmethod
-    def get_by_id(self, entity: type[Entity], row_id: str) -> Row | None:
-        """The row of ``entity`` with this ``id``, by reference, or ``None``."""
+    def get_by_id[E: Entity](self, entity: type[E], row_id: str) -> E | None:
+        """The live row of ``entity`` with this ``id``, or ``None``."""
 
     @abstractmethod
-    def create(self, entity: type[Entity], **fields: Any) -> Row:
-        """Store a new row and return it by reference.
+    def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
+        """Construct and store a new row.
 
         ``id`` is the primary key. If ``fields`` supplies one it must not already
-        exist for this entity; otherwise a fresh UUID string is generated.
+        exist for this entity; otherwise the entity generates one.
         """
 
 
 class InMemoryStore(Store):
-    """Rows held in dicts: entity -> id -> row."""
+    """Rows held in dicts: entity -> id -> instance."""
 
     def __init__(self) -> None:
-        self._rows: dict[type[Entity], dict[str, Row]] = {}
+        self._rows: dict[type[Entity], dict[str, Entity]] = {}
 
-    def get(self, entity: type[Entity], where: Predicate | None = None) -> list[Row]:
-        rows = self._rows.get(entity, {}).values()
+    def _table[E: Entity](self, entity: type[E]) -> dict[str, E]:
+        table: dict[str, E] = self._rows.setdefault(entity, {})  # type: ignore[assignment]
+        return table
+
+    def get[E: Entity](self, entity: type[E], where: Callable[[E], bool] | None = None) -> list[E]:
+        rows = (row for row in self._table(entity).values() if row.deleted_at is None)
         if where is None:
             return list(rows)
         return [row for row in rows if where(row)]
 
-    def get_by_id(self, entity: type[Entity], row_id: str) -> Row | None:
-        return self._rows.get(entity, {}).get(row_id)
+    def get_by_id[E: Entity](self, entity: type[E], row_id: str) -> E | None:
+        row = self._table(entity).get(row_id)
+        return row if row is not None and row.deleted_at is None else None
 
-    def create(self, entity: type[Entity], **fields: Any) -> Row:
-        rows = self._rows.setdefault(entity, {})
-        if "id" in fields:
-            row_id = fields.pop("id")
-            if row_id in rows:
-                raise DuplicateKeyError(f"{entity.__name__} id {row_id!r} already exists")
-        else:
-            row_id = str(uuid4())
-            while row_id in rows:
-                row_id = str(uuid4())
-        row: Row = {"id": row_id, **fields}
-        rows[row_id] = row
+    def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
+        table = self._table(entity)
+        row = entity(**fields)
+        if row.id in table:
+            raise DuplicateKeyError(f"{entity.__name__} id {row.id!r} already exists")
+        table[row.id] = row
         return row
