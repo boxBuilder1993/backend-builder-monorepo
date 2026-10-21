@@ -80,6 +80,8 @@ class Worker:
                 timeout=row.timeout_seconds,
                 outbox_row_id=row.id,
                 triggers=self.app.triggers,
+                source="schedule" if row.scheduled_for is not None else "outbox",
+                records=self.settings.run_records,
             )
             logger.info("worker delivered row=%s reaction=%s", row.id, reaction.__name__)
         except Exception as exc:

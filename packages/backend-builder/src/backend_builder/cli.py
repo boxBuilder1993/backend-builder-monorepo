@@ -111,6 +111,8 @@ def trigger(
             max_attempts=app.max_attempts,
             timeout=app.timeout,
             triggers=app.triggers,
+            source="cli",
+            records=settings().run_records,
         )
     )
     typer.echo(f"reaction_id={ctx.reaction_id} total_ms={ctx.trace.total_ms():.1f}")

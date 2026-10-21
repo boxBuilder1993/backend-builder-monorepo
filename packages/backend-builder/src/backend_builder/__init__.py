@@ -8,6 +8,7 @@ from backend_builder.log import configure as configure_logging
 from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
 from backend_builder.postgres import PostgresStore
 from backend_builder.reaction import Reaction
+from backend_builder.records import RunRecord, SpanRecord
 from backend_builder.scheduler import Scheduler
 from backend_builder.settings import RuntimeEnv, Settings, SettingsError
 from backend_builder.store import (
@@ -44,10 +45,12 @@ __all__ = [
     "PostgresStore",
     "Reaction",
     "Reply",
+    "RunRecord",
     "RuntimeEnv",
     "Scheduler",
     "Session",
     "Settings",
+    "SpanRecord",
     "SettingsError",
     "Span",
     "Store",

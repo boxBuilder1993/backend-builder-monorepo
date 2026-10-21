@@ -163,6 +163,7 @@ class App:
             max_attempts=self.max_attempts,
             timeout=self.timeout,
             triggers=self.triggers,
+            records=Settings.from_env().run_records,
         )
 
     def describe(self) -> dict[str, list[str]]:

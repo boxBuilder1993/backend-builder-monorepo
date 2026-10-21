@@ -11,6 +11,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import cast, get_args
+
+from backend_builder.records import RecordLevel
 
 RUNTIME_ENV = "RUNTIME_ENV"
 DATABASE_URL = "BACKEND_BUILDER_DATABASE_URL"
@@ -21,6 +24,8 @@ OUTBOX_LEASE_GRACE_SECONDS = "BACKEND_BUILDER_OUTBOX_LEASE_GRACE_SECONDS"
 OUTBOX_MAX_ATTEMPTS = "BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS"
 OUTBOX_CONCURRENCY = "BACKEND_BUILDER_OUTBOX_CONCURRENCY"
 SCHEDULER_TICK_SECONDS = "BACKEND_BUILDER_SCHEDULER_TICK_SECONDS"
+RUN_RECORDS = "BACKEND_BUILDER_RUN_RECORDS"
+RUN_RETENTION_DAYS = "BACKEND_BUILDER_RUN_RETENTION_DAYS"
 
 
 class RuntimeEnv(StrEnum):
@@ -47,6 +52,10 @@ class Settings:
     scheduler_tick_seconds: float = 15.0
     """Must stay under the finest cron granularity, one minute, so no
     occurrence is missed while the scheduler runs."""
+    run_records: RecordLevel = "full"
+    """``full`` keeps inputs and vars; ``summary`` keeps everything else;
+    ``off`` records nothing."""
+    run_retention_days: float = 7.0
 
     @property
     def store_name(self) -> str:
@@ -75,7 +84,17 @@ class Settings:
             outbox_max_attempts=int(_number(env, OUTBOX_MAX_ATTEMPTS, 5)),
             outbox_concurrency=int(_number(env, OUTBOX_CONCURRENCY, 4)),
             scheduler_tick_seconds=_number(env, SCHEDULER_TICK_SECONDS, 15.0),
+            run_records=_level(env),
+            run_retention_days=_number(env, RUN_RETENTION_DAYS, 7.0),
         )
+
+
+def _level(env: Mapping[str, str]) -> RecordLevel:
+    raw = env.get(RUN_RECORDS, "full").strip().lower() or "full"
+    if raw not in get_args(RecordLevel):
+        allowed = ", ".join(get_args(RecordLevel))
+        raise SettingsError(f"{RUN_RECORDS}={raw!r}; expected one of {allowed}")
+    return cast(RecordLevel, raw)
 
 
 def _number(env: Mapping[str, str], name: str, default: float) -> float:
