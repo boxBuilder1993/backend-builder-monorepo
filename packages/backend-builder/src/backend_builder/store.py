@@ -13,6 +13,10 @@ Row = dict[str, Any]
 Predicate = Callable[[Row], bool]
 
 
+class DuplicateKeyError(Exception):
+    """Raised when a row is created with an ``id`` that already exists."""
+
+
 class Store(ABC):
     """Where rows live. Each backend implements this."""
 
@@ -22,7 +26,11 @@ class Store(ABC):
 
     @abstractmethod
     def create(self, entity: type[Entity], **fields: Any) -> Row:
-        """Store a new row with a fresh ``id`` and return it by reference."""
+        """Store a new row and return it by reference.
+
+        ``id`` is the primary key. If ``fields`` supplies one it must not already
+        exist for this entity; otherwise a fresh UUID string is generated.
+        """
 
 
 class InMemoryStore(Store):
@@ -38,7 +46,15 @@ class InMemoryStore(Store):
         return [row for row in rows if where(row)]
 
     def create(self, entity: type[Entity], **fields: Any) -> Row:
-        row_id = str(uuid4())
+        rows = self._rows.setdefault(entity, {})
+        if "id" in fields:
+            row_id = fields.pop("id")
+            if row_id in rows:
+                raise DuplicateKeyError(f"{entity.__name__} id {row_id!r} already exists")
+        else:
+            row_id = str(uuid4())
+            while row_id in rows:
+                row_id = str(uuid4())
         row: Row = {"id": row_id, **fields}
-        self._rows.setdefault(entity, {})[row_id] = row
+        rows[row_id] = row
         return row

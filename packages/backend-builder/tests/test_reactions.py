@@ -1,7 +1,7 @@
 from typing import Any
 
 import pytest
-from backend_builder import Context, Entity, InMemoryStore, Reaction
+from backend_builder import Context, DuplicateKeyError, Entity, InMemoryStore, Reaction
 from backend_builder.reaction import qualified_name, resolve
 
 
@@ -61,3 +61,11 @@ def test_registry_resolves_qualified_name() -> None:
     assert resolve(qualified_name(OrderTotal)) is OrderTotal
     with pytest.raises(LookupError):
         resolve("nowhere.Missing")
+
+
+async def test_explicit_id_is_honoured_and_must_be_unique(store: InMemoryStore) -> None:
+    row = store.create(Order, id="order-1", total=0)
+    assert row["id"] == "order-1"
+    with pytest.raises(DuplicateKeyError):
+        store.create(Order, id="order-1")
+    assert store.create(OrderLine, id="order-1")["id"] == "order-1"
