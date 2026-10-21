@@ -104,7 +104,13 @@ def trigger(
         raise typer.BadParameter("input must be a JSON object")
     payload: dict[str, Any] = {str(k): v for k, v in parsed.items()}  # type: ignore[union-attr]
     ctx = asyncio.run(
-        run(app.create_store(), app.resolve(reaction), payload, max_attempts=app.max_attempts)
+        run(
+            app.check_store(app.create_store()),
+            app.resolve(reaction),
+            payload,
+            max_attempts=app.max_attempts,
+            triggers=app.triggers,
+        )
     )
     typer.echo(f"reaction_id={ctx.reaction_id} total_ms={ctx.trace.total_ms():.1f}")
 
@@ -166,7 +172,7 @@ def worker(package: str, once: bool = False, log_level: str | None = None) -> No
     current = settings()
     configure((log_level or current.log_level).upper())
     app = load_app(package)
-    store = app.create_store()
+    store = app.check_store(app.create_store())
     worker = Worker(app, store, current)
     if once:
         claimed = asyncio.run(worker.run_once())

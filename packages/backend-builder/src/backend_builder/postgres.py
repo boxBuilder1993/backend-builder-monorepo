@@ -218,11 +218,16 @@ class PostgresStore(Store):
                 "input": e.input,
                 "created_at": stamp,
                 "available_at": e.available_at or stamp,
+                "scheduled_for": e.scheduled_for,
             }
             for e in entries
         ]
+        statement = pg.insert(self._outbox).on_conflict_do_nothing(
+            index_elements=["reaction", "scheduled_for"],
+            index_where=sa.text("scheduled_for IS NOT NULL"),
+        )
         async with self._connection() as connection:
-            await connection.execute(sa.insert(self._outbox), rows)
+            await connection.execute(statement, rows)
 
     async def claim(self, limit: int, worker_id: str, lease_seconds: float) -> list[OutboxRow]:
         statement = sa.text(
@@ -237,7 +242,7 @@ class PostgresStore(Store):
                 limit :limit
                 for update skip locked
             )
-            returning id, reaction, input, attempts, available_at, created_at
+            returning id, reaction, input, attempts, available_at, created_at, scheduled_for
             """
         )
         stamp = now()
@@ -257,6 +262,7 @@ class PostgresStore(Store):
                 attempts=r["attempts"],
                 available_at=r["available_at"],
                 created_at=r["created_at"],
+                scheduled_for=r["scheduled_for"],
             )
             for r in rows
         ]

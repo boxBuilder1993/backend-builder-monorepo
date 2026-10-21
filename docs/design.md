@@ -211,7 +211,7 @@ Built.
 **App** is the single declaration of scope:
 
 ```python
-app = App(package="shop", endpoints=endpoints, store=InMemoryStore, include=())
+app = App(package="shop", endpoints=endpoints, triggers=triggers, store=None, include=(), max_attempts=3)
 ```
 
 On construction it imports every module under its package with `pkgutil.walk_packages`, so all reactions and entities are registered, then derives `reactions` and `entities` as those whose qualified name starts with the package. `include` adds classes from other packages explicitly, because a shared entity means a table in this app's database and that should never be implicit. `resolve(name)` maps a qualified name to one of the app's reactions and nothing else. `http(store)` builds the FastAPI app. `describe()` lists everything.
@@ -224,7 +224,9 @@ An app is any importable package. The monorepo keeps apps under `apps/`, but the
 | --- | --- |
 | `serve <package> [--host --port --reload --log-level]` | the HTTP process |
 | `trigger <package> <reaction> --input <json>` | one reaction against a fresh store from the app's factory |
-| `graph <package>` | prints entities, reactions, endpoints |
+| `graph <package>` | prints entities, reactions, endpoints, triggers |
+| `worker <package> [--once]` | delivers outbox rows and keeps schedules seeded |
+| `outbox <package>` | prints pending, claimed and dead counts |
 | `makemigration <package> [-m] [--empty] [--check] [--merge]` | decided, section 13 |
 | `migrate <package>` | decided, section 13 |
 
@@ -332,8 +334,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 Each of these was designed in the earlier draft and is parked, with what has to exist first.
 
 - **Deferred execution.** Built; see section 16.
-- **Data-change triggers.** Reactions that run because a field changed, declared in a config rather than called. The earlier draft matched them against per-pass deltas before commit and against WAL-decoded changes after. The session can now detect changes by snapshot comparison at flush, which is the natural input for the synchronous half. The design will be redone on that basis once deferred execution exists.
-- **Scheduling.** Cron entries that enqueue an outbox row when due.
+- **Data-change triggers and schedules.** Built; see section 16.
 - **Timeouts and concurrent triggers.** A task group per context and a per-trigger timeout.
 - **Docker and Kubernetes.** Per [infrastructure.md](infrastructure.md), after settings.
 
@@ -352,6 +353,30 @@ Built.
 **Chains.** A deferred reaction may trigger immediately, defer further work, and when data-change triggers exist, cause more rows; it is a run like any other.
 
 **Observing.** `backend-builder outbox <app>` prints pending, claimed and dead counts and the oldest pending time. The poll interval is `BACKEND_BUILDER_OUTBOX_POLL_SECONDS`.
+
+**Data-change triggers.** Declared on the `App`, passed through to every run, and matched at flush against what the session wrote:
+
+```python
+triggers = [
+    OnCreate(OrderLine, OrderTotal),
+    OnChange(OrderLine, ["price", "qty"], OrderTotal),
+    OnDelete(OrderLine, OrderTotal),
+]
+```
+
+`OnCreate` matches every row inserted by the run. `OnChange` matches a loaded row when at least one listed field differs from its load snapshot; a change reverted within the run does not count, and a row whose `deleted_at` went from null to set is a delete, not an update. `OnDelete` matches that transition. Each match is one outbox row, so a run that creates two lines enqueues the reaction twice. The input names what happened and nothing more; the reaction loads current state itself:
+
+```python
+{"entity": "order_line", "id": "...", "kind": "created"}
+{"entity": "order_line", "id": "...", "kind": "updated", "changed": ["qty"]}
+{"entity": "order_line", "id": "...", "kind": "deleted"}
+```
+
+Declarations are validated when the `App` is built: fields must exist on the entity, and the entity and reaction must belong to the app. An app that declares triggers refuses the in-memory store, since it has no outbox and they would silently never fire.
+
+**Schedules.** `OnSchedule("0 3 * * *", NightlyRollup)` is declared alongside the others. The outbox carries time, so no scheduler process exists: the worker keeps exactly one pending row per schedule at its next occurrence, seeding on every poll with an insert that the unique index on `(reaction, scheduled_for)` turns into a no-op when the row is already there, so any number of workers may seed. When a scheduled row is delivered, the worker enqueues the occurrence after it. The reaction's input is `{"scheduled_for": "<ISO timestamp>"}`. A failed scheduled run follows the ordinary release and dead path, and the next occurrence is already queued, so one failure does not stop the schedule.
+
+**The eight ways a reaction runs.** Endpoint, generic endpoint or CLI, immediate trigger from a reaction, deferred trigger from a reaction, `OnCreate`, `OnChange`, `OnDelete`, `OnSchedule`. Every one ends in the same `run` with the app's retry policy and the app's triggers, so a deferred or scheduled reaction can trigger immediately, defer further work, or cause more data-change rows exactly as a request-driven one can. The reaction never knows which started it.
 
 ## 17. Decisions
 

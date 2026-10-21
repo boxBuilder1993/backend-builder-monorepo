@@ -28,6 +28,7 @@ from backend_builder.reaction import qualified_name as reaction_name
 from backend_builder.schema import build_metadata
 from backend_builder.settings import Settings
 from backend_builder.store import InMemoryStore, Store
+from backend_builder.triggers import OnChange, OnSchedule, Trigger, TriggerError
 
 logger = get_logger(__name__)
 
@@ -42,9 +43,13 @@ class App:
         include: Sequence[type[Reaction] | type[Entity]] = (),
         migrations: Path | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        triggers: Sequence[Trigger] = (),
     ) -> None:
         self.package = package
         self.endpoints = list(endpoints)
+        self.triggers = list(triggers)
+        """Data-change and scheduled triggers. Matched at flush and by the
+        worker. Postgres only."""
         self.max_attempts = max_attempts
         """How many times a run is attempted before its error propagates.
         One policy for every reaction of the app, over HTTP and the CLI."""
@@ -55,6 +60,36 @@ class App:
         """Where this app's migration chain lives. Default: ``migrations/``
         inside the package."""
         self.metadata  # noqa: B018  # validate the schema now, not at first use
+        self._validate_triggers()
+
+    def _validate_triggers(self) -> None:
+        entities = set(self.entities)
+        reactions = set(self.reactions)
+        for trigger in self.triggers:
+            if trigger.reaction not in reactions:
+                raise TriggerError(
+                    f"{self.package}: trigger names {trigger.reaction.__name__}, "
+                    "which is not one of this app's reactions"
+                )
+            if not isinstance(trigger, OnSchedule) and trigger.entity not in entities:
+                raise TriggerError(
+                    f"{self.package}: trigger names {trigger.entity.__name__}, "
+                    "which is not one of this app's entities"
+                )
+
+    @property
+    def schedules(self) -> list[OnSchedule]:
+        return [t for t in self.triggers if isinstance(t, OnSchedule)]
+
+    def check_store(self, store: Store) -> Store:
+        """Refuse an in-memory store for an app that declares triggers, since
+        it has no outbox and they would silently never fire."""
+        if self.triggers and isinstance(store, InMemoryStore):
+            raise TriggerError(
+                f"{self.package} declares triggers, which need the outbox; "
+                "the in-memory store has none. Set BACKEND_BUILDER_DATABASE_URL."
+            )
+        return store
 
     @property
     def name(self) -> str:
@@ -116,12 +151,13 @@ class App:
         """The FastAPI app for this app's endpoints over ``store``, or over a
         fresh store from the factory."""
         return create_app(
-            store if store is not None else self.create_store(),
+            self.check_store(store if store is not None else self.create_store()),
             self.endpoints,
             generic=generic,
             resolver=self.resolve,
             title=self.name,
             max_attempts=self.max_attempts,
+            triggers=self.triggers,
         )
 
     def describe(self) -> dict[str, list[str]]:
@@ -131,4 +167,13 @@ class App:
             "endpoints": [
                 f"{e.method} {e.path} -> {reaction_name(e.reaction)}" for e in self.endpoints
             ],
+            "triggers": [_describe_trigger(t) for t in self.triggers],
         }
+
+
+def _describe_trigger(trigger: Trigger) -> str:
+    target = reaction_name(trigger.reaction)
+    if isinstance(trigger, OnSchedule):
+        return f"OnSchedule({trigger.cron!r}) -> {target}"
+    detail = f", {list(trigger.fields)}" if isinstance(trigger, OnChange) else ""
+    return f"{type(trigger).__name__}({trigger.entity.__name__}{detail}) -> {target}"
