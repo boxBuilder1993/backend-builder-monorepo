@@ -247,6 +247,7 @@ Endpoint(
     headers=TenantHeaders,      # x_tenant_id reads X-Tenant-Id
     response=LineResponse,
     build=line_response,
+    timeout=None,               # seconds; None is the app default
 )
 ```
 
@@ -383,6 +384,8 @@ Declarations are validated when the `App` is built: fields must exist on the ent
 Built.
 
 **One deadline per run.** `App(timeout=60)` is the budget for a whole run: the seed reaction, everything it triggers immediately, the flush, and every retry attempt together, so three attempts cannot take three times the budget. `run` wraps the attempt loop in `asyncio.timeout`. When it expires the current attempt is cancelled, its transaction rolls back, and `TimeoutError` propagates: a 500 over HTTP, a released outbox row in the worker, an error from the CLI. A timeout is never retried. On Postgres the cancelled statement is abandoned and the connection discarded; the store is usable again immediately.
+
+**Per-endpoint budgets.** `Endpoint(..., timeout=5)` bounds that endpoint's run and its response builder together, tighter or looser than the app default, since each request is its own run. The generic route and the CLI use the app default. A client that gives up first does not cancel the run; it continues to its own deadline and commits if it finishes. The builder runs after the commit, so a budget that expires during the builder returns a 500 for a run that did commit; builders are expected to be trivial.
 
 **Per-trigger budgets.** `await ctx.trigger(R, input, timeout=5)` bounds an immediate sub-reaction within the run's remaining budget; it can only tighten, because a transaction cannot be extended from inside, and its expiry aborts the whole run, because a cancelled transaction cannot be resumed. `await ctx.trigger(R, input, deferred=True, timeout=3600)` sets the budget of that delivery's own run and may be any value. `OnCreate`, `OnChange`, `OnDelete` and `OnSchedule` take `timeout=` for the rows they produce. `None` everywhere means the app default.
 

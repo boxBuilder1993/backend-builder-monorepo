@@ -139,6 +139,55 @@ async def test_postgres_run_timeout_rolls_back(store: PostgresStore) -> None:
     assert await store.query_raw("select count(*) as n from thing") == [{"n": 1}]
 
 
+# --- endpoints --------------------------------------------------------------------------------
+
+
+class SlowBuild(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        ctx.create(Thing, label="built")
+
+
+async def _slow_builder(ctx: Context) -> dict[str, str]:
+    await asyncio.sleep(1.0)
+    return {"ok": "never"}
+
+
+async def _quick_builder(ctx: Context) -> dict[str, int]:
+    return {"things": len(await ctx.get(Thing))}
+
+
+def test_endpoint_timeout_overrides_the_app_default_and_covers_the_builder() -> None:
+    from backend_builder import Endpoint, create_app
+    from fastapi.testclient import TestClient
+
+    endpoints = [
+        Endpoint(method="POST", path="/slow", reaction=Sleep, timeout=0.2),
+        Endpoint(method="POST", path="/loose", reaction=Sleep, timeout=5),
+        Endpoint(
+            method="POST", path="/slow-build", reaction=SlowBuild, build=_slow_builder, timeout=0.2
+        ),
+        Endpoint(method="POST", path="/default", reaction=Sleep),
+        Endpoint(method="POST", path="/quick", reaction=Quick, build=_quick_builder),
+    ]
+    store = InMemoryStore()
+    client = TestClient(create_app(store, endpoints, timeout=0.3), raise_server_exceptions=False)
+
+    res = client.post("/slow")  # 1s reaction under a 0.2s endpoint budget
+    assert res.status_code == 500 and res.json()["error"] == "TimeoutError"
+    assert res.json()["reaction_id"] == res.headers["X-Reaction-Id"]
+
+    assert client.post("/loose").status_code == 200  # looser than the app's 0.3s
+
+    res = client.post("/slow-build")  # the run is fine; the builder blows the budget
+    assert res.status_code == 500 and res.json()["error"] == "TimeoutError"
+
+    assert client.post("/default").status_code == 500  # the app's 0.3s applies
+
+    # Timed-out runs wrote nothing. /loose wrote two rows. /slow-build wrote one:
+    # its run committed before the builder timed out, so the 500 hides a commit.
+    assert client.post("/quick").json() == {"things": 4}
+
+
 # --- the outbox carries the budget ----------------------------------------------------------
 
 

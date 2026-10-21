@@ -18,6 +18,7 @@ qualified name with the JSON body as its input and returns an empty object.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -62,6 +63,9 @@ class Endpoint:
     build: Callable[[Context], Awaitable[Any]] | None = None
     """Async; reads the root context after the run and returns the response
     body. Absent means an empty object."""
+    timeout: float | None = None
+    """Budget for this endpoint's run and its response builder, in seconds.
+    None means the app default. May be tighter or looser."""
 
     def __post_init__(self) -> None:
         names: set[str] = set(_PATH_PARAM.findall(self.path))
@@ -150,6 +154,8 @@ def _handler(
     path_names = _PATH_PARAM.findall(endpoint.path)
     sources = {"query": endpoint.query, "body": endpoint.body, "headers": endpoint.headers}
 
+    budget = endpoint.timeout if endpoint.timeout is not None else timeout
+
     async def handler(**kwargs: Any) -> Any:
         response: Response = kwargs.pop("response")
         input: dict[str, Any] = {}
@@ -163,9 +169,23 @@ def _handler(
             if model is not None:
                 input[source] = model.model_dump()
 
-        ctx = await _run(store, endpoint.reaction, input, max_attempts, timeout, triggers)
-        response.headers[REACTION_ID_HEADER] = ctx.reaction_id
-        return await endpoint.build(ctx) if endpoint.build is not None else {}
+        reaction_id = str(uuid4())
+        try:
+            async with asyncio.timeout(budget):
+                ctx = await run(
+                    store,
+                    endpoint.reaction,
+                    input,
+                    reaction_id=reaction_id,
+                    max_attempts=max_attempts,
+                    timeout=budget,
+                    triggers=triggers,
+                )
+                body: Any = await endpoint.build(ctx) if endpoint.build is not None else {}
+        except Exception as exc:
+            raise RunFailed(reaction_id, exc) from exc
+        response.headers[REACTION_ID_HEADER] = reaction_id
+        return body
 
     kw = inspect.Parameter.KEYWORD_ONLY
     params: list[inspect.Parameter] = []

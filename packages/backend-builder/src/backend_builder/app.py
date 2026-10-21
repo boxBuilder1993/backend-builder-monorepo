@@ -170,7 +170,9 @@ class App:
             "entities": [entity_name(e) for e in self.entities],
             "reactions": [reaction_name(r) for r in self.reactions],
             "endpoints": [
-                f"{e.method} {e.path} -> {reaction_name(e.reaction)}" for e in self.endpoints
+                f"{e.method} {e.path} -> {reaction_name(e.reaction)}"
+                + (f" (timeout {e.timeout}s)" if e.timeout is not None else "")
+                for e in self.endpoints
             ],
             "triggers": [_describe_trigger(t) for t in self.triggers],
         }
