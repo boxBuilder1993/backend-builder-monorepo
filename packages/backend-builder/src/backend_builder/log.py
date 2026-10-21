@@ -28,14 +28,26 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"{ROOT}.{name}")
 
 
+class _CurrentStderr:
+    """A stream-like object that always writes to the current ``sys.stderr``,
+    so a handler survives test runners and tools that swap or close it."""
+
+    def write(self, text: str) -> int:
+        return sys.stderr.write(text)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
+
+
 def configure(level: int | str = logging.INFO, *, stream: TextIO | None = None) -> None:
-    """Send package logs at ``level`` and above to ``stream`` (default stderr).
+    """Send package logs at ``level`` and above to ``stream``, or to whatever
+    ``sys.stderr`` is at the time of each message when no stream is given.
 
     Replaces any stream handler a previous call attached, so it is safe to
     call more than once.
     """
     logger = logging.getLogger(ROOT)
-    handler = logging.StreamHandler(stream or sys.stderr)
+    handler = logging.StreamHandler(stream if stream is not None else _CurrentStderr())  # type: ignore[arg-type]
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)-5s %(name)s %(message)s", "%H:%M:%S")
     )

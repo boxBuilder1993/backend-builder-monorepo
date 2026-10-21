@@ -146,7 +146,7 @@ The session itself is not exposed. A reaction holds a context and nothing else.
 
 ## 6. Session and flush
 
-Built; the changed-columns comparison is decided.
+Built.
 
 The session is an `InMemoryStore` with a backing store and a flush.
 
@@ -156,7 +156,7 @@ The session is an `InMemoryStore` with a backing store and a flush.
 
 **Vars.** `session.vars` is a plain dict. `ctx.save` and `ctx.load` read and write it. Shared by every reaction in the run, readable after the run by whatever consumes it, never persisted.
 
-**Flush.** Called once by `run` after the seed reaction returns. Created rows are inserted. Loaded rows are updated. On the in-memory store the update replaces the row. On Postgres the session compares each loaded instance to a snapshot taken at load and issues `UPDATE` only for rows that changed, setting only the changed columns. Flush never upserts: a created row whose id exists is a primary key violation, not an overwrite.
+**Flush.** Called once by `run` after the seed reaction returns. Created rows are inserted. For each loaded row the session compares the instance to a snapshot of its field values taken at load, and passes only the changed fields to the store's `update`; an unchanged row produces no write, and a value changed and changed back within the run is unchanged. Nested mutations are caught because the comparison is of the whole value. The in-memory store applies the changes in place; Postgres issues an `UPDATE` setting only those columns. Flush never upserts: a created row whose id exists is a primary key violation, not an overwrite.
 
 **Discard.** An exception anywhere in the run propagates out of `run` before `flush`. The session is garbage and the store is as it was.
 
@@ -172,7 +172,7 @@ The in-memory store is built. The Postgres store is decided.
 | `get(entity, where, *, include_deleted)` | rows matching a Python predicate; native to the in-memory store, raises elsewhere |
 | `query(entity, statement, **params)` | rows matching a native statement; native to Postgres, raises elsewhere |
 | `create(entity, **fields)` | insert; `DuplicateKeyError` if the id exists |
-| `update(entity, row)` | replace by id; `MissingRowError` if absent |
+| `update(entity, id, changes)` | apply changed fields by id; `MissingRowError` if absent |
 | `run_scope()` | async context held for a whole run |
 | `ping()` | reachable, for the health endpoint |
 
@@ -319,7 +319,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 ## 14. Order of work
 
 1. Async reads and `query` on the interface, in-memory raising on `query`; shop and fixture apps updated.
-2. Snapshot-and-compare flush.
+2. Snapshot-and-compare flush. Done.
 3. Field-to-column mapping and Alembic: `makemigration`, `migrate`, `--check`, `--empty`; the shop app's first migration committed.
 4. `PostgresStore` with `run_scope`, retry, `query`; the `pgserver` test harness; the shop suite running on both stores.
 5. Settings and the store factory.
