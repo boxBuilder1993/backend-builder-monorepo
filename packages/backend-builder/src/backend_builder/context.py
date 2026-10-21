@@ -55,6 +55,10 @@ class Context:
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         return self._session.create(entity, **fields)
 
+    def delete(self, row: Entity) -> None:
+        """Soft-delete ``row``. It disappears from reads unless asked for."""
+        self._session.delete(row)
+
     def save(self, name: str, value: Any) -> None:
         """Keep ``value`` under ``name`` in the session for the rest of the run."""
         self._session.vars[name] = value

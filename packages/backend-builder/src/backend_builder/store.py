@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import fields
+from datetime import UTC, datetime
 from typing import Any
 
 from backend_builder.entity import Entity
@@ -56,6 +59,17 @@ class Store(ABC):
     def update[E: Entity](self, entity: type[E], row: E) -> None:
         """Replace the stored row with the same ``id`` as ``row``."""
 
+    @asynccontextmanager
+    async def run_scope(self) -> AsyncGenerator[None]:
+        """Held for the whole of a run. A backend with real transactions
+        yields immediately; one without serialises runs here so two runs can
+        never load, mutate and flush the same row over each other."""
+        yield
+
+    def ping(self) -> bool:
+        """Whether the backend is reachable. Used by the health endpoint."""
+        return True
+
 
 def _clone[E: Entity](row: E) -> E:
     return copy.deepcopy(row)
@@ -66,10 +80,20 @@ def _field_values(row: Entity) -> dict[str, Any]:
 
 
 class InMemoryStore(Store):
-    """Rows held in dicts: entity -> id -> instance."""
+    """Rows held in dicts: entity -> id -> instance.
+
+    Has no transactions, so runs are serialised with a lock: one run at a
+    time per store. Correct, and the throughput ceiling of this backend.
+    """
 
     def __init__(self) -> None:
         self._rows: dict[type[Entity], dict[str, Entity]] = {}
+        self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def run_scope(self) -> AsyncGenerator[None]:
+        async with self._lock:
+            yield
 
     def _table[E: Entity](self, entity: type[E]) -> dict[str, E]:
         table: dict[str, E] = self._rows.setdefault(entity, {})  # type: ignore[assignment]
@@ -152,6 +176,11 @@ class Session(InMemoryStore):
             if row is not None:
                 table[row_id] = _clone(row)
         return super().get_by_id(entity, row_id, include_deleted=include_deleted)
+
+    def delete(self, row: Entity) -> None:
+        """Soft-delete ``row``: stamp ``deleted_at`` with the current UTC time.
+        The row stays in the working set and is written back on flush."""
+        row.deleted_at = datetime.now(UTC)
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         row = super().create(entity, **fields)
