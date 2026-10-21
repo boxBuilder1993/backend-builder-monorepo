@@ -92,7 +92,11 @@ async def order_response(ctx: Context) -> OrderResponse:
     order: Order = ctx.load("order")
     lines: list[OrderLine] = []
     if ctx.load("include_lines"):
-        lines = await ctx.get(OrderLine, lambda line: line.order_id == order.id)
+        lines = await ctx.query(
+            OrderLine,
+            "select * from order_line where order_id = :order_id and deleted_at is null",
+            order_id=order.id,
+        )
     return OrderResponse(
         order=OrderOut.model_validate(order),
         lines=[LineOut.model_validate(line) for line in lines],

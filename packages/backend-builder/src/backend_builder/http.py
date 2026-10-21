@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend_builder.context import Context
-from backend_builder.engine import run
+from backend_builder.engine import DEFAULT_MAX_ATTEMPTS, run
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, resolve
 from backend_builder.store import Store
@@ -89,6 +89,7 @@ def create_app(
     generic: bool = True,
     resolver: Callable[[str], type[Reaction]] = resolve,
     title: str = "backend-builder",
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> FastAPI:
     """A FastAPI app over ``store`` exposing ``endpoints`` and, if ``generic``,
     the ``POST /reactions/{name}`` route. ``resolver`` maps a qualified name to
@@ -97,7 +98,7 @@ def create_app(
     app.add_exception_handler(RunFailed, _run_failed)
 
     async def health() -> JSONResponse:
-        ok = store.ping()
+        ok = await store.ping()
         return JSONResponse(
             status_code=200 if ok else 503,
             content={"status": "ok" if ok else "unavailable", "store": type(store).__name__},
@@ -108,7 +109,7 @@ def create_app(
     for endpoint in endpoints:
         app.add_api_route(
             endpoint.path,
-            _handler(store, endpoint),
+            _handler(store, endpoint, max_attempts),
             methods=[endpoint.method],
             response_model=endpoint.response,
             name=endpoint.reaction.__name__,
@@ -121,7 +122,7 @@ def create_app(
             if not isinstance(body, dict):
                 return _bad_request("body must be a JSON object")
             input: dict[str, Any] = {str(k): v for k, v in body.items()}  # type: ignore[union-attr]
-            ctx = await _run(store, resolver(name), input)
+            ctx = await _run(store, resolver(name), input, max_attempts)
             response.headers[REACTION_ID_HEADER] = ctx.reaction_id
             return {}
 
@@ -130,7 +131,7 @@ def create_app(
     return app
 
 
-def _handler(store: Store, endpoint: Endpoint) -> Callable[..., Any]:
+def _handler(store: Store, endpoint: Endpoint, max_attempts: int) -> Callable[..., Any]:
     path_names = _PATH_PARAM.findall(endpoint.path)
     sources = {"query": endpoint.query, "body": endpoint.body, "headers": endpoint.headers}
 
@@ -147,7 +148,7 @@ def _handler(store: Store, endpoint: Endpoint) -> Callable[..., Any]:
             if model is not None:
                 input[source] = model.model_dump()
 
-        ctx = await _run(store, endpoint.reaction, input)
+        ctx = await _run(store, endpoint.reaction, input, max_attempts)
         response.headers[REACTION_ID_HEADER] = ctx.reaction_id
         return await endpoint.build(ctx) if endpoint.build is not None else {}
 
@@ -171,10 +172,12 @@ def _handler(store: Store, endpoint: Endpoint) -> Callable[..., Any]:
     return handler
 
 
-async def _run(store: Store, reaction: type[Reaction], input: dict[str, Any]) -> Context:
+async def _run(
+    store: Store, reaction: type[Reaction], input: dict[str, Any], max_attempts: int
+) -> Context:
     reaction_id = str(uuid4())
     try:
-        return await run(store, reaction, input, reaction_id=reaction_id)
+        return await run(store, reaction, input, reaction_id=reaction_id, max_attempts=max_attempts)
     except Exception as exc:
         raise RunFailed(reaction_id, exc) from exc
 

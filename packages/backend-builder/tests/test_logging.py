@@ -46,8 +46,11 @@ async def test_debug_logs_include_input_and_rows(caplog: pytest.LogCaptureFixtur
 async def test_failure_is_logged_at_error_and_reraised(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="backend_builder")
     with pytest.raises(ValueError):
-        await run(InMemoryStore(), Explode, {})
+        await run(InMemoryStore(), Explode, {}, max_attempts=1)
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1 and errors[0].startswith("reaction failed reaction=Explode")
+    assert [e.split(" reaction_id=")[0] for e in errors] == [
+        "reaction failed reaction=Explode",
+        "run gave up reaction=Explode",
+    ]
     assert not any(m.startswith("flush") for m in (r.getMessage() for r in caplog.records))

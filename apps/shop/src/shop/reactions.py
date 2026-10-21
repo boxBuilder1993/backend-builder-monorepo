@@ -10,7 +10,11 @@ class OrderTotal(Reaction):
         order = await ctx.get_by_id(Order, ctx.input["order_id"])
         if order is None:
             raise LookupError(f"no order {ctx.input['order_id']}")
-        lines = await ctx.get(OrderLine, lambda line: line.order_id == order.id)
+        lines = await ctx.query(
+            OrderLine,
+            "select * from order_line where order_id = :order_id and deleted_at is null",
+            order_id=order.id,
+        )
         order.total = sum(line.price * line.qty for line in lines)
 
 
