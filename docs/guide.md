@@ -57,11 +57,13 @@ Add the package to the workspace in the root `pyproject.toml`, run `uv sync --al
 ```python
 from backend_builder import Entity
 
+
 class Order(Entity):
     user_id: str
     tenant: str = "default"
     total: int = 0
     status: str = "new"
+
 
 class OrderLine(Entity):
     order_id: str
@@ -89,6 +91,7 @@ There is no `updated_at`.
 from dataclasses import field
 from backend_builder.schema import PERSIST
 
+
 class Order(Entity):
     user_id: str
     lines: list["OrderLine"] = field(default_factory=list, metadata={PERSIST: False})
@@ -102,6 +105,7 @@ class Order(Entity):
 
 ```python
 from backend_builder import Context, Reaction
+
 
 class UpdateLine(Reaction):
     """Reprice or requantify a line. The total follows through OnChange."""
@@ -217,7 +221,12 @@ triggers = [
 **Data-change triggers** fire when a run commits a matching change. At flush the session compares every created, changed and deleted row against the triggers and writes one outbox row per match, in the same transaction as the data. A worker process then claims the row and runs the reaction as a run of its own. The reaction's input is the change, not the data:
 
 ```python
-{"entity": "order_line", "id": "...", "kind": "created" | "updated" | "deleted", "changed": ["price"]}
+{
+    "entity": "order_line",
+    "id": "...",
+    "kind": "created" | "updated" | "deleted",
+    "changed": ["price"],
+}
 ```
 
 `changed` is present for `OnChange` and lists which of the trigger's fields changed. The reaction loads current state fresh, which is why the same `OrderTotal` serves all three triggers: whatever happened to a line, recompute the order from what's there now. Write triggered reactions so that running them twice is harmless; at-least-once delivery is the guarantee.
@@ -247,10 +256,10 @@ Endpoint(
     method="GET",
     path="/orders/{order_id}",
     reaction=GetOrderApi,
-    path_model=OrderPath,          # one field per {name} in path
-    query=GetOrderQuery,           # ?include_lines=true
-    response=OrderResponse,        # documents and validates what build returns
-    responses={404: ErrorOut},     # other statuses build may Reply with
+    path_model=OrderPath,  # one field per {name} in path
+    query=GetOrderQuery,  # ?include_lines=true
+    response=OrderResponse,  # documents and validates what build returns
+    responses={404: ErrorOut},  # other statuses build may Reply with
     build=order_response,
 )
 ```
@@ -262,12 +271,15 @@ Endpoint(
 ```python
 class CreateOrderApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        body = ctx.input["body"]                  # also "path", "query", "headers"
-        await ctx.trigger(CreateOrder, {
-            "user_id": body["user_id"],
-            "lines": body["lines"],
-            "tenant": ctx.input["headers"]["x_tenant_id"],
-        })
+        body = ctx.input["body"]  # also "path", "query", "headers"
+        await ctx.trigger(
+            CreateOrder,
+            {
+                "user_id": body["user_id"],
+                "lines": body["lines"],
+                "tenant": ctx.input["headers"]["x_tenant_id"],
+            },
+        )
         ctx.save("include_lines", True)
 ```
 
@@ -297,6 +309,7 @@ class OrderPlaced(Entity):
     tenant: str
     total: int
 
+
 # inside a reaction
 ctx.create(OrderPlaced, order_id=order.id, tenant=order.tenant, total=order.total)
 ```
@@ -310,7 +323,7 @@ For anything that needs measuring, write a reaction that measures it. The runtim
 ## 10. Secrets
 
 ```python
-key = ctx.secret("stripe_api_key")      # reads SECRET_STRIPE_API_KEY
+key = ctx.secret("stripe_api_key")  # reads SECRET_STRIPE_API_KEY
 ```
 
 Names are lowercase snake case; the variable is the name upper-cased behind `SECRET_`. Unset or empty raises `SecretError` and fails the reaction. There is no secret store in the library: compose, Kubernetes or a cloud secret manager injects the variables.
@@ -351,6 +364,7 @@ The runtime's own tables (`_outbox`, `_schedule`, `_run`, `_span`) are part of y
 ```python
 from backend_builder import InMemoryStore, run
 
+
 async def test_create_order_computes_total() -> None:
     store = InMemoryStore()
     ctx = await run(store, CreateOrder, {"user_id": "u7", "lines": [{"price": 10, "qty": 2}]})
@@ -369,6 +383,7 @@ async def test_create_order_computes_total() -> None:
 @pytest.fixture(scope="session")
 def backend_builder_app() -> App:
     return app
+
 
 @pytest.fixture
 async def store(migrated_database_url: str) -> AsyncIterator[PostgresStore]:
