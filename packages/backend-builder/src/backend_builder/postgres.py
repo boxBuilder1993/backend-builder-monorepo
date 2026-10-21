@@ -10,11 +10,13 @@ uses its own short transaction.
 from __future__ import annotations
 
 import asyncio
+import random
 import typing
 import uuid
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from datetime import timedelta
 from typing import Any
 
 import sqlalchemy as sa
@@ -26,6 +28,7 @@ from backend_builder.codec import EncodeError, from_jsonable, to_jsonable
 from backend_builder.entity import Entity
 from backend_builder.log import get_logger
 from backend_builder.migrations import async_url
+from backend_builder.outbox import OUTBOX_TABLE, OutboxEntry, OutboxRow, OutboxStats, now
 from backend_builder.schema import build_metadata, persisted_fields, table_name
 from backend_builder.store import DuplicateKeyError, MissingRowError, Store, TransientError
 
@@ -197,6 +200,113 @@ class PostgresStore(Store):
         except IntegrityError as exc:
             raise self._translate(exc) from exc
         return row
+
+    # --- outbox ---------------------------------------------------------------------
+
+    @property
+    def _outbox(self) -> sa.Table:
+        return self.metadata.tables[OUTBOX_TABLE]
+
+    async def enqueue(self, entries: list[OutboxEntry]) -> None:
+        if not entries:
+            return
+        stamp = now()
+        rows = [
+            {
+                "id": e.id,
+                "reaction": e.reaction,
+                "input": e.input,
+                "created_at": stamp,
+                "available_at": e.available_at or stamp,
+            }
+            for e in entries
+        ]
+        async with self._connection() as connection:
+            await connection.execute(sa.insert(self._outbox), rows)
+
+    async def claim(self, limit: int, worker_id: str, lease_seconds: float) -> list[OutboxRow]:
+        statement = sa.text(
+            f"""
+            update {OUTBOX_TABLE} set claimed_by = :worker, claimed_at = :stamp
+            where id in (
+                select id from {OUTBOX_TABLE}
+                where dead_at is null
+                  and available_at <= :stamp
+                  and (claimed_at is null or claimed_at < :lease_cutoff)
+                order by available_at
+                limit :limit
+                for update skip locked
+            )
+            returning id, reaction, input, attempts, available_at, created_at
+            """
+        )
+        stamp = now()
+        params = {
+            "worker": worker_id,
+            "stamp": stamp,
+            "lease_cutoff": stamp - timedelta(seconds=lease_seconds),
+            "limit": limit,
+        }
+        async with self.engine.begin() as connection:
+            rows = (await connection.execute(statement, params)).mappings().all()
+        return [
+            OutboxRow(
+                id=str(r["id"]),
+                reaction=r["reaction"],
+                input=r["input"],
+                attempts=r["attempts"],
+                available_at=r["available_at"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    async def ack(self, row_id: str) -> None:
+        async with self._connection() as connection:
+            await connection.execute(sa.delete(self._outbox).where(self._outbox.c.id == row_id))
+
+    async def release(self, row_id: str, error: str, max_attempts: int) -> None:
+        table = self._outbox
+        async with self.engine.begin() as connection:
+            current = (
+                await connection.execute(sa.select(table.c.attempts).where(table.c.id == row_id))
+            ).scalar_one_or_none()
+            if current is None:
+                return
+            attempts = int(current) + 1
+            stamp = now()
+            values: dict[str, Any] = {
+                "attempts": attempts,
+                "last_error": error[:2000],
+                "claimed_by": None,
+                "claimed_at": None,
+            }
+            if attempts >= max_attempts:
+                values["dead_at"] = stamp
+            else:
+                backoff = min(2**attempts, 300) * random.uniform(0.5, 1.5)
+                values["available_at"] = stamp + timedelta(seconds=backoff)
+            await connection.execute(sa.update(table).where(table.c.id == row_id).values(**values))
+
+    async def outbox_stats(self) -> OutboxStats:
+        table = self._outbox
+        pending = sa.select(sa.func.count(), sa.func.min(table.c.available_at)).where(
+            table.c.dead_at.is_(None), table.c.claimed_at.is_(None)
+        )
+        claimed = sa.select(sa.func.count()).where(
+            table.c.dead_at.is_(None), table.c.claimed_at.is_not(None)
+        )
+        dead = sa.select(sa.func.count()).where(table.c.dead_at.is_not(None))
+        async with self.engine.connect() as connection:
+            count, oldest = (await connection.execute(pending)).one()
+            claimed_count = (await connection.execute(claimed)).scalar_one()
+            dead_count = (await connection.execute(dead)).scalar_one()
+        return OutboxStats(
+            pending=int(count),
+            claimed=int(claimed_count),
+            dead=int(dead_count),
+            oldest_pending=oldest,
+        )
 
     async def update(self, entity: type[Entity], row_id: str, changes: dict[str, Any]) -> None:
         if not changes:

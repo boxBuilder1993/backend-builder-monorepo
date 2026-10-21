@@ -158,5 +158,36 @@ def migrate(
         raise typer.Exit(code=1) from exc
 
 
+@cli.command()
+def worker(package: str, once: bool = False, log_level: str | None = None) -> None:
+    """Deliver outbox rows: claim, run, ack. Polls forever unless --once."""
+    from backend_builder.worker import Worker
+
+    current = settings()
+    configure((log_level or current.log_level).upper())
+    app = load_app(package)
+    store = app.create_store()
+    worker = Worker(app, store, current)
+    if once:
+        claimed = asyncio.run(worker.run_once())
+        typer.echo(f"claimed={claimed}")
+        return
+    try:
+        asyncio.run(worker.run_forever())
+    except KeyboardInterrupt:
+        pass
+
+
+@cli.command()
+def outbox(package: str) -> None:
+    """Print outbox depth: pending, claimed and dead rows, and the oldest pending."""
+    app = load_app(package)
+    stats = asyncio.run(app.create_store().outbox_stats())
+    typer.echo(f"pending={stats.pending} claimed={stats.claimed} dead={stats.dead}")
+    typer.echo(
+        f"oldest_pending={stats.oldest_pending.isoformat() if stats.oldest_pending else None}"
+    )
+
+
 def main() -> None:
     cli()

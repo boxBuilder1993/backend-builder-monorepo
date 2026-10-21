@@ -147,7 +147,14 @@ def _versions(app: App) -> list[Path]:
 def _include_object(
     obj: Any, name: str | None, type_: str, reflected: bool, compare_to: Any
 ) -> bool:
-    return type_ in ("table", "column")
+    """Tables and columns always. Indexes and constraints only on system
+    tables, whose names start with an underscore; an app's own constraints
+    are hand-written migrations and never compared."""
+    if type_ in ("table", "column"):
+        return True
+    table = getattr(obj, "table", None)
+    table_name = getattr(table, "name", None)
+    return isinstance(table_name, str) and table_name.startswith("_")
 
 
 def run_env(context: Any) -> None:

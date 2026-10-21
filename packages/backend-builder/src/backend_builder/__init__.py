@@ -5,6 +5,7 @@ from backend_builder.engine import run
 from backend_builder.entity import Entity
 from backend_builder.http import Endpoint, create_app, serve
 from backend_builder.log import configure as configure_logging
+from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
 from backend_builder.postgres import PostgresStore
 from backend_builder.reaction import Reaction
 from backend_builder.settings import RuntimeEnv, Settings, SettingsError
@@ -18,6 +19,7 @@ from backend_builder.store import (
     TransientError,
 )
 from backend_builder.trace import Span, Trace
+from backend_builder.worker import Worker
 
 __all__ = [
     "App",
@@ -29,6 +31,9 @@ __all__ = [
     "InMemoryStore",
     "MissingRowError",
     "NotSupported",
+    "OutboxEntry",
+    "OutboxRow",
+    "OutboxStats",
     "PostgresStore",
     "Reaction",
     "RuntimeEnv",
@@ -39,6 +44,7 @@ __all__ = [
     "Store",
     "Trace",
     "TransientError",
+    "Worker",
     "migrations",
     "create_app",
     "run",

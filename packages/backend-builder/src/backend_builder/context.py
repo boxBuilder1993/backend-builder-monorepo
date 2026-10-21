@@ -76,13 +76,23 @@ class Context:
         """The value saved under ``name`` by any reaction in this run."""
         return self._session.vars[name]
 
-    async def trigger(self, reaction: type[Reaction], input: dict[str, Any]) -> Context:
-        """Run ``reaction`` now, against this session, with ``input``.
+    async def trigger(
+        self, reaction: type[Reaction], input: dict[str, Any], *, deferred: bool = False
+    ) -> Context | None:
+        """Run ``reaction`` with ``input``.
 
-        Returns the child context the reaction ran in.
+        Immediate (the default): runs now, against this session, depth-first,
+        and returns the child context the reaction ran in.
+
+        Deferred: records an outbox entry that the run's flush writes, so the
+        reaction runs after commit, by a worker, as a run of its own. Returns
+        ``None``. ``input`` must be JSON-encodable. Postgres only.
         """
-        from backend_builder.reaction import invoke
+        from backend_builder.reaction import invoke, qualified_name
 
+        if deferred:
+            self._session.defer(qualified_name(reaction), input)
+            return None
         child = Context(self._session, input, parent_reaction_id=self.reaction_id, trace=self.trace)
         await invoke(reaction, child)
         return child
