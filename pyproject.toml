@@ -34,4 +34,5 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pyright]
 include = ["packages", "apps"]
 strict = ["packages", "apps"]
+exclude = ["**/migrations/versions"]
 pythonVersion = "3.13"

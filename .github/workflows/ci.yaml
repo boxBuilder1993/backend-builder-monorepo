@@ -12,6 +12,20 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: backend_builder
+          POSTGRES_PASSWORD: backend_builder
+          POSTGRES_DB: backend_builder
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U backend_builder"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
 

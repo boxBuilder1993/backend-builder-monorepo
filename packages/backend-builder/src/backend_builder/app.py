@@ -12,7 +12,11 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from collections.abc import Callable, Sequence
+from functools import cached_property
+from pathlib import Path
 from typing import Any
+
+import sqlalchemy as sa
 
 from backend_builder.entity import Entity, registered_entities
 from backend_builder.entity import qualified_name as entity_name
@@ -20,6 +24,7 @@ from backend_builder.http import Endpoint, create_app
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, registered_reactions
 from backend_builder.reaction import qualified_name as reaction_name
+from backend_builder.schema import build_metadata
 from backend_builder.store import InMemoryStore, Store
 
 logger = get_logger(__name__)
@@ -33,26 +38,33 @@ class App:
         endpoints: Sequence[Endpoint] = (),
         store: Callable[[], Store] = InMemoryStore,
         include: Sequence[type[Reaction] | type[Entity]] = (),
+        migrations: Path | None = None,
     ) -> None:
         self.package = package
         self.endpoints = list(endpoints)
         self._store_factory = store
         self._include = list(include)
-        self._import_package()
+        root = self._import_package()
+        self.migrations_dir = migrations if migrations is not None else root / "migrations"
+        """Where this app's migration chain lives. Default: ``migrations/``
+        inside the package."""
+        self.metadata  # noqa: B018  # validate the schema now, not at first use
 
     @property
     def name(self) -> str:
         return self.package.rsplit(".", 1)[-1]
 
-    def _import_package(self) -> None:
+    def _import_package(self) -> Path:
         """Import every module under the package so all its reactions and
-        entities are registered before anything is derived."""
+        entities are registered before anything is derived. Returns the
+        package directory."""
         root = importlib.import_module(self.package)
         path: list[str] | None = getattr(root, "__path__", None)
         if path is None:
-            return
+            raise ValueError(f"{self.package!r} is a module, not a package")
         for module in pkgutil.walk_packages(path, prefix=self.package + "."):
             importlib.import_module(module.name)
+        return Path(path[0])
 
     def _owns(self, name: str) -> bool:
         return name.startswith(self.package + ".")
@@ -68,6 +80,11 @@ class App:
         owned = [e for e in registered_entities() if self._owns(entity_name(e))]
         included = [e for e in self._include if issubclass(e, Entity)]
         return owned + [e for e in included if e not in owned]
+
+    @cached_property
+    def metadata(self) -> sa.MetaData:
+        """One table per entity; raises ``SchemaError`` for an unmappable field."""
+        return build_metadata(self.entities)
 
     def resolve(self, name: str) -> type[Reaction]:
         """A reaction of this app by qualified name."""
