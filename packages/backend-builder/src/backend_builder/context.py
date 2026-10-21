@@ -30,7 +30,7 @@ class Context:
         reaction_id: str | None = None,
         parent_reaction_id: str | None = None,
     ) -> None:
-        self.store = store
+        self._session = store
         self.input = input
         self.reaction_id = reaction_id or str(uuid4())
         self.parent_reaction_id = parent_reaction_id
@@ -42,21 +42,21 @@ class Context:
         *,
         include_deleted: bool = False,
     ) -> list[E]:
-        return self.store.get(entity, where, include_deleted=include_deleted)
+        return self._session.get(entity, where, include_deleted=include_deleted)
 
     def get_by_id[E: Entity](
         self, entity: type[E], row_id: str, *, include_deleted: bool = False
     ) -> E | None:
-        return self.store.get_by_id(entity, row_id, include_deleted=include_deleted)
+        return self._session.get_by_id(entity, row_id, include_deleted=include_deleted)
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
-        return self.store.create(entity, **fields)
+        return self._session.create(entity, **fields)
 
     async def trigger(self, reaction: type[Reaction], input: dict[str, Any]) -> Context:
         """Run ``reaction`` now, against this store, with ``input``.
 
         Returns the child context the reaction ran in.
         """
-        child = Context(self.store, input, parent_reaction_id=self.reaction_id)
+        child = Context(self._session, input, parent_reaction_id=self.reaction_id)
         await reaction().calculate(child)
         return child
