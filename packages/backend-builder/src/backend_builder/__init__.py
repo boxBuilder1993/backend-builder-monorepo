@@ -7,6 +7,7 @@ from backend_builder.http import Endpoint, create_app, serve
 from backend_builder.log import configure as configure_logging
 from backend_builder.postgres import PostgresStore
 from backend_builder.reaction import Reaction
+from backend_builder.settings import RuntimeEnv, Settings, SettingsError
 from backend_builder.store import (
     DuplicateKeyError,
     InMemoryStore,
@@ -30,7 +31,10 @@ __all__ = [
     "NotSupported",
     "PostgresStore",
     "Reaction",
+    "RuntimeEnv",
     "Session",
+    "Settings",
+    "SettingsError",
     "Span",
     "Store",
     "Trace",

@@ -26,6 +26,7 @@ from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, registered_reactions
 from backend_builder.reaction import qualified_name as reaction_name
 from backend_builder.schema import build_metadata
+from backend_builder.settings import Settings
 from backend_builder.store import InMemoryStore, Store
 
 logger = get_logger(__name__)
@@ -37,7 +38,7 @@ class App:
         package: str,
         *,
         endpoints: Sequence[Endpoint] = (),
-        store: Callable[[], Store] = InMemoryStore,
+        store: Callable[[], Store] | None = None,
         include: Sequence[type[Reaction] | type[Entity]] = (),
         migrations: Path | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
@@ -99,7 +100,17 @@ class App:
         raise LookupError(f"{self.package} has no reaction {name!r}")
 
     def create_store(self) -> Store:
-        return self._store_factory()
+        """A store for this app. An explicit factory wins; otherwise the
+        settings decide: Postgres when ``BACKEND_BUILDER_DATABASE_URL`` is
+        set, in-memory when it is not."""
+        if self._store_factory is not None:
+            return self._store_factory()
+        settings = Settings.from_env()
+        if settings.database_url:
+            from backend_builder.postgres import PostgresStore
+
+            return PostgresStore(settings.database_url, self.entities)
+        return InMemoryStore()
 
     def http(self, store: Store | None = None, *, generic: bool = True) -> Any:
         """The FastAPI app for this app's endpoints over ``store``, or over a

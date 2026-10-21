@@ -277,9 +277,9 @@ A `Trace` per run holds a `Span` per invocation plus `flush` and `run`: name, re
 
 ## 12. Settings
 
-Decided.
+Built.
 
-`RUNTIME_ENV` is `test`, `dev` or `prod`. `BACKEND_BUILDER_DATABASE_URL` unset means the in-memory store; set means Postgres at that URL. The app's default store factory reads these. Further layering, TOML files and per-app settings, waits until there is more than one setting worth layering.
+`RUNTIME_ENV` is `test`, `dev` or `prod`; unset means `dev`; anything else is an error. `BACKEND_BUILDER_DATABASE_URL` unset means the in-memory store; set means Postgres at that URL; `prod` refuses to start without it. `BACKEND_BUILDER_LOG_LEVEL` defaults to `INFO`. `Settings.from_env()` reads them; `App.create_store()` applies them unless the app was given an explicit store factory; every CLI command reads the log level from them unless a flag overrides. Further layering, TOML files and per-app settings, waits until there is more than one setting worth layering.
 
 ## 13. Schema, migrations and the Postgres mapping
 
@@ -324,7 +324,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 2. Snapshot-and-compare flush. Done.
 3. Field-to-column mapping and Alembic: `makemigration`, `migrate --check`, `--empty`; the shop app's first migration committed. Done.
 4. `PostgresStore` with `run_scope`, retry, `query`; the `backend_builder_testing` pytest plugin with per-test databases; the shop suite on Postgres. Done.
-5. Settings and the store factory.
+5. Settings and the store factory. Done.
 
 ## 15. Later
 
