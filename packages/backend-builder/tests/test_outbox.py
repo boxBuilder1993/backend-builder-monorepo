@@ -94,7 +94,7 @@ def app() -> App:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(outbox_batch=5, outbox_lease_seconds=1.0, outbox_max_attempts=2)
+    return Settings(outbox_batch=5, outbox_lease_grace_seconds=0.5, outbox_max_attempts=2)
 
 
 @pytest.fixture
@@ -155,10 +155,10 @@ async def test_failed_delivery_is_released_with_backoff_then_dead(
 
 
 async def test_lapsed_lease_is_reclaimed(store: PostgresStore, worker: Worker) -> None:
-    await run(store, Open, {"owner": "lease"})
-    claimed = await store.claim(5, "ghost-worker", lease_seconds=1.0)
-    assert len(claimed) == 1
-    assert await store.claim(5, "other", lease_seconds=1.0) == []
+    await run(store, Open, {"owner": "lease"}, timeout=0.5)  # the deferred row inherits 0.5s
+    claimed = await store.claim(5, "ghost-worker", grace_seconds=0.5)
+    assert len(claimed) == 1 and claimed[0].timeout_seconds == 0.5
+    assert await store.claim(5, "other", grace_seconds=0.5) == []  # lease = 0.5 + 0.5
     await asyncio.sleep(1.1)
     assert await worker.run_once() == 1
 
@@ -166,8 +166,8 @@ async def test_lapsed_lease_is_reclaimed(store: PostgresStore, worker: Worker) -
 async def test_two_workers_claim_disjoint_rows(store: PostgresStore, app: App) -> None:
     for i in range(6):
         await run(store, Open, {"owner": f"u{i}"})
-    a = await store.claim(4, "a", lease_seconds=30)
-    b = await store.claim(4, "b", lease_seconds=30)
+    a = await store.claim(4, "a", grace_seconds=30)
+    b = await store.claim(4, "b", grace_seconds=30)
     assert len(a) == 4 and len(b) == 2
     assert {r.id for r in a}.isdisjoint({r.id for r in b})
 

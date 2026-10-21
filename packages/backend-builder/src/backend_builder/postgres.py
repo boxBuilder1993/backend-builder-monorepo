@@ -229,6 +229,7 @@ class PostgresStore(Store):
                 "created_at": stamp,
                 "available_at": e.available_at or stamp,
                 "scheduled_for": e.scheduled_for,
+                "timeout_seconds": e.timeout_seconds if e.timeout_seconds is not None else 60.0,
             }
             for e in entries
         ]
@@ -239,7 +240,7 @@ class PostgresStore(Store):
         async with self._connection() as connection:
             await connection.execute(statement, rows)
 
-    async def claim(self, limit: int, worker_id: str, lease_seconds: float) -> list[OutboxRow]:
+    async def claim(self, limit: int, worker_id: str, grace_seconds: float) -> list[OutboxRow]:
         statement = sa.text(
             f"""
             update {OUTBOX_TABLE} set claimed_by = :worker, claimed_at = :stamp
@@ -247,19 +248,23 @@ class PostgresStore(Store):
                 select id from {OUTBOX_TABLE}
                 where dead_at is null
                   and available_at <= :stamp
-                  and (claimed_at is null or claimed_at < :lease_cutoff)
+                  and (
+                    claimed_at is null
+                    or claimed_at + make_interval(secs => timeout_seconds + :grace) < :stamp
+                  )
                 order by available_at
                 limit :limit
                 for update skip locked
             )
-            returning id, reaction, input, attempts, available_at, created_at, scheduled_for
+            returning id, reaction, input, attempts, available_at, created_at,
+                      scheduled_for, timeout_seconds
             """
         )
         stamp = now()
         params = {
             "worker": worker_id,
             "stamp": stamp,
-            "lease_cutoff": stamp - timedelta(seconds=lease_seconds),
+            "grace": grace_seconds,
             "limit": limit,
         }
         async with self.engine.begin() as connection:
@@ -273,6 +278,7 @@ class PostgresStore(Store):
                 available_at=r["available_at"],
                 created_at=r["created_at"],
                 scheduled_for=r["scheduled_for"],
+                timeout_seconds=float(r["timeout_seconds"]),
             )
             for r in rows
         ]
@@ -356,6 +362,9 @@ class PostgresStore(Store):
                     created_at=moment,
                     available_at=occurrence,
                     scheduled_for=occurrence,
+                    timeout_seconds=entry.timeout_seconds
+                    if entry.timeout_seconds is not None
+                    else 60.0,
                 )
                 .on_conflict_do_nothing(
                     index_elements=["reaction", "scheduled_for"],

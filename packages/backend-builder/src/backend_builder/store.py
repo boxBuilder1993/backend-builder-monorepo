@@ -7,7 +7,7 @@ import copy
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime
 from datetime import datetime as _datetime
 from typing import TYPE_CHECKING, Any
@@ -100,9 +100,10 @@ class Store(ABC):
         """Write outbox rows inside the current run's transaction."""
         raise NotSupported(f"{type(self).__name__} has no outbox")
 
-    async def claim(self, limit: int, worker_id: str, lease_seconds: float) -> list[OutboxRow]:
-        """Lease up to ``limit`` due rows to ``worker_id``. Rows whose lease
-        has lapsed are claimable again. Own short transaction."""
+    async def claim(self, limit: int, worker_id: str, grace_seconds: float) -> list[OutboxRow]:
+        """Lease up to ``limit`` due rows to ``worker_id``. A row's lease is
+        its own ``timeout_seconds`` plus ``grace_seconds``; a row whose lease
+        has lapsed is claimable again. Own short transaction."""
         raise NotSupported(f"{type(self).__name__} has no outbox")
 
     async def ack(self, row_id: str) -> None:
@@ -207,9 +208,16 @@ class Session:
     run. With no backing store the session is simply an in-memory store.
     """
 
-    def __init__(self, backing: Store | None = None, *, triggers: Sequence[Trigger] = ()) -> None:
+    def __init__(
+        self,
+        backing: Store | None = None,
+        *,
+        triggers: Sequence[Trigger] = (),
+        default_timeout: float = 60.0,
+    ) -> None:
         self._backing = backing
         self._triggers = list(triggers)
+        self._default_timeout = default_timeout
         self._rows: dict[type[Entity], dict[str, Entity]] = {}
         self._created: set[tuple[type[Entity], str]] = set()
         self._snapshots: dict[tuple[type[Entity], str], dict[str, Any]] = {}
@@ -306,14 +314,17 @@ class Session:
         The row stays in the working set and is written back on flush."""
         row.deleted_at = datetime.now(UTC)
 
-    def defer(self, reaction: str, input: dict[str, Any]) -> None:
+    def defer(self, reaction: str, input: dict[str, Any], *, timeout: float | None = None) -> None:
         """Record deferred work. Written as an outbox row at flush, so it
         exists only if the run commits. ``input`` must be JSON-encodable;
-        anything else raises ``EncodeError`` here, not at flush."""
+        anything else raises ``EncodeError`` here, not at flush. ``timeout``
+        is the delivery's budget; None means the app default."""
         if self._backing is None:
             raise NotSupported("no backing store")
         encoded: dict[str, Any] = to_jsonable(input, path=f"deferred {reaction} input")
-        self._deferred.append(OutboxEntry(reaction=reaction, input=encoded))
+        self._deferred.append(
+            OutboxEntry(reaction=reaction, input=encoded, timeout_seconds=timeout)
+        )
 
     def changes(self, row: Entity) -> dict[str, Any]:
         """Fields of a loaded ``row`` whose value differs from the snapshot
@@ -385,7 +396,13 @@ class Session:
         if self._triggers and changes:
             self._deferred.extend(match(self._triggers, changes))
         if self._deferred:
-            logger.debug("flush enqueue reaction_id=%s entries=%r", reaction_id, self._deferred)
-            await self._backing.enqueue(self._deferred)
+            entries = [
+                e
+                if e.timeout_seconds is not None
+                else replace(e, timeout_seconds=self._default_timeout)
+                for e in self._deferred
+            ]
+            logger.debug("flush enqueue reaction_id=%s entries=%r", reaction_id, entries)
+            await self._backing.enqueue(entries)
             self._deferred = []
         return inserted, updated, unchanged

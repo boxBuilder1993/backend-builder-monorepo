@@ -18,7 +18,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from backend_builder.engine import DEFAULT_MAX_ATTEMPTS
+from backend_builder.engine import DEFAULT_MAX_ATTEMPTS, DEFAULT_TIMEOUT
 from backend_builder.entity import Entity, registered_entities
 from backend_builder.entity import qualified_name as entity_name
 from backend_builder.http import Endpoint, create_app
@@ -43,10 +43,14 @@ class App:
         include: Sequence[type[Reaction] | type[Entity]] = (),
         migrations: Path | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        timeout: float = DEFAULT_TIMEOUT,
         triggers: Sequence[Trigger] = (),
     ) -> None:
         self.package = package
         self.endpoints = list(endpoints)
+        self.timeout = timeout
+        """Default budget for a run, in seconds, every attempt included.
+        Deferred and scheduled work may carry its own."""
         self.triggers = list(triggers)
         """Data-change and scheduled triggers. Matched at flush and by the
         worker. Postgres only."""
@@ -157,6 +161,7 @@ class App:
             resolver=self.resolve,
             title=self.name,
             max_attempts=self.max_attempts,
+            timeout=self.timeout,
             triggers=self.triggers,
         )
 
