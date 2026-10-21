@@ -25,6 +25,10 @@ class Store(ABC):
         """Rows of ``entity``, optionally filtered. Rows are returned by reference."""
 
     @abstractmethod
+    def get_by_id(self, entity: type[Entity], row_id: str) -> Row | None:
+        """The row of ``entity`` with this ``id``, by reference, or ``None``."""
+
+    @abstractmethod
     def create(self, entity: type[Entity], **fields: Any) -> Row:
         """Store a new row and return it by reference.
 
@@ -44,6 +48,9 @@ class InMemoryStore(Store):
         if where is None:
             return list(rows)
         return [row for row in rows if where(row)]
+
+    def get_by_id(self, entity: type[Entity], row_id: str) -> Row | None:
+        return self._rows.get(entity, {}).get(row_id)
 
     def create(self, entity: type[Entity], **fields: Any) -> Row:
         rows = self._rows.setdefault(entity, {})

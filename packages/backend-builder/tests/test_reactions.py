@@ -17,7 +17,8 @@ class OrderTotal(Reaction):
     async def calculate(self, ctx: Context) -> None:
         order_id: str = ctx.input
         lines = ctx.get(OrderLine, lambda row: row["order_id"] == order_id)
-        (order,) = ctx.get(Order, lambda row: row["id"] == order_id)
+        order = ctx.get_by_id(Order, order_id)
+        assert order is not None
         order["total"] = sum(line["price"] * line["qty"] for line in lines)
 
 
@@ -69,3 +70,10 @@ async def test_explicit_id_is_honoured_and_must_be_unique(store: InMemoryStore) 
     with pytest.raises(DuplicateKeyError):
         store.create(Order, id="order-1")
     assert store.create(OrderLine, id="order-1")["id"] == "order-1"
+
+
+async def test_get_by_id(store: InMemoryStore) -> None:
+    row = store.create(Order, total=0)
+    assert store.get_by_id(Order, row["id"]) is row
+    assert store.get_by_id(Order, "missing") is None
+    assert store.get_by_id(OrderLine, row["id"]) is None

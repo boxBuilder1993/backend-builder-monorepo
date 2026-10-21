@@ -22,6 +22,9 @@ class Context:
     def get(self, entity: type[Entity], where: Predicate | None = None) -> list[Row]:
         return self.store.get(entity, where)
 
+    def get_by_id(self, entity: type[Entity], row_id: str) -> Row | None:
+        return self.store.get_by_id(entity, row_id)
+
     def create(self, entity: type[Entity], **fields: Any) -> Row:
         return self.store.create(entity, **fields)
 
