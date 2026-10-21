@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -37,7 +38,7 @@ def test_create_then_get(client: TestClient, store: InMemoryStore) -> None:
     assert created.status_code == 200, created.text
     order = created.json()["order"]
     assert (order["tenant"], order["total"]) == ("acme", 25)
-    assert len(store.get(OrderLine)) == 2
+    assert len(asyncio.run(store.get(OrderLine))) == 2
 
     fetched = client.get(f"/orders/{order['id']}", params={"include_lines": "true"})
     assert fetched.status_code == 200
@@ -48,4 +49,4 @@ def test_create_then_get(client: TestClient, store: InMemoryStore) -> None:
 def test_missing_order_is_500_and_store_untouched(client: TestClient, store: InMemoryStore) -> None:
     res = client.get("/orders/nope")
     assert res.status_code == 500 and res.json()["error"] == "LookupError"
-    assert store.get(Order) == []
+    assert asyncio.run(store.get(Order)) == []

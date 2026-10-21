@@ -78,7 +78,7 @@ class CreateOrderApi(Reaction):
 class GetOrderApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         order_id = ctx.input["path"]["order_id"]
-        order = ctx.get_by_id(Order, order_id)
+        order = await ctx.get_by_id(Order, order_id)
         if order is None:
             raise LookupError(f"no order {order_id}")
         ctx.save("order", order)
@@ -88,11 +88,11 @@ class GetOrderApi(Reaction):
 # --- builders -----------------------------------------------------------------
 
 
-def order_response(ctx: Context) -> OrderResponse:
+async def order_response(ctx: Context) -> OrderResponse:
     order: Order = ctx.load("order")
     lines: list[OrderLine] = []
     if ctx.load("include_lines"):
-        lines = ctx.get(OrderLine, lambda line: line.order_id == order.id)
+        lines = await ctx.get(OrderLine, lambda line: line.order_id == order.id)
     return OrderResponse(
         order=OrderOut.model_validate(order),
         lines=[LineOut.model_validate(line) for line in lines],

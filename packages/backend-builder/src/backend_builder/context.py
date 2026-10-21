@@ -38,19 +38,28 @@ class Context:
         self.parent_reaction_id = parent_reaction_id
         self.trace = trace if trace is not None else Trace()
 
-    def get[E: Entity](
+    async def get[E: Entity](
         self,
         entity: type[E],
         where: Callable[[E], bool] | None = None,
         *,
         include_deleted: bool = False,
     ) -> list[E]:
-        return self._session.get(entity, where, include_deleted=include_deleted)
+        """Rows matching a Python predicate. In-memory stores only."""
+        return await self._session.get(entity, where, include_deleted=include_deleted)
 
-    def get_by_id[E: Entity](
+    async def get_by_id[E: Entity](
         self, entity: type[E], row_id: str, *, include_deleted: bool = False
     ) -> E | None:
-        return self._session.get_by_id(entity, row_id, include_deleted=include_deleted)
+        return await self._session.get_by_id(entity, row_id, include_deleted=include_deleted)
+
+    async def query[E: Entity](self, entity: type[E], statement: str, **params: Any) -> list[E]:
+        """Rows of ``entity`` returned by a native statement. SQL stores only."""
+        return await self._session.query(entity, statement, **params)
+
+    async def query_raw(self, statement: str, **params: Any) -> list[dict[str, Any]]:
+        """Untracked rows returned by a native statement. SQL stores only."""
+        return await self._session.query_raw(statement, **params)
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
         return self._session.create(entity, **fields)

@@ -248,7 +248,7 @@ Each source is optional on any method. FastAPI validates and documents each one 
 
 **API reactions** translate the structured input into domain inputs and trigger domain reactions. Domain reactions never see HTTP shapes. The translation has its own reaction id and span.
 
-**Builders** run after the run, read the root context, and return the response, validated against the response model. They read `ctx.load`, `ctx.get_by_id` and the rest; they do not write. A reaction that produced something for the response saves it under a name; the builder loads it.
+**Builders** are async functions that run after the run, read the root context, and return the response, validated against the response model. They read `ctx.load`, `ctx.get_by_id` and the rest; they do not write. A reaction that produced something for the response saves it under a name; the builder loads it.
 
 **Generic route.** `POST /reactions/{qualified_name}` triggers any of the app's reactions with the JSON body as input and returns `{}`. Off with `generic=False`.
 

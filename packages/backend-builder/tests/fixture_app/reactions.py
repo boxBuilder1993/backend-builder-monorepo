@@ -5,7 +5,7 @@ from fixture_app.entities import Widget
 
 class Bump(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        widget = ctx.get_by_id(Widget, ctx.input["widget_id"])
+        widget = await ctx.get_by_id(Widget, ctx.input["widget_id"])
         assert widget is not None
         widget.count += 1
 

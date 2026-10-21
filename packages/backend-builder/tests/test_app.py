@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from backend_builder import App, Entity, InMemoryStore, Reaction
 from backend_builder.entity import qualified_name as entity_name
@@ -50,7 +52,7 @@ def test_http_serves_endpoints_and_scopes_the_generic_route() -> None:
 
     res = client.post("/widgets", json={"name": "w1"})
     assert res.status_code == 200 and res.json()["name"] == "w1"
-    assert len(store.get(Widget)) == 1
+    assert len(asyncio.run(store.get(Widget))) == 1
 
     assert (
         client.post(f"/reactions/{reaction_name(MakeWidget)}", json={"name": "w2"}).status_code
