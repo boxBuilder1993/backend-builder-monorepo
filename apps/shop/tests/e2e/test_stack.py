@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from httpx2 import AsyncClient
 
-from .conftest import Stack, wait_for
+from .conftest import NOTIFY_KEY, Stack, wait_for
 
 pytestmark = pytest.mark.e2e
 
@@ -99,11 +99,33 @@ async def test_create_order_commits_lines_and_the_worker_totals_it(
 
     rows = await stack.sql('select total, status from "order" where id = :id', id=order["id"])
     assert rows == [{"total": 25, "status": "new"}]
-    leftover = await stack.sql(
-        "select count(*) as n from _outbox where scheduled_for is null and dead_at is null"
+    await wait_for(  # the order's own NotifyOrder row may land a poll after the total
+        lambda: stack.sql(
+            "select count(*) as n from _outbox where scheduled_for is null and dead_at is null"
+        ),
+        lambda rows: rows == [{"n": 0}],
     )
-    assert leftover == [{"n": 0}]
     assert "worker delivered" in stack.logs("worker")
+
+
+async def test_secret_reaches_the_reaction_and_never_the_record_or_logs(
+    stack: Stack, client: AsyncClient
+) -> None:
+    order = (await create_order(client))["order"]
+    records = await wait_for(
+        lambda: stack.sql(
+            "select vars, outcome from _run where reaction = 'shop.reactions.NotifyOrder' "
+            "and input ->> 'id' = :id",
+            id=order["id"],
+        ),
+        lambda rows: len(rows) == 1,
+    )
+    assert records[0]["outcome"] == "ok"
+    assert records[0]["vars"] == {
+        "request": {"authorization": "Bearer [secret:notify_api_key]", "order": order["id"]}
+    }
+    assert NOTIFY_KEY not in stack.logs("worker")
+    assert NOTIFY_KEY not in stack.logs("api")
 
 
 async def test_update_line_retotals_through_on_change(stack: Stack, client: AsyncClient) -> None:

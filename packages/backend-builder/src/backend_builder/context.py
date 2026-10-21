@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from backend_builder import secrets as _secrets
 from backend_builder.store import Session
 from backend_builder.trace import Trace
 
@@ -31,8 +32,10 @@ class Context:
         reaction_id: str | None = None,
         parent_reaction_id: str | None = None,
         trace: Trace | None = None,
+        secrets: _secrets.Secrets | None = None,
     ) -> None:
         self._session = session
+        self._secrets = secrets if secrets is not None else _secrets.default
         self.input = input
         self.reaction_id = reaction_id or str(uuid4())
         self.parent_reaction_id = parent_reaction_id
@@ -82,6 +85,12 @@ class Context:
         """The value saved under ``name`` by any reaction in this run."""
         return self._session.vars[name]
 
+    def secret(self, name: str) -> str:
+        """The secret ``name``, read from the environment as ``SECRET_<NAME>``.
+        ``SecretError`` if unset. Values read this way are redacted from run
+        records and logs."""
+        return self._secrets.get(name)
+
     async def trigger(
         self,
         reaction: type[Reaction],
@@ -110,7 +119,13 @@ class Context:
         if deferred:
             self._session.defer(qualified_name(reaction), input, timeout=timeout)
             return None
-        child = Context(self._session, input, parent_reaction_id=self.reaction_id, trace=self.trace)
+        child = Context(
+            self._session,
+            input,
+            parent_reaction_id=self.reaction_id,
+            trace=self.trace,
+            secrets=self._secrets,
+        )
         if timeout is None:
             await invoke(reaction, child)
         else:

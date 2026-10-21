@@ -71,3 +71,16 @@ class ExpireUnpaidOrders(Reaction):
         for order in stale:
             order.status = "expired"
         ctx.save("expired", [order.id for order in stale])
+
+
+class NotifyOrder(Reaction):
+    """Deferred: tell the notification provider about a new order. The
+    provider's key comes from ``SECRET_NOTIFY_API_KEY``; what we would send
+    is saved so the run record shows the redaction at work."""
+
+    async def calculate(self, ctx: Context) -> None:
+        order = await ctx.get_by_id(Order, ctx.input["id"])
+        if order is None:
+            return
+        key = ctx.secret("notify_api_key")
+        ctx.save("request", {"authorization": f"Bearer {key}", "order": order.id})

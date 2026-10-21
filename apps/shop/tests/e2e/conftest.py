@@ -31,6 +31,7 @@ API_PORT = int(os.environ.get("E2E_API_PORT", "18080"))
 POSTGRES_PORT = int(os.environ.get("E2E_POSTGRES_PORT", "15432"))
 METRICS_PORTS = {"api": 19100, "worker": 19101, "scheduler": 19102}
 ADMIN_PORT = int(os.environ.get("E2E_ADMIN_PORT", "19200"))
+NOTIFY_KEY = "e2e-notify-key-5f3a9c1d"
 
 ENV = {
     **os.environ,
@@ -44,6 +45,7 @@ ENV = {
     "BACKEND_BUILDER_OUTBOX_POLL_SECONDS": "0.2",
     "BACKEND_BUILDER_SCHEDULER_TICK_SECONDS": "1",
     "BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS": "2",
+    "SECRET_NOTIFY_API_KEY": NOTIFY_KEY,
 }
 
 

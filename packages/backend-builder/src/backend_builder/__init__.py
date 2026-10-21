@@ -1,4 +1,4 @@
-from backend_builder import metrics, migrations
+from backend_builder import metrics, migrations, secrets
 from backend_builder.app import App
 from backend_builder.context import Context
 from backend_builder.engine import run
@@ -10,6 +10,7 @@ from backend_builder.postgres import PostgresStore
 from backend_builder.reaction import Reaction
 from backend_builder.records import RunRecord, SpanRecord
 from backend_builder.scheduler import Scheduler
+from backend_builder.secrets import SecretError, Secrets
 from backend_builder.settings import RuntimeEnv, Settings, SettingsError
 from backend_builder.store import (
     DuplicateKeyError,
@@ -48,6 +49,8 @@ __all__ = [
     "RunRecord",
     "RuntimeEnv",
     "Scheduler",
+    "SecretError",
+    "Secrets",
     "Session",
     "Settings",
     "SpanRecord",
@@ -60,6 +63,7 @@ __all__ = [
     "Worker",
     "metrics",
     "migrations",
+    "secrets",
     "create_app",
     "run",
     "serve",

@@ -28,6 +28,7 @@ def test_app_scope() -> None:
         "UpdateLine",
         "DeleteLine",
         "ExpireUnpaidOrders",
+        "NotifyOrder",
         "CreateOrderApi",
         "GetOrderApi",
         "UpdateLineApi",
@@ -40,6 +41,7 @@ def test_app_scope() -> None:
         "DELETE /orders/{order_id}/lines/{line_id}",
     ]
     assert [t.split(" -> ")[0] for t in app.describe()["triggers"]] == [
+        "OnCreate(Order)",
         "OnCreate(OrderLine)",
         "OnChange(OrderLine, ['price', 'qty'])",
         "OnDelete(OrderLine)",
@@ -63,9 +65,9 @@ async def test_create_then_total_arrives_through_the_worker(
     order = created.json()["order"]
     assert (order["tenant"], order["total"]) == ("acme", 0)  # total is computed after commit
     assert await count(store, "order_line") == 2
-    assert await count(store, "_outbox") == 2  # one row per created line
+    assert await count(store, "_outbox") == 3  # one row per created line, one for the order
 
-    assert await worker.run_once() == 2
+    assert await worker.run_once() == 3
     assert await count(store, "_outbox") == 0
 
     fetched = await client.get(f"/orders/{order['id']}", params={"include_lines": "true"})

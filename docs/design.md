@@ -136,6 +136,8 @@ ctx.save(name, value)                       # free-form, held by the session for
 ctx.load(name) -> Any                       # KeyError if absent
 ctx.vars                                    # the dict behind save and load, for `name in ctx.vars`
 
+ctx.secret(name) -> str                     # SECRET_<NAME> from the environment; SecretError if unset
+
 await ctx.trigger(Reaction, input, timeout=None) -> Context        # runs now; returns the child context
 await ctx.trigger(Reaction, input, deferred=True, timeout=None)   # outbox row at flush; runs after commit
 ```
@@ -425,6 +427,8 @@ Every process serves Prometheus-format metrics and a health check on its own por
 | `bb_outbox_pending`, `bb_outbox_claimed`, `bb_outbox_dead`, `bb_outbox_oldest_pending_seconds` | gauges | worker, refreshed on every poll |
 | `bb_schedule_seeds_total`, `bb_run_records_purged_total` | counters | scheduler |
 
+**No application metrics.** These are the runtime's metrics and the only ones. A reaction that wants to record that something happened creates an entity: an event is a row, committed with the run, so a retried attempt never double-counts, consumers hang off `OnCreate`, SQL answers the questions, and a scheduled reaction rolls it up or purges it. A reaction that wants to measure something is itself a reaction, scheduled or triggered. There is no `ctx.metric`, no free-form counters, and no registry of app metrics to review; decided, see §23.
+
 Outbox depth and the oldest row's age are the worker autoscaling signals; runs by outcome is the error-rate alert; dead rows above zero is a page. The compose stack publishes each process's metrics port, and the e2e suite scrapes all three.
 
 ## 20. The admin console
@@ -453,9 +457,21 @@ Built.
 
 **The stack.** `compose.yaml` has a `shop` profile with `migrate` as a one-shot service, then `api`, `worker` and `scheduler` from the same image, each depending on `migrate` having completed, all pointed at the `postgres` service with `RUNTIME_ENV=prod`. `docker compose --profile shop up --build` is the whole system.
 
-**The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a missing order answered with a 404 reply from a run that committed; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
+**The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a missing order answered with a 404 reply from a run that committed; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; a secret reaching a deferred reaction and appearing in its run record and the container logs only as its placeholder; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
 
-## 22. Decisions
+## 22. Secrets
+
+Built.
+
+A secret is a value a reaction needs and the repo must never hold: a payment provider's key, a mail service token. Reactions read one with `ctx.secret("stripe_api_key")`, which returns the environment variable `SECRET_STRIPE_API_KEY`: the name lowercase snake case, the variable the same name upper-cased behind the `SECRET_` prefix. The prefix is deliberately not `BACKEND_BUILDER_`: these are the app's secrets, not the runtime's settings, and it reads cleanly in compose files and manifests. A name that is unset or empty raises `SecretError`, which fails the reaction like any other exception.
+
+The library has no secret store. The platform running the process owns storage, rotation and audit, and every platform we would deploy to can inject environment variables from its own store: compose `secrets:` or an `.env` file, Kubernetes Secrets, a cloud secret manager through an external-secrets operator. Variables are read on access, not at startup, so the runtime does not need to know which secrets an app uses. A file-mounted or cloud-backed provider behind the same `Secrets` object is the obvious extension and needs no change to reactions.
+
+**Redaction** is the part that needs library support, because run records store inputs and vars and the admin console shows them. Every value read through `ctx.secret` is remembered by the process, and wherever text leaves the process it is masked as `[secret:name]`: the run record's input, vars and error text, and every line through the configured log handler. Redaction is by exact value, so an encoded or truncated secret still leaks; it is a seatbelt, not a vault. Values shorter than eight characters are not masked, since replacing every "test" in the logs is worse than the leak; reading one logs a warning.
+
+**Not built, discussed.** Per-reaction grants (a reaction declares which secrets it may read) and input-scoped secrets (a tenant's own key, chosen by a field of the input, never by the reaction). Both fit as declarations on the reaction class with the provider taking a scope, and would be least privilege at the framework level and a review surface rather than a sandbox, since every reaction shares one process and one environment. Deferred until an app needs them.
+
+## 23. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 
@@ -472,3 +488,5 @@ Settled in discussion, listed so they are not reopened by accident.
 - Reactions and entities belong to the app whose package defines them. Shared classes are included explicitly.
 - The CLI is in the core library and is the only process launcher.
 - Migrations are written by developers and reviewed in pull requests. The pipeline verifies, tests, applies and deploys; it never generates.
+- Secrets are environment variables under `SECRET_`, read on access. The library redacts what it has read from records and logs; it stores nothing.
+- No application metrics API. Anything worth recording is an entity; anything worth measuring is a reaction. Prometheus carries the runtime's metrics only.

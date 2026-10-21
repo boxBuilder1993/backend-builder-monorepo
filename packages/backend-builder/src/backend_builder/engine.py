@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from backend_builder import metrics
+from backend_builder import metrics, secrets
 from backend_builder.context import Context
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, invoke, qualified_name
@@ -193,6 +193,7 @@ async def _record(
     error: str | None,
 ) -> None:
     session = state.session
+    redact = secrets.default.redact_jsonable
     spans = [
         SpanRecord(
             attempt=number,
@@ -220,12 +221,14 @@ async def _record(
         reaction=qualified_name(reaction),
         source=source,
         outcome=outcome,
-        error=error,
+        error=secrets.default.redact(error) if error is not None else None,
         attempts=state.attempts,
         started_at=state.started_at,
         duration_ms=(time.perf_counter() - state.clock) * 1000,
-        input=safe_jsonable(input) if level == "full" else None,
-        vars=safe_jsonable(session.vars) if level == "full" and session is not None else None,
+        input=redact(safe_jsonable(input)) if level == "full" else None,
+        vars=redact(safe_jsonable(session.vars))
+        if level == "full" and session is not None
+        else None,
         changes=changes,
         enqueued=list(session.enqueued) if committed and session is not None else [],
         spans=spans,

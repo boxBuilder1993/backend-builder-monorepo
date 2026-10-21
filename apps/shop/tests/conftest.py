@@ -13,6 +13,11 @@ def backend_builder_app() -> App:
     return app
 
 
+@pytest.fixture(autouse=True)
+def notify_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECRET_NOTIFY_API_KEY", "test-notify-key-00000000")
+
+
 @pytest.fixture
 async def store(migrated_database_url: str) -> AsyncIterator[PostgresStore]:
     store = PostgresStore(migrated_database_url, app.entities)
