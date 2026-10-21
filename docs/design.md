@@ -1,452 +1,353 @@
 # Backend Builder Design
 
-Status: draft for review, 2026-10-17.
+Status: current as of 2026-10-21. Describes what is built on `main` and what is decided but not yet built. Each section says which. The earlier draft, with the reconcile loop, consumer config and WAL worker, is superseded; those ideas are listed under "Later" with what has to be true before they return.
 
 ## Intent
 
 The goal is for an entire company's business logic to live in a single repository, and for that repository to manage its own infrastructure. Backend Builder is the runtime that makes this practical: a single backend in which the way logic executes, synchronously in a request, in a pool of workers after commit, or on a schedule, is a deployment choice expressed in config, not a boundary expressed in code.
 
-Three separations make that possible. Reactions are the unit of logic, and are pure functions of an input and a store. The engine is the unit of execution, and runs any reaction in any mode. The consumer config is the unit of wiring, and says which data changes cause which reactions to run and whether they run before or after commit. Because the three never leak into each other, the same reaction can be moved between execution modes, pooled across workers, or re-wired to new producers without a line of its code changing.
+Three separations make that possible. Reactions are the unit of logic, and are functions of an input and a session. The engine is the unit of execution, and runs any reaction in any mode. The app is the unit of scope, and declares what reactions, entities and endpoints exist. Because the three never leak into each other, the same reaction can be moved between execution modes, pooled across workers, or exposed on a new endpoint without a line of its code changing.
 
 What the company gets from this:
 
-- **One map of the business.** The config is a complete, printable answer to "what happens when this field changes". Entities and reactions are the whole system; a new engineer reads them and knows it.
-- **Consistency by construction.** Derived data is maintained by subscriptions, not by every writer remembering. A new code path writes a field and the subscriptions do the rest.
-- **Infra as flags, not rewrites.** Start everything synchronous. Measure. Defer the slow parts and pool the hot ones by changing config. Nothing is rewritten when the shape of the deployment changes.
-- **Whole-operation transactions.** A request that touches orders, ledgers and stock is one commit. No sagas, no compensation logic.
-- **Uniform testing.** Every reaction is tested by building a context, calling it, and inspecting the store. No HTTP, no service mocks, no queue fakes.
-- **A small deployment surface.** One API process type, one deferred worker type, one WAL worker, one database. Scaling is adding workers and assigning them reaction subsets.
-- **Incremental analytics with the same machinery.** Analytics tables are entities. Their maintenance is deferred reactions subscribed to source fields. The WAL worker delivers exactly the rows that changed, with before and after, so a metric is updated by removing the old contribution and adding the new one, never by rescanning. The config is the lineage. Backfill is replaying synthetic changes through the same reaction. This replaces a separate change-data-capture pipeline and warehouse transformation layer with configuration.
+- **One map of the business.** `backend-builder graph <app>` prints every entity, reaction and endpoint. Entities and reactions are the whole system; a new engineer reads them and knows it.
+- **Whole-operation transactions.** A request that touches orders, ledgers and stock is one flush and one commit. No sagas, no compensation logic.
+- **Uniform testing.** Every reaction is tested by building a context over a store, calling it, and inspecting the store. No HTTP, no service mocks.
+- **Infra as flags, not rewrites.** Start everything synchronous and in memory. Move to Postgres by setting a URL. Defer the slow parts later by changing how they are triggered.
+- **A small deployment surface.** One image, one CLI, one process type per role.
+- **Maintainable by AI as well as people.** Every dependency is a declaration, every reaction's whole world is its input and the session, and every run is deterministic given the store. An assistant, like a new engineer, can read the entities, the reactions and the endpoints and have the whole system.
 
-- **Event-driven precomputation is native.** Systems that listen to a change log and precompute views, caches or denormalised read models are usually built from a change-data-capture tool, a message broker such as Kafka, and a fleet of consumers each managing offsets, retries and dead letters. Here the WAL worker is the capture, the outbox is the broker, the config is the subscription list, and the deferred worker is the consumer group. Adding a consumer is a config line. Latency is the WAL worker's lag plus the poll interval, sub-second with a short poll, which is as near to real time as any commit-then-react system can be. A broker remains useful only for fan-out to systems outside the repo or for long-retention replay by consumers that did not exist when the event happened. If either is needed, a reaction that publishes to a topic is one more consumer, not a change of architecture.
-
-- **Maintainable by AI as well as people.** What makes a system hard to change is the part that cannot be read: wiring that lives in topic names, deploy manifests and other repositories. Here every dependency is a config line, every reaction's whole world is its input and the store, and every run is deterministic given the database. Impact analysis is a grep of the config. A change to one reaction cannot affect another except through declared fields. Tests need a context and a database, nothing else. Reprocessing history after a fix is a CLI call. An AI assistant, like a new engineer, can read the entities, the config and the reactions, and have the whole system.
-
-Two contracts apply to analytics reactions wherever they run. First, only aggregates that decompose are incremental: sums, counts, averages as sum and count, min and max with tombstones. Distinct counts, medians, percentiles and funnels do not decompose and need sketches such as HyperLogLog or t-digest, or periodic full recomputation. Second, a change arriving late must be bucketed by the event's own timestamp, not the time it was processed.
-
-Separating analytics onto its own database, with a columnar or timeseries extension, is a later concern. It would need only an entity-level database tag and a lookup when the deferred worker opens a transaction, with eager reactions remaining single-database. Nothing in a reaction changes when that happens.
-
-The database is an abstraction the engine owns. v1 assumes PostgreSQL and uses it fully. Scaling past a single database, or evaluating alternatives, is a later concern, and the engine's coupling to Postgres is documented in section 12 so that work is informed when it comes. What must be protected as the system grows is the purity of the reaction contract, because every benefit above depends on reactions remaining functions of input and store and nothing else.
+The database is an abstraction the engine owns. The in-memory store is native and complete for development and tests. Postgres is the first persistent store. Others may follow, and the interface is written so that a store's native capabilities stay native rather than being flattened into a lowest common denominator.
 
 ## 1. Purpose and scope
 
-Backend Builder is a Python library for building a business backend as a set of entities and the reactions that keep them consistent, on top of PostgreSQL. A developer declares entity classes with typed fields, writes reactions as async functions of a context, and connects them two ways: a reaction can trigger another explicitly, and a config can subscribe a reaction to changes in an entity's fields. The engine owns everything else: the schema, the transaction, lazy loading, change tracking, synchronous propagation before commit, deferred work after commit, and the HTTP surface.
+Backend Builder is a Python library for building a business backend as a set of entities and the reactions that operate on them. A developer declares entity classes as plain dataclasses, writes reactions as async functions of a context, declares endpoints that map HTTP requests to reactions, and collects them in an `App`. The engine owns everything else: the session, the flush, the transaction, logging, tracing, the HTTP surface and the CLI.
 
-v1 covers: entity classes and schema generation, the context, explicit and config-driven triggers, the reconcile loop, deferred execution through an outbox fed by a WAL worker, serializable transactions with retry, API entities over HTTP, and scheduled triggers. It assumes PostgreSQL and nothing else.
+**Built** (sections 2 through 11): entities, reactions, context, session, the in-memory store, the run lifecycle, the app, the CLI, the HTTP layer, logging and tracing.
+
+**Decided, not built** (sections 12 through 14): `query`, the Postgres store, schema and migrations, settings.
+
+**Later** (section 15): deferred execution, data-change triggers, scheduling, Docker and Kubernetes.
 
 Design principles that settled the hard calls:
 
-- **One mechanism.** Every reaction runs through `trigger(reaction, input)`. Validation, actions, creates and reads are all reactions. Delete is a field write. GET and POST are the same path.
-- **The developer owns the contract.** The engine does not police undeclared reads, infer dependencies, prevent slow access patterns, or referee overlapping writes. It makes behaviour deterministic and visible.
-- **Pure where it matters.** What is persisted depends only on each instance's initial and latest state. The context carries no knowledge of why a reaction ran beyond the input it was handed.
-- **Both directions of wiring.** A producer can name its consumers with an explicit trigger. A consumer can subscribe to a producer in config. Neither is privileged.
-- **Any error aborts.** An exception of any kind inside a run rolls back the transaction. There is no special error class.
+- **One mechanism.** Every reaction runs through `invoke`. Validation, actions, creates and reads are all reactions. Delete is a field write. GET and POST are the same path.
+- **The developer owns the contract.** The engine does not police what a reaction reads, infer dependencies, or referee overlapping writes. It makes behaviour deterministic and visible.
+- **Entities are data.** A dataclass describes fields and nothing about storage. Constraints, indexes and references are the app's, written as migrations.
+- **Stores stay native.** The in-memory store does what Python does. Postgres does what SQL does. A reaction that uses a store-specific read says so at the call site.
+- **Nothing persists until flush.** A run mutates a session. The store is written once, at the end, or not at all.
+- **Any error aborts.** An exception of any kind inside a run discards the session. There is no special error class.
 
 ## 2. Core model
 
-**Entity.** A Python class with typed fields. Persisted entities own a table. API entities have no table; their instances are created by HTTP requests.
+**Entity.** A keyword-only dataclass. Subclasses declare fields as annotations. Instances are rows. Every entity has `id`, `created_at` and `deleted_at` from the base class. Registered by qualified name on definition.
 
-**Field.** A typed attribute of an entity. Persisted by default, or marked non-persisted. No input-versus-computed distinction exists; a field is computed only in the sense that some reaction writes it.
+**Reaction.** A class with one method, `async def calculate(self, ctx)`. It reads from the context, mutates instances, creates instances, saves values, triggers other reactions, or raises. Registered by qualified name on definition. Code refers to reactions by class; the registry exists for boundaries where a class must be a string.
 
-**Key.** The identity of an instance, the `id` field on the `Entity` base class. A library object with a pending flag. Shared by reference between an instance and every field that points at it, so resolution at flush needs no bookkeeping.
+**Context.** What one reaction invocation sees: `input`, `reaction_id`, `parent_reaction_id`, the session, and the trace. One per invocation. All invocations in a run share the session and the trace.
 
-**Reaction.** A class with one method, `async def calculate(ctx)`. It reads `ctx.input`, pulls what it needs from the store, writes fields, creates instances, triggers other reactions, or raises.
+**Session.** The working set of one run. An in-memory store that loads from a backing store on a miss, holds every instance the run created or loaded, carries free-form `vars`, and writes everything back on `flush`. Discarding it discards the run.
 
-**Trigger.** The one way a reaction runs. `trigger(reaction, input, deferred=False)`. Synchronous triggers run now, sharing the caller's store and transaction. Deferred triggers write an outbox row and run after commit in a fresh context.
+**Store.** Where rows live between runs. The in-memory store and, when built, the Postgres store. A store provides `get_by_id`, `create`, `update`, a lifetime-of-run scope, and a health check, plus the reads that are native to it.
 
-**Consumer config.** A module that subscribes reactions to field changes on entities, eager or deferred. Eager subscriptions are matched by the engine against the store before commit. Deferred subscriptions are matched by the WAL worker against committed changes.
+**Trigger.** `await ctx.trigger(reaction, input)` runs a reaction now, with a child context on the same session. The only way one reaction causes another to run.
 
-**Context.** The unit of work. An input, a store, a transaction. The store is an ORM session in the unit-of-work sense, lazily populated as a reaction pulls entities and props, tracking each instance's initial and latest state.
+**App.** The declaration of an application's scope: a Python package, the reactions and entities defined under it, its endpoints, and its store factory. The CLI derives every process from it.
 
-## 3. Entities and fields
+## 3. Entities
 
-An entity is a class deriving from `Entity`. Its fields are class annotations. The class name, snake-cased, is the table name. The field name is the column name. Entities carry no trigger declarations.
+Built.
 
 ```python
 class OrderLine(Entity):
-    order_id: int = Field(foreign_key=Order)
-    price: Decimal = Numeric(12, 2)
+    order_id: str
+    price: int
     qty: int
+    order: Order | None = field(default=None, metadata={"persist": False})
 ```
 
-**Persisted and API entities.** `Entity` subclasses are persisted by default. `Entity` with `api=True` is an API entity: no table, instances created by HTTP requests, fields carry request data in and response data out. Both kinds live in the store identically. API instances are never flushed.
+**Dataclasses, automatically.** `Entity.__init_subclass__` applies `dataclass(kw_only=True)` to every subclass, and the base is decorated with `dataclass_transform` so type checkers know. Fields without defaults may follow fields with defaults because everything is keyword-only.
 
-**System fields.** Declared on the `Entity` base class and inherited.
+**System fields**, declared on the base and inherited:
 
 | Field | Type | Managed how |
 | --- | --- | --- |
-| `id` | `Key` | Drawn from the entity's sequence at flush. The single primary key. |
-| `created_at` | `datetime` | Set at insert from the transaction's `now()`. |
-| `updated_at` | `datetime` | Set at insert and on every update from the transaction's `now()`. |
-| `deleted_at` | `datetime | None` | Null until `instance.delete()` sets it. |
+| `id` | `str` | A version 4 UUID string generated by the field default. The primary key. May be supplied explicitly. |
+| `created_at` | `datetime` | UTC time the instance was constructed. |
+| `deleted_at` | `datetime | None` | `None` while live; set by `ctx.delete`. |
 
-**Field types.** `int` to `bigint`, `str` to `text`, `bool`, `Decimal`, `datetime`, `date`, `dict` and `list` to `jsonb`. A library type object as the default refines the column: `Numeric(12, 2)`, `Varchar(80)`. Optional fields use `| None`. `Field(...)` carries options: `persist`, `foreign_key`, `default`, `default_factory`, `index`.
+There is no `updated_at`. Mutation is by reference and nothing observes it, so the engine cannot stamp it honestly.
 
-**Entity-typed fields are values, not relations.** A field typed as another entity class holds a snapshot of that instance's fields, including `id`, stored as `jsonb`. It is a copy taken at write time. If it should track the source, a consumer subscribed to the source rewrites it. The engine never infers a foreign key from a type. Relations are `int` id columns, with a constraint only if `foreign_key` is set. Reading a snapshot yields an untracked blob: a plain object built from the jsonb, not in the store, with no versions. Mutating it changes only the copy, and the change persists only if the field is reassigned. The developer must know what they are doing.
+**Ids are client-generated.** An instance has its final id the moment it exists, so references between new instances are plain strings and nothing is pending at flush. The probability of a collision is far below hardware error rates, and if one occurred the store's primary key would reject the insert rather than overwrite the row, because created rows are always inserted and never upserted.
 
-**Non-persisted fields.** `Field(persist=False)`. Lives in the store for the run, populated by reactions. How API entities assemble responses. `list[Order]` is legal only here.
+**Non-persisted fields.** `field(metadata={"persist": False})`, or a helper that sets it. Present on instances, filled by reactions, never written to the store. This is how an order carries its lines for the rest of a run: a reaction loads them and assigns them. There is no automatic loading of related rows.
 
-**Soft delete.** `instance.delete()` sets `deleted_at`. The engine never removes rows. The engine creates a view per entity that filters deleted rows, and reaction SQL targets the view by default. The raw table is reachable under a separate name.
+**Values, not references.** A field typed as another entity, a nested dataclass, a dict or a list is a value. On Postgres it is stored as `jsonb`, a snapshot taken at flush. The engine never infers a relation from a type. Relations are string id fields, and the constraint that makes them foreign keys is declared in the app's migrations, not on the entity.
 
-**Writes are buffered.** All field writes are held in the store and flushed before any SQL runs and at the end of the run.
+**Soft delete.** `ctx.delete(row)` stamps `deleted_at`. Reads hide the row unless asked with `include_deleted=True`. Nothing is ever removed.
 
-## 4. Keys
+**Unmappable types** fail when the schema is generated, not at runtime.
 
-Every instance has an `id` of type `Key`: a resolved integer or a pending marker.
+## 4. Reactions
 
-- Loaded instances hold a resolved Key.
-- `ctx.new(...)` creates an instance with a pending Key owned by the context.
-- API instances hold a pending Key that is never resolved.
-
-**Shared by reference.** Assigning `order.id` to `line.order_id` stores the same Key object. `line.order_id is order.id` holds while pending. Resolution happens once, in place.
-
-**Resolution at flush.** Before any SQL runs, the engine groups pending Keys by entity, draws that many sequence values in one statement per entity, and assigns them. Insert order does not matter. Declared foreign keys are `DEFERRABLE INITIALLY DEFERRED`.
-
-**Behaviour.** Hashable and comparable by identity while pending, by value when resolved. Reading the integer of a pending Key raises. The database adapter and the JSON serializer refuse a pending Key. Tracing shows `pending:<n>`.
-
-## 5. Reactions
+Built.
 
 ```python
-class order_total(Reaction):
-    async def calculate(ctx):
-        changes = ctx.input  # list of Change(entity, id, before, after)
-        order_ids = {c.after["order_id"] for c in changes}
-        orders = await ctx[Order].many(order_ids)
-        await ctx.load(
-            "select 'order_line', id, '*' from order_line where order_id = any(:ids)", ids=order_ids
-        )
-        lines = ctx[OrderLine].loaded()
-        for order in orders:
-            order.total = sum(l.price * l.qty for l in lines.filter(order_id=order.id))
+class OrderTotal(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        order = await ctx.get_by_id(Order, ctx.input["order_id"])
+        if order is None:
+            raise LookupError(ctx.input["order_id"])
+        lines = await ctx.get(OrderLine, lambda line: line.order_id == order.id)
+        order.total = sum(line.price * line.qty for line in lines)
 ```
 
-**Input.** `ctx.input` is whatever the trigger site passed. The reaction knows its own input shape. Reactions reached from consumer config receive a list of `Change` records, `(entity, id, before, after)`, with `before` and `after` as field dicts. The same shape arrives whether the match happened in the reconcile loop or in the WAL worker, so a reaction does not know or care which.
+**Input** is a `dict[str, Any]`. The reaction knows its own shape. API reactions receive the structured request described in section 10 and build domain inputs themselves.
 
-**Reading.** All reads go through the store, lazily and in bulk. Section 6.1 lists the operations. Reads that hit the database are awaited.
+**Invocation** goes through one function, `invoke(reaction, ctx)`, whether the reaction is the seed of a run or was triggered. It logs start, end and failure, and records a span. That is where timeouts and tracing attach.
 
-**Writing.** Assigning a field records a write if the value differs from the current one. `ctx.new(Entity, **fields)` creates an instance. Cascades are the developer's concern.
-
-**Triggering.** `ctx.trigger(reaction, input, deferred=False, timeout=60)` returns an awaitable.
-
-- `await ctx.trigger(r, x)` runs `r` immediately with a child context sharing this store and transaction, and returns when it is done. The caller then sees everything `r` wrote.
-- Triggers started without an immediate await begin in the order they were triggered. Several may be awaited together with `asyncio.gather`. They interleave at their await points on one connection. This overlaps waits; it is not parallelism, and the store is never touched by two coroutines in the same instant, but a read-then-write across an await is not atomic with respect to a sibling.
-- The context owns a task group. Every triggered coroutine is registered in it, and the engine awaits the group when `calculate` returns. A sub-reaction cannot outlive its caller and nothing escapes the transaction. An exception in any task cancels the rest and aborts the run.
-- `timeout` bounds the triggered reaction and everything it triggers synchronously. Default 60 seconds, set per trigger. The seed trigger's timeout therefore bounds the whole run, including reconcile. Exceeding it raises and aborts.
-- `deferred=True` writes an outbox row `(reaction, input)` in the current transaction. The input must be serializable. Pending Keys in it are resolved before the row is written. The reaction runs after commit in a fresh context with the given timeout.
-
-**Validation and errors.** A reaction that finds invalid state raises. Any exception aborts the run: rollback, outbox rows vanish with it, the caller receives the error. No exception class is special.
+**Errors.** Any exception aborts the run. The session is discarded, the store is untouched, the caller receives the error.
 
 **Contracts the developer must know.**
 
-- Explicit triggers are depth-first. Triggering inside a loop over a thousand instances runs the sub-reaction a thousand times. Collect, then trigger once with a set-shaped input.
-- Consumers from config run after this reaction returns, in the reconcile loop, in no guaranteed order. Writing a field and then reading something a consumer derives from it sees the old value.
-- A sub-reaction or a consumer may overwrite a field this reaction wrote or read. Last write wins. The engine does not referee.
-- A loop calling `get` per item issues one query per item. Set-shaped operations exist so that the fast path is the obvious one.
+- Triggers are synchronous and depth-first. Triggering inside a loop over a thousand instances runs the sub-reaction a thousand times. Collect, then trigger once.
+- A sub-reaction shares the session. Everything it mutates or creates is visible to the caller when `trigger` returns.
+- Rows are by reference. Mutating a loaded instance is the write. There is no save call.
+- Reads that are native to one store are not available on another. `get` with a lambda is in-memory only; `query` with SQL is Postgres only. `get_by_id`, `create`, `delete` work everywhere.
 
-## 6. Context
+## 5. Context API
 
-A context is three things.
-
-**Input.** `ctx.input`, read-only, set at creation. The engine never interprets it.
-
-**Store.** An identity map of instances keyed by `(entity, id)`, or by the pending Key object for new and API instances. Populated lazily as reactions pull. Every instance records `initial`, its state when first loaded or absent if created in this run, and `latest`, its current state. Writes update `latest`. Loaded rows merge into the map; an instance already present is never overwritten by a reload. Child contexts from synchronous triggers share the parent's store.
-
-**Transaction.** Attached when the context runs. Every store load flushes pending Keys and writes first and executes inside it. In-memory reads never flush. `query` and `load` run in the transaction and never commit. Commit belongs to the engine.
-
-**Marks.** For the reconcile loop, each instance also records a mark: the state last seen by consumer matching. Marks are engine-internal and not readable by reactions.
-
-The store is built on SQLAlchemy Core for table metadata, the expression language, connections and transactions, with an async driver, and Alembic for migrations. The session layer is ours because it differs from a conventional ORM session in three places: initial state that survives mid-run flushes, transient API instances, and cell-level loading.
-
-### 6.1 Context API
+Built, except `query`, which is decided.
 
 ```python
-ctx.input                                       # free-form, read-only
+ctx.input                                   # dict[str, Any], the invocation's input
+ctx.reaction_id                             # this invocation
+ctx.parent_reaction_id                      # the triggering invocation, None for the seed
 
-# Entity views: by id, lazy, awaited when they hit the database
-ctx[Order]                                      # EntityView
-await ctx[Order].get(id) -> Order | None
-await ctx[Order].many(ids) -> Collection
-ctx[Order].loaded() -> Collection               # what is in the store, no query
+await ctx.get_by_id(Entity, id, *, include_deleted=False) -> E | None
+await ctx.get(Entity, where=lambda row: ..., *, include_deleted=False) -> list[E]   # in-memory only
+await ctx.query(Entity, statement, **params) -> list[E]                             # Postgres only, decided
+await ctx.query_raw(statement, **params) -> list[dict[str, Any]]                    # Postgres only, decided
 
-# SQL inside the transaction; flush first, never commit
-await ctx.query(sql, **params) -> list[Row]     # plain rows, untracked
-await ctx.load(sql, **params) -> None           # rows (entity, id, prop) into the store; '*' = all persisted fields
+ctx.create(Entity, **fields) -> E           # registered in the session, inserted at flush
+ctx.delete(row)                             # deleted_at = now()
 
-# Creation and deletion
-ctx.new(Order, **fields) -> Order
-order.delete()
+ctx.save(name, value)                       # free-form, held by the session for the run
+ctx.load(name) -> Any                       # KeyError if absent
 
-# Triggering
-ctx.trigger(reaction, input, deferred=False, timeout=60) -> Awaitable[None]
-
-# Instance
-order.id                                        # Key
-order.initial                                   # read-only view, None if created this run
-order.latest                                    # writable view; the instance proxies to it
-order.changed(Order.total) -> bool
-order.is_new -> bool
-
-# Collection
-coll.ids -> list[Key]
-coll.price -> list                              # vectorized read
-coll.filter(**eq) -> Collection                 # in-memory filter, no query
-for line in coll: ...
-len(coll), coll[id]
+await ctx.trigger(Reaction, input) -> Context   # runs now; returns the child context
 ```
 
-## 7. Consumer config
+`get` and `get_by_id` are awaited because the Postgres store does I/O and the interface has one shape. Today the in-memory implementation returns immediately.
 
-A module in the repo that subscribes reactions to field changes. Entities do not know their consumers.
+`query` runs a native statement on the backing store and returns instances of the named entity built from the rows, merged into the session's identity map. `query_raw` returns untracked dicts for aggregates and joins. Both raise `NotSupported` on the in-memory store. Section 13 specifies the row-to-instance conversion.
 
-```python
-consumers = [
-    OnCreate(OrderLine, order_total),
-    OnChange(OrderLine, [price, qty, order_id, deleted_at], order_total),
-    OnChange(Order, [total], notify_total_changed, deferred=True),
-    OnSchedule("0 3 * * *", nightly_rollup),
-]
-```
+The session itself is not exposed. A reaction holds a context and nothing else.
 
-| Entry | Matches |
+## 6. Session and flush
+
+Built; the changed-columns comparison is decided.
+
+The session is an `InMemoryStore` with a backing store and a flush.
+
+**Loading.** `get_by_id` checks the working set, then the backing store, and copies a found row in. `get` loads the whole entity from the backing store once per run, then filters locally; this is why it is in-memory only. `query`, when built, merges the rows the statement returns. In every case, an instance already in the working set is kept and the freshly loaded copy discarded, so earlier mutations in the run are never overwritten.
+
+**Creating.** `create` constructs the instance and registers it as created. It never touches the backing store.
+
+**Vars.** `session.vars` is a plain dict. `ctx.save` and `ctx.load` read and write it. Shared by every reaction in the run, readable after the run by whatever consumes it, never persisted.
+
+**Flush.** Called once by `run` after the seed reaction returns. Created rows are inserted. Loaded rows are updated. On the in-memory store the update replaces the row. On Postgres the session compares each loaded instance to a snapshot taken at load and issues `UPDATE` only for rows that changed, setting only the changed columns. Flush never upserts: a created row whose id exists is a primary key violation, not an overwrite.
+
+**Discard.** An exception anywhere in the run propagates out of `run` before `flush`. The session is garbage and the store is as it was.
+
+## 7. Stores
+
+The in-memory store is built. The Postgres store is decided.
+
+**The interface** is what the session needs and nothing more:
+
+| Method | Purpose |
 | --- | --- |
-| `OnCreate(Entity, reaction, deferred=False)` | an instance of `Entity` was inserted |
-| `OnChange(Entity, fields, reaction, deferred=False)` | any listed field of an instance changed |
-| `OnSchedule(cron, reaction)` | the scheduler fired; always deferred |
+| `get_by_id(entity, id, *, include_deleted)` | one row by primary key |
+| `get(entity, where, *, include_deleted)` | rows matching a Python predicate; native to the in-memory store, raises elsewhere |
+| `query(entity, statement, **params)` | rows matching a native statement; native to Postgres, raises elsewhere |
+| `create(entity, **fields)` | insert; `DuplicateKeyError` if the id exists |
+| `update(entity, row)` | replace by id; `MissingRowError` if absent |
+| `run_scope()` | async context held for a whole run |
+| `ping()` | reachable, for the health endpoint |
 
-Entries are structural: entity and field membership only. Value conditions live in the reaction. The engine can print the whole map without running anything.
+Each store keeps its native reads native. The interface does not define a portable query language, and a reaction that needs one store's read says so at the call site.
 
-**Eager entries** are matched by the API process in the reconcile loop, before commit, against the store.
+**In-memory store.** `entity -> id -> instance`. Rows returned by reference. `run_scope` holds an `asyncio.Lock`, so runs on one store execute one at a time; that is what makes concurrent requests safe without transactions, and it is the throughput ceiling of this backend. Enforces the primary key and nothing else. Does not serialize values. State lives in the process and dies with it.
 
-**Deferred entries** are matched by the WAL worker, after commit, against the committed row images. The reconcile loop ignores them, so nothing is matched twice.
-
-A matched reaction receives a list of `Change` records as input, grouped so that a reaction matched for six instances runs once with six changes.
+**Postgres store.** SQLAlchemy Core with asyncpg. `run_scope` opens a transaction at `SERIALIZABLE`; the session's loads and the flush use its connection; it commits on exit. A serialization failure, or a unique violation on `id`, aborts the run and the engine retries it from the seed with a fresh session, three attempts by default with jittered backoff. `get` raises `NotSupported`. `query` and `query_raw` run statements with bound parameters. Identifiers are always quoted, because `order` is a table name here.
 
 ## 8. Run lifecycle
 
-A run is one context, one transaction, one commit. It starts with a seed trigger from the API process or the deferred worker.
-
-1. **Seed.** Build a context with the seed input. For HTTP, the input is the API request instance, also placed in the store. Attach a transaction.
-2. **Run the seed reaction** with `await trigger(reaction, input)`. Explicit triggers inside it run depth-first and complete before it returns. The task group is awaited.
-3. **Reconcile.** Breadth-first over consumer config:
-    1. Diff the store against the marks. The frontier is every instance with a field whose `latest` differs from its mark, plus instances created since the mark.
-    2. Match eager config entries against the frontier. Group by reaction. Build each reaction's input as `Change` records with `before` from the mark and `after` from `latest`.
-    3. Run every matched reaction with `await trigger(reaction, changes)`, in no guaranteed order. Each may trigger explicitly, depth-first, and write to the store.
-    4. Advance every mark to the current state.
-    5. If the frontier was non-empty, repeat from step 1. The run's timeout bounds oscillation.
-4. **Flush.** Resolve pending Keys. Insert new instances with `created_at` and `updated_at`. Update instances whose `latest` differs from `initial`, writing only the differing columns plus `updated_at`. Write deferred outbox rows from explicit `deferred=True` triggers.
-5. **Commit.**
-6. **Respond.** For HTTP, render the API instance from the store.
-
-Any exception at any step rolls back and aborts.
-
-**Why marks.** A field changed once is matched once, because after the mark advances it no longer differs. A field changed and written back between two marks has no delta. A field changed, matched, then changed again produces a second delta, which is correct because consumers must see the new value. Flush uses `initial` versus `latest` regardless, so a field that ended where it started is not written even if consumers ran on it in between.
-
-**Termination.** Equal writes produce no delta. A system at a fixed point produces an empty frontier. Genuine oscillation between consumers runs until the seed trigger's timeout, then aborts with a timeout error that names the reactions in the last level.
-
-## 9. Deferred execution
-
-Deferred reactions run after commit, each in its own context and transaction.
-
-**Outbox.** One table, one row shape: `(reaction, input jsonb, attempts, next_attempt_at, claimed_by)`. Two producers write it.
-
-**Producer 1, explicit deferred triggers.** `ctx.trigger(r, input, deferred=True)` writes a row at flush, inside the originating transaction. A rollback discards it.
-
-**Producer 2, the WAL worker.** Consumes the logical replication stream from a publication over all entity tables using the built-in `pgoutput` decoder. For each committed transaction it receives the changed rows with before and after images. It matches them against deferred config entries, groups by reaction, and writes one outbox row per reaction with the `Change` list as input. It persists the last processed LSN in the same transaction as the outbox inserts, then confirms the slot, so a crash replays from the last confirmed LSN and already-written rows are skipped. Requirements: `wal_level = logical`, a replication slot with `max_slot_wal_keep_size` set, `REPLICA IDENTITY FULL` on entity tables for before-images.
-
-**Deferred worker.** Polls the outbox on a configurable interval. Claims a batch with `SELECT ... FOR UPDATE SKIP LOCKED`. For each row, builds `Context(input)`, attaches a transaction, runs `await trigger(reaction, input)` followed by the same reconcile, flush and commit as any run, then deletes the row. On failure, releases the row with an incremented attempt count and a backoff. Attempt cap configurable. It runs as its own process, as does the WAL worker. Neither runs inside the HTTP server.
-
-**Coalescing.** Rows for the same reaction whose inputs are `Change` lists may be merged by `(entity, id)`: earliest `before`, latest `after`. Rows with free-form input are not merged.
-
-**Scheduler.** `OnSchedule` entries are evaluated by a scheduler that writes an outbox row with the fire time as input when a cron expression is due. No separate mechanism.
-
-**Backfill and replay.** A backfill is a trigger started from outside a run. Two entry points, both of which write ordinary outbox rows so the deferred worker's batching, retries and pooling apply:
-
-- `bb trigger <reaction> --input <json>` writes one row with the given input. A reaction written as a backfiller reads a range from its input, loads rows, and triggers other reactions with whatever inputs they expect. Explicit triggers fan out as they would in any run.
-- `bb backfill <reaction> --entity <Entity> --sql <select of ids>` reads matching rows in batches and writes rows whose input is a list of `Change` records with `before` as `None` and `after` as the current row. The reaction cannot distinguish these from WAL-produced changes, so any config-driven reaction is replayable without modification.
-
-A backfill of millions of rows is therefore a queue, not a long-lived process, and runs at whatever rate the deferred workers provide.
-
-## 10. Transactions and concurrency
-
-**Isolation.** `SERIALIZABLE` by default, configurable.
-
-**Retry.** A serialization failure aborts the run. The engine retries from the seed, up to a configurable count with backoff. Safe because a run is a function of its seed and database state, and outbox rows exist only after commit.
-
-**Within a run.** One context, one connection, one thread. Synchronous triggers are function calls. Gathered triggers interleave at await points on the one connection; they do not run in parallel. Nothing in a run is concurrent with itself.
-
-**Across runs.** Separate contexts, separate transactions. Serializable handles their interaction. An aggregate computed through `ctx.query` widens the read set to everything it scanned, so concurrent writes to those rows conflict. Hot counters and wide aggregates belong in deferred reactions.
-
-## 11. HTTP layer
-
-**API entities are endpoints.** `Entity` with `api=True` is reachable at a path derived from its name, overridable on the class. A request creates one instance from the body or query string, places it in the store, and seeds the run with `trigger(reaction, instance)`, where `reaction` is declared on the API entity:
+Built.
 
 ```python
-class GetOrder(Entity, api=True):
-    order_id: int
-    order: Order | None = Field(persist=False, default=None)
-    lines: list[OrderLine] = Field(persist=False, default_factory=list)
-
-    reaction = get_order
+ctx = await run(store, reaction, input, reaction_id=None)
 ```
 
-**Method.** GET and POST both create the instance; GET from the query string, POST from the body. Nothing differs afterwards.
+1. Open a session over the store.
+2. Build the root context with the input, a fresh or supplied reaction id, and no parent.
+3. Enter `store.run_scope()`.
+4. Open the `run` span. `invoke` the seed reaction; every trigger inside it runs depth-first and returns before the seed does.
+5. Open the `flush` span. Flush the session.
+6. Leave the scope. Log the trace, success or failure. Return the root context.
 
-**Request shape.** Fields are type-checked and required fields must be present. Beyond that, validation is a reaction raising.
+An exception at step 4 or 5 propagates; steps 5 and 6 still log; nothing is written.
 
-**Response.** After commit the API instance's `latest` is rendered. Entity-typed fields and lists render inline from what is in the store, recursively, with no loading during rendering. An instance not in the store renders as its bare id.
+**Concurrency.** Within a run there is one task. Across runs on the in-memory store, the lock serialises them. Across runs on Postgres, serializable isolation and retry handle interaction.
 
-**Errors.** Any exception rolls back and renders as a 500 with the exception type, message and a correlation id. The engine does no other status mapping. A REST layer built above API entities may inspect the context and the exception to choose its own codes.
+## 9. App and CLI
 
-## 12. Persistence and schema
+Built.
 
-Generated from entity classes through SQLAlchemy Core metadata. Alembic produces migrations from the diff.
+**App** is the single declaration of scope:
 
-| Object | Shape |
+```python
+app = App(package="shop", endpoints=endpoints, store=InMemoryStore, include=())
+```
+
+On construction it imports every module under its package with `pkgutil.walk_packages`, so all reactions and entities are registered, then derives `reactions` and `entities` as those whose qualified name starts with the package. `include` adds classes from other packages explicitly, because a shared entity means a table in this app's database and that should never be implicit. `resolve(name)` maps a qualified name to one of the app's reactions and nothing else. `http(store)` builds the FastAPI app. `describe()` lists everything.
+
+An app is any importable package. The monorepo keeps apps under `apps/`, but the runtime depends only on the package name, so the library works the same when installed from PyPI into someone else's repository. Entities and reactions may live in any module at any depth under the package.
+
+**The CLI**, `backend-builder`, is the one launcher. Each command imports an app by package name and reads its `app`:
+
+| Command | Does |
 | --- | --- |
-| Table `<entity>_t` | `id bigint primary key default nextval(...)`, `created_at`, `updated_at`, `deleted_at`, one column per persisted field; `REPLICA IDENTITY FULL` |
-| Sequence | backing `id` |
-| View `<entity>` | `select * from <entity>_t where deleted_at is null` |
-| Publication | all `<entity>_t` tables, for the WAL worker |
-| `_outbox` | `reaction, input jsonb, attempts, next_attempt_at, claimed_by` |
-| `_wal_position` | last confirmed LSN |
-| `_schedule` | cron registrations and last-fired timestamps |
+| `serve <package> [--host --port --reload --log-level]` | the HTTP process |
+| `trigger <package> <reaction> --input <json>` | one reaction against a fresh store from the app's factory |
+| `graph <package>` | prints entities, reactions, endpoints |
+| `makemigration <package> [-m] [--empty] [--check] [--merge]` | decided, section 13 |
+| `migrate <package>` | decided, section 13 |
 
-Foreign keys only where declared, always `DEFERRABLE INITIALLY DEFERRED`. Indexes on `deleted_at`, declared foreign keys, and fields marked `index=True`.
+## 10. HTTP layer
 
-**Postgres coupling.** The context, reactions, triggers, config and reconcile loop are database-agnostic. The engine relies on Postgres for six things, listed so that any future alternative knows what it must provide: bulk sequence draws for Key resolution; serializable isolation and its abort semantics; a JSON column type; views; `FOR UPDATE SKIP LOCKED` for outbox claims; and logical replication with `pgoutput` for the WAL worker. The last is the most Postgres-specific. Its fallback is the engine writing change rows to the outbox at flush, which needs nothing from the database.
+Built.
 
-## 13. Worked example
+An `Endpoint` binds a method and path to an API reaction, with one Pydantic model per request source:
 
 ```python
-class User(Entity):
-    email: str
-
-
-class Order(Entity):
-    user_id: int
-    total: Decimal = Numeric(12, 2)
-
-
-class OrderLine(Entity):
-    order_id: int = Field(foreign_key=Order)
-    price: Decimal = Numeric(12, 2)
-    qty: int
-
-
-class CreateOrder(Entity, api=True):
-    user_id: int
-    lines: list[dict]
-    order: Order | None = Field(persist=False, default=None)
-    reaction = create_order
-
-
-class GetOrder(Entity, api=True):
-    order_id: int
-    order: Order | None = Field(persist=False, default=None)
-    lines: list[OrderLine] = Field(persist=False, default_factory=list)
-    reaction = get_order
-
-
-consumers = [
-    OnCreate(User, email_unique),
-    OnChange(User, [email], email_unique),
-    OnCreate(OrderLine, order_total),
-    OnChange(OrderLine, [price, qty, order_id, deleted_at], order_total),
-    OnChange(Order, [total], notify_total_changed, deferred=True),
-]
+Endpoint(
+    method="POST", path="/orders/{order_id}/lines",
+    reaction=AddLineApi,
+    path_model=OrderPath,       # one field per {name}; types convert
+    query=PageQuery,
+    body=AddLineBody,
+    headers=TenantHeaders,      # x_tenant_id reads X-Tenant-Id
+    response=LineResponse,
+    build=line_response,
+)
 ```
 
-```python
-class create_order(Reaction):
-    async def calculate(ctx):
-        req = ctx.input
-        if await ctx[User].get(req.user_id) is None:
-            raise ValueError(f"unknown user {req.user_id}")
-        order = ctx.new(Order, user_id=req.user_id, total=0)
-        for l in req.lines:
-            ctx.new(OrderLine, order_id=order.id, price=l["price"], qty=l["qty"])
-        req.order = order
+Each source is optional on any method. FastAPI validates and documents each one as declared; a 422 names its source. The reaction input keeps them apart, `{"path": ..., "query": ..., "body": ..., "headers": ...}`, with only declared sources present. A path model whose fields do not match the placeholders is rejected at declaration.
 
+**API reactions** translate the structured input into domain inputs and trigger domain reactions. Domain reactions never see HTTP shapes. The translation has its own reaction id and span.
 
-class order_total(Reaction):
-    async def calculate(ctx):
-        order_ids = {c.after["order_id"] for c in ctx.input}
-        orders = await ctx[Order].many(order_ids)
-        await ctx.load(
-            "select 'order_line', id, '*' from order_line where order_id = any(:ids)", ids=order_ids
-        )
-        lines = ctx[OrderLine].loaded()
-        for order in orders:
-            order.total = sum(l.price * l.qty for l in lines.filter(order_id=order.id))
+**Builders** run after the run, read the root context, and return the response, validated against the response model. They read `ctx.load`, `ctx.get_by_id` and the rest; they do not write. A reaction that produced something for the response saves it under a name; the builder loads it.
 
+**Generic route.** `POST /reactions/{qualified_name}` triggers any of the app's reactions with the JSON body as input and returns `{}`. Off with `generic=False`.
 
-class email_unique(Reaction):
-    async def calculate(ctx):
-        ids = [c.id for c in ctx.input]
-        rows = await ctx.query(
-            """
-            select u.email from "user" u
-            join "user" o on o.email = u.email and o.id <> u.id
-            where u.id = any(:ids)
-        """,
-            ids=ids,
-        )
-        if rows:
-            raise ValueError(f"email {rows[0].email} already in use")
+**Responses** carry `X-Reaction-Id`. A run failure is a 500 with the exception type, message and reaction id; the store is untouched. Nothing about the run's internals is returned; that goes to logs.
 
+**`GET /health`** returns the store's name and `ok`, or 503. Hidden from the schema.
 
-class notify_total_changed(Reaction):
-    async def calculate(ctx):
-        for c in ctx.input:
-            order = await ctx[Order].get(c.id)
-            send_email(order.user_id, before=c.before["total"], after=c.after["total"])
+## 11. Logging and tracing
 
+Built.
 
-class get_order(Reaction):
-    async def calculate(ctx):
-        req = ctx.input
-        req.order = await ctx[Order].get(req.order_id)
-        await ctx.load(
-            "select 'order_line', id, '*' from order_line where order_id = :id", id=req.order_id
-        )
-        req.lines = ctx[OrderLine].loaded()
-```
+The package logs under `backend_builder` with a `NullHandler`; applications call `configure_logging(level)`. INFO carries identifiers and counts, never payloads. DEBUG carries inputs and rows.
 
-**Trace of `POST /create_order` with two lines.**
+| Event | Level |
+| --- | --- |
+| reaction started, finished, failed | INFO, with name, reaction id, parent, duration |
+| reaction input | DEBUG |
+| flush started, finished | INFO, with counts |
+| flush insert, update | DEBUG, with the row |
+| run finished | INFO, with total ms, span count, failed span names |
+| span tree | DEBUG, one line per span indented by depth |
 
-1. Seed: `CreateOrder` instance built, placed in the store, `trigger(create_order, req)`.
-2. `create_order` loads the user, creates one `Order` and two `OrderLine` instances with pending Keys, sets `req.order`. Returns.
-3. Reconcile level 1: frontier is three created instances. `OnCreate(OrderLine)` matches, `order_total` runs once with two `Change` records. `many` and `load` flush first, drawing three Keys and inserting three rows, then load. `order.total` set. Marks advance.
-4. Reconcile level 2: frontier is `Order.total`. No eager entry lists it. Marks advance. Frontier was non-empty, so one more diff: empty. Done.
-5. Flush: update the order's `total` and `updated_at`. Commit.
-6. Response: `req` rendered with `order` inline, id resolved.
-7. WAL worker sees the committed transaction: inserts on `order_t` and `order_line_t`, update on `order_t.total`. `OnChange(Order, [total])` is deferred and matches. One outbox row for `notify_total_changed` with one `Change`.
-8. Deferred worker claims it, builds a context, runs the reaction, commits, deletes the row.
+A `Trace` per run holds a `Span` per invocation plus `flush` and `run`: name, reaction id, parent id, `started_at`, duration, ok. `trace.total_ms()` is the `run` span. The trace is logged at the end of every run and is otherwise internal.
 
-## 14. Out of scope for v1
+## 12. Settings
 
-- Permissions and authentication.
-- REST resource mapping over API entities.
-- Files, caches, search indexes, any data source other than PostgreSQL.
-- Cross-request caching of loaded data.
-- Persisted audit history of field changes.
-- Static dependency graph, cycle detection before runtime, lineage documentation.
-- Enforcement of undeclared reads or slow access patterns.
-- Alternative outbox transports such as SQS or Kafka. The table is the contract; transports can be added behind it.
+Decided.
 
-## 15. Decisions and open questions
+`RUNTIME_ENV` is `test`, `dev` or `prod`. `BACKEND_BUILDER_DATABASE_URL` unset means the in-memory store; set means Postgres at that URL. The app's default store factory reads these. Further layering, TOML files and per-app settings, waits until there is more than one setting worth layering.
 
-Settled in review:
+## 13. Schema, migrations and the Postgres mapping
 
-- **Ordering.** Explicit triggers start in trigger order; an awaited trigger runs immediately. Consumer config entries within a reconcile level run in no guaranteed order.
-- **Timeouts replace depth caps.** Every reaction has a 60 second timeout by default, set per trigger. The seed trigger's timeout bounds the run.
-- **Status codes.** Every exception is a 500. A REST layer above may do its own mapping.
-- **Workers.** The deferred worker and the WAL worker are separate processes.
-- **Packaging.** Starlette on uvicorn for ASGI, SQLAlchemy async with `asyncpg`, configuration through environment variables with a TOML file for defaults. Public surface is `backend_builder.{Entity, Field, Reaction, Context, OnCreate, OnChange, OnSchedule, run, workers}`.
-- **Testing.** Against a local Postgres with `wal_level = logical`, so the WAL worker is exercised end to end.
-- **`ctx.load` wildcard.** `'*'` as the prop column loads all persisted fields.
-- **No `where`.** Reads are by id or through `ctx.load` with SQL. In-memory filtering over loaded instances is `Collection.filter`.
-- **Snapshots are untracked blobs.** Reading an entity-typed field gives a plain object outside the store. Mutating it is the developer's business.
-- **`ctx.query` stays read-only.** A value-writing variant is not needed for v1.
+Decided.
 
-No open questions remain.
+**Tables and columns come from entities.** Table name is the class name in snake case. Columns are the persisted fields:
+
+| Python | Postgres |
+| --- | --- |
+| `id` | `uuid primary key` |
+| `str` | `text` |
+| `int` | `bigint` |
+| `float` | `double precision` |
+| `Decimal` | `numeric` |
+| `bool` | `boolean` |
+| `datetime` | `timestamptz` |
+| `date` | `date` |
+| `dict`, `list`, nested dataclass, entity as value, unions of these | `jsonb` |
+| `X | None` | nullable |
+
+Anything else fails at `App` construction.
+
+**Everything else comes from the app, as SQL.** Foreign keys, unique constraints, indexes, triggers, extensions, check constraints. Autogenerate is configured to compare only tables and columns, so it never drops what it did not declare.
+
+**One migration chain.** `apps/<app>/migrations/versions/` holds every migration, generated or hand-written, each pointing at its parent. `makemigration <app> -m "..."` autogenerates from entity changes. `makemigration <app> --empty -m "..."` scaffolds a file for SQL. `migrate <app>` applies pending migrations in order. `makemigration --check` fails if entities differ from what the migrations produce; CI runs it, so an entity change cannot merge without its migration, and a migration cannot merge without its entity change. `--merge` joins two heads from parallel branches.
+
+Autogenerate sees a renamed field as drop plus add. The generated file is reviewed and edited before commit; that is where a rename becomes `alter_column`.
+
+**Pipeline.** Developers generate migrations locally and commit them. CI applies the chain to a fresh database, runs the drift check, and runs the test suite against that database. Deploy applies the chain to the target database, then rolls the services. A migration must therefore be compatible with the version still running: add before reading, drop one release after writing stops.
+
+**Row to instance.** The store builds instances from rows by the entity's fields: for each field, read the column of the same name and convert the backend value to the field type, `uuid` to `str`, `timestamptz` to aware `datetime`, `numeric` to `Decimal`, `jsonb` by the field's annotation, recursively, with nested dataclasses reconstructed and ISO strings parsed back into datetimes where a nested field says so. A missing column is an error unless the field has a default. Extra columns are ignored, so a joined query with aliases works. Then `Entity(**values)`.
+
+**Instance to row.** The reverse, on flush. Dicts and lists recurse, dataclasses become dicts, datetimes and dates become ISO strings, `Decimal` becomes a string. Anything else raises at flush naming the entity, field and type.
+
+**Local Postgres for tests.** The `pgserver` package bundles Postgres and starts it from `pip install`, with no Docker and no sudo. One server per test session; one database per test, created from a template and dropped. CI uses the same package.
+
+**One database per app** by convention; the URL is the user's.
+
+## 14. Order of work
+
+1. Async reads and `query` on the interface, in-memory raising on `query`; shop and fixture apps updated.
+2. Snapshot-and-compare flush.
+3. Field-to-column mapping and Alembic: `makemigration`, `migrate`, `--check`, `--empty`; the shop app's first migration committed.
+4. `PostgresStore` with `run_scope`, retry, `query`; the `pgserver` test harness; the shop suite running on both stores.
+5. Settings and the store factory.
+
+## 15. Later
+
+Each of these was designed in the earlier draft and is parked, with what has to exist first.
+
+- **Deferred execution.** `trigger(..., deferred=True)` writes a row to an outbox table in the same flush, and a worker process polls the table, runs each row as an ordinary run, and deletes it on success or releases it with backoff on failure. Needs the Postgres store, because an in-memory outbox cannot cross processes. Brings `backend-builder worker <app>` and the second container.
+- **Data-change triggers.** Reactions that run because a field changed, declared in a config rather than called. The earlier draft matched them against per-pass deltas before commit and against WAL-decoded changes after. The session can now detect changes by snapshot comparison at flush, which is the natural input for the synchronous half. The design will be redone on that basis once deferred execution exists.
+- **Scheduling.** Cron entries that enqueue an outbox row when due.
+- **Timeouts and concurrent triggers.** A task group per context and a per-trigger timeout.
+- **Docker and Kubernetes.** Per [infrastructure.md](infrastructure.md), after settings.
+
+## 16. Decisions
+
+Settled in discussion, listed so they are not reopened by accident.
+
+- Ids are client-generated UUID strings. No sequences, no pending keys.
+- `updated_at` is not a system field; mutation is unobserved.
+- Entities carry no storage configuration. Constraints and indexes are SQL migrations owned by the app.
+- Many-to-many is a link entity. Navigation is a non-persisted field a reaction fills. No automatic relation loading.
+- The in-memory store is native: Python predicates, references, no serialization, a run lock instead of transactions.
+- `get` with a predicate is in-memory only; `query` with SQL is Postgres only. No portable query language.
+- Flush inserts created rows and updates loaded rows. Never upserts.
+- Any exception aborts the run. Every exception is a 500 over HTTP. A REST layer above may map codes.
+- Nothing about a run's internals is returned over HTTP. Traces go to logs.
+- Context input is a dict. API reactions build domain inputs from the structured request.
+- Reactions and entities belong to the app whose package defines them. Shared classes are included explicitly.
+- The CLI is in the core library and is the only process launcher.
+- Migrations are written by developers and reviewed in pull requests. The pipeline verifies, tests, applies and deploys; it never generates.
