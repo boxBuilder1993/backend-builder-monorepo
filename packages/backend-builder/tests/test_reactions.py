@@ -86,6 +86,8 @@ def test_system_fields_and_soft_delete(store: InMemoryStore) -> None:
     row.deleted_at = datetime.now(UTC)
     assert store.get(Order) == []
     assert store.get_by_id(Order, row.id) is None
+    assert store.get(Order, include_deleted=True) == [row]
+    assert store.get_by_id(Order, row.id, include_deleted=True) is row
 
 
 def test_registry_resolves_qualified_name() -> None:
