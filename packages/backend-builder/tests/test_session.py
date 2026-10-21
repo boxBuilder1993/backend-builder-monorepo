@@ -120,20 +120,14 @@ async def test_saved_values_are_shared_across_the_run_and_visible_after(
     store: InMemoryStore,
 ) -> None:
     ctx = await run(store, OpenAccount, {})
-    assert ctx.has("account") and ctx.load("opened") is True
+    assert ctx.load("opened") is True
     assert ctx.load("account").balance == 7
-    assert not ctx.has("missing")
     with pytest.raises(KeyError):
         ctx.load("missing")
 
 
 def test_saved_values_are_not_flushed(store: InMemoryStore) -> None:
     session = Session(store)
-    session.save("note", object())
+    session.vars["note"] = object()
     session.flush()
     assert store.get(Account) == []
-
-
-def test_save_requires_a_session(store: InMemoryStore) -> None:
-    with pytest.raises(TypeError):
-        Context(store, {}).save("x", 1)

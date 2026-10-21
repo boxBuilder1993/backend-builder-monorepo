@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from backend_builder import Context, Entity, InMemoryStore, Reaction, run
+from backend_builder import Context, Entity, InMemoryStore, Reaction, Session, run
 
 
 class Thing(Entity):
@@ -48,7 +48,7 @@ async def test_trace_records_a_span_per_invocation_and_the_flush() -> None:
 
 async def test_failed_invocation_is_recorded_as_not_ok() -> None:
     store = InMemoryStore()
-    seed = Context(store, {})
+    seed = Context(Session(store), {})
     with pytest.raises(ValueError):
         await seed.trigger(Explode, {})
     (span,) = seed.trace.spans
