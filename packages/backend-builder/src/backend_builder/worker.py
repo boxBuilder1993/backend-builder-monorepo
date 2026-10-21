@@ -35,7 +35,7 @@ class Worker:
     async def run_once(self) -> int:
         """Claim one batch and deliver it. Returns how many rows were claimed."""
         rows = await self.store.claim(
-            self.settings.outbox_batch, self.worker_id, self.settings.outbox_lease_seconds
+            self.settings.outbox_batch, self.worker_id, self.settings.outbox_lease_grace_seconds
         )
         if not rows:
             return 0
@@ -77,6 +77,7 @@ class Worker:
                 reaction,
                 row.input,
                 max_attempts=self.app.max_attempts,
+                timeout=row.timeout_seconds,
                 outbox_row_id=row.id,
                 triggers=self.app.triggers,
             )

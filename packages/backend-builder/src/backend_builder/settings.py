@@ -17,7 +17,7 @@ DATABASE_URL = "BACKEND_BUILDER_DATABASE_URL"
 LOG_LEVEL = "BACKEND_BUILDER_LOG_LEVEL"
 OUTBOX_POLL_SECONDS = "BACKEND_BUILDER_OUTBOX_POLL_SECONDS"
 OUTBOX_BATCH = "BACKEND_BUILDER_OUTBOX_BATCH"
-OUTBOX_LEASE_SECONDS = "BACKEND_BUILDER_OUTBOX_LEASE_SECONDS"
+OUTBOX_LEASE_GRACE_SECONDS = "BACKEND_BUILDER_OUTBOX_LEASE_GRACE_SECONDS"
 OUTBOX_MAX_ATTEMPTS = "BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS"
 OUTBOX_CONCURRENCY = "BACKEND_BUILDER_OUTBOX_CONCURRENCY"
 SCHEDULER_TICK_SECONDS = "BACKEND_BUILDER_SCHEDULER_TICK_SECONDS"
@@ -40,7 +40,8 @@ class Settings:
     log_level: str = "INFO"
     outbox_poll_seconds: float = 1.0
     outbox_batch: int = 10
-    outbox_lease_seconds: float = 60.0
+    outbox_lease_grace_seconds: float = 10.0
+    """Added to a row's own timeout to form the lease a worker holds on it."""
     outbox_max_attempts: int = 5
     outbox_concurrency: int = 4
     scheduler_tick_seconds: float = 15.0
@@ -70,7 +71,7 @@ class Settings:
             log_level=log_level,
             outbox_poll_seconds=_number(env, OUTBOX_POLL_SECONDS, 1.0),
             outbox_batch=int(_number(env, OUTBOX_BATCH, 10)),
-            outbox_lease_seconds=_number(env, OUTBOX_LEASE_SECONDS, 60.0),
+            outbox_lease_grace_seconds=_number(env, OUTBOX_LEASE_GRACE_SECONDS, 10.0),
             outbox_max_attempts=int(_number(env, OUTBOX_MAX_ATTEMPTS, 5)),
             outbox_concurrency=int(_number(env, OUTBOX_CONCURRENCY, 4)),
             scheduler_tick_seconds=_number(env, SCHEDULER_TICK_SECONDS, 15.0),

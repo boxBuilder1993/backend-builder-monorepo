@@ -40,6 +40,8 @@ class TriggerError(Exception):
 class OnCreate:
     entity: type[Entity]
     reaction: type[Reaction]
+    timeout: float | None = None
+    """Budget for the deliveries this trigger produces; None is the app default."""
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class OnChange:
     entity: type[Entity]
     fields: Sequence[str]
     reaction: type[Reaction]
+    timeout: float | None = None
 
     def __post_init__(self) -> None:
         if not self.fields:
@@ -61,12 +64,14 @@ class OnChange:
 class OnDelete:
     entity: type[Entity]
     reaction: type[Reaction]
+    timeout: float | None = None
 
 
 @dataclass(frozen=True)
 class OnSchedule:
     cron: str
     reaction: type[Reaction]
+    timeout: float | None = None
 
     def __post_init__(self) -> None:
         if not croniter.is_valid(self.cron):
@@ -83,6 +88,7 @@ class OnSchedule:
             input={"scheduled_for": scheduled_for.isoformat()},
             available_at=scheduled_for,
             scheduled_for=scheduled_for,
+            timeout_seconds=self.timeout,
         )
 
 
@@ -124,5 +130,11 @@ def match(triggers: Iterable[Trigger], changes: Iterable[Change]) -> list[Outbox
                 payload["changed"] = hit
             else:
                 continue
-            entries.append(OutboxEntry(reaction=qualified_name(trigger.reaction), input=payload))
+            entries.append(
+                OutboxEntry(
+                    reaction=qualified_name(trigger.reaction),
+                    input=payload,
+                    timeout_seconds=trigger.timeout,
+                )
+            )
     return entries

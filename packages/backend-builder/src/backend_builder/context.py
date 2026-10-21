@@ -77,22 +77,37 @@ class Context:
         return self._session.vars[name]
 
     async def trigger(
-        self, reaction: type[Reaction], input: dict[str, Any], *, deferred: bool = False
+        self,
+        reaction: type[Reaction],
+        input: dict[str, Any],
+        *,
+        deferred: bool = False,
+        timeout: float | None = None,
     ) -> Context | None:
         """Run ``reaction`` with ``input``.
 
         Immediate (the default): runs now, against this session, depth-first,
-        and returns the child context the reaction ran in.
+        and returns the child context the reaction ran in. ``timeout`` bounds
+        it, within the run's own deadline; it can only tighten. Expiry aborts
+        the whole run, because a cancelled transaction cannot be resumed.
 
         Deferred: records an outbox entry that the run's flush writes, so the
         reaction runs after commit, by a worker, as a run of its own. Returns
-        ``None``. ``input`` must be JSON-encodable. Postgres only.
+        ``None``. ``input`` must be JSON-encodable. ``timeout`` is that run's
+        whole budget and may be any value; None is the app default. Postgres
+        only.
         """
+        import asyncio
+
         from backend_builder.reaction import invoke, qualified_name
 
         if deferred:
-            self._session.defer(qualified_name(reaction), input)
+            self._session.defer(qualified_name(reaction), input, timeout=timeout)
             return None
         child = Context(self._session, input, parent_reaction_id=self.reaction_id, trace=self.trace)
-        await invoke(reaction, child)
+        if timeout is None:
+            await invoke(reaction, child)
+        else:
+            async with asyncio.timeout(timeout):
+                await invoke(reaction, child)
         return child

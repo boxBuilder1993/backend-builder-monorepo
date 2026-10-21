@@ -18,6 +18,7 @@ qualified name with the JSON body as its input and returns an empty object.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -30,7 +31,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend_builder.context import Context
-from backend_builder.engine import DEFAULT_MAX_ATTEMPTS, run
+from backend_builder.engine import DEFAULT_MAX_ATTEMPTS, DEFAULT_TIMEOUT, run
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, resolve
 from backend_builder.store import Store
@@ -62,6 +63,9 @@ class Endpoint:
     build: Callable[[Context], Awaitable[Any]] | None = None
     """Async; reads the root context after the run and returns the response
     body. Absent means an empty object."""
+    timeout: float | None = None
+    """Budget for this endpoint's run and its response builder, in seconds.
+    None means the app default. May be tighter or looser."""
 
     def __post_init__(self) -> None:
         names: set[str] = set(_PATH_PARAM.findall(self.path))
@@ -91,6 +95,7 @@ def create_app(
     resolver: Callable[[str], type[Reaction]] = resolve,
     title: str = "backend-builder",
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    timeout: float = DEFAULT_TIMEOUT,
     triggers: Sequence[Trigger] = (),
 ) -> FastAPI:
     """A FastAPI app over ``store`` exposing ``endpoints`` and, if ``generic``,
@@ -111,7 +116,7 @@ def create_app(
     for endpoint in endpoints:
         app.add_api_route(
             endpoint.path,
-            _handler(store, endpoint, max_attempts, triggers),
+            _handler(store, endpoint, max_attempts, timeout, triggers),
             methods=[endpoint.method],
             response_model=endpoint.response,
             name=endpoint.reaction.__name__,
@@ -130,7 +135,7 @@ def create_app(
                 return JSONResponse(
                     status_code=404, content={"error": "LookupError", "message": str(exc)}
                 )
-            ctx = await _run(store, reaction, input, max_attempts, triggers)
+            ctx = await _run(store, reaction, input, max_attempts, timeout, triggers)
             response.headers[REACTION_ID_HEADER] = ctx.reaction_id
             return {}
 
@@ -140,10 +145,16 @@ def create_app(
 
 
 def _handler(
-    store: Store, endpoint: Endpoint, max_attempts: int, triggers: Sequence[Trigger]
+    store: Store,
+    endpoint: Endpoint,
+    max_attempts: int,
+    timeout: float,
+    triggers: Sequence[Trigger],
 ) -> Callable[..., Any]:
     path_names = _PATH_PARAM.findall(endpoint.path)
     sources = {"query": endpoint.query, "body": endpoint.body, "headers": endpoint.headers}
+
+    budget = endpoint.timeout if endpoint.timeout is not None else timeout
 
     async def handler(**kwargs: Any) -> Any:
         response: Response = kwargs.pop("response")
@@ -158,9 +169,23 @@ def _handler(
             if model is not None:
                 input[source] = model.model_dump()
 
-        ctx = await _run(store, endpoint.reaction, input, max_attempts, triggers)
-        response.headers[REACTION_ID_HEADER] = ctx.reaction_id
-        return await endpoint.build(ctx) if endpoint.build is not None else {}
+        reaction_id = str(uuid4())
+        try:
+            async with asyncio.timeout(budget):
+                ctx = await run(
+                    store,
+                    endpoint.reaction,
+                    input,
+                    reaction_id=reaction_id,
+                    max_attempts=max_attempts,
+                    timeout=budget,
+                    triggers=triggers,
+                )
+                body: Any = await endpoint.build(ctx) if endpoint.build is not None else {}
+        except Exception as exc:
+            raise RunFailed(reaction_id, exc) from exc
+        response.headers[REACTION_ID_HEADER] = reaction_id
+        return body
 
     kw = inspect.Parameter.KEYWORD_ONLY
     params: list[inspect.Parameter] = []
@@ -187,6 +212,7 @@ async def _run(
     reaction: type[Reaction],
     input: dict[str, Any],
     max_attempts: int,
+    timeout: float,
     triggers: Sequence[Trigger],
 ) -> Context:
     reaction_id = str(uuid4())
@@ -197,6 +223,7 @@ async def _run(
             input,
             reaction_id=reaction_id,
             max_attempts=max_attempts,
+            timeout=timeout,
             triggers=triggers,
         )
     except Exception as exc:

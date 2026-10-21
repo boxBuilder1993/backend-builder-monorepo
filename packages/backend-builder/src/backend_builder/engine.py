@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_TIMEOUT = 60.0
 
 
 async def run(
@@ -28,6 +29,7 @@ async def run(
     *,
     reaction_id: str | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    timeout: float = DEFAULT_TIMEOUT,
     outbox_row_id: str | None = None,
     triggers: Sequence[Trigger] = (),
 ) -> Context:
@@ -43,6 +45,10 @@ async def run(
     is a function of its input and the store, so a retry is safe. The last
     attempt's exception propagates. The trace is logged for every attempt.
 
+    ``timeout`` is the budget for the whole run, every attempt included. When
+    it expires the current attempt is cancelled, its transaction rolls back,
+    and ``TimeoutError`` propagates. A cancelled transaction is never resumed.
+
     ``outbox_row_id`` names the outbox row this run delivers; it is deleted
     inside the run's transaction after the flush, so the run's writes and
     the row's removal commit together. ``triggers`` are the app's data-change
@@ -50,8 +56,33 @@ async def run(
     """
     attempts = max(1, max_attempts)
     reaction_id = reaction_id or str(uuid4())  # one id for the run, whatever the attempt count
+    try:
+        async with asyncio.timeout(timeout):
+            return await _attempts(
+                store, reaction, input, reaction_id, attempts, timeout, outbox_row_id, triggers
+            )
+    except TimeoutError:
+        logger.error(
+            "run timed out reaction=%s reaction_id=%s timeout_s=%s",
+            reaction.__name__,
+            reaction_id,
+            timeout,
+        )
+        raise
+
+
+async def _attempts(
+    store: Store,
+    reaction: type[Reaction],
+    input: dict[str, Any],
+    reaction_id: str,
+    attempts: int,
+    timeout: float,
+    outbox_row_id: str | None,
+    triggers: Sequence[Trigger],
+) -> Context:
     for attempt in range(1, attempts + 1):
-        session = Session(store, triggers=triggers)
+        session = Session(store, triggers=triggers, default_timeout=timeout)
         ctx = Context(session, input, reaction_id=reaction_id)
         try:
             async with store.run_scope():
@@ -62,6 +93,8 @@ async def run(
                     if outbox_row_id is not None:
                         await store.ack(outbox_row_id)
             return ctx
+        except TimeoutError:
+            raise  # the run's deadline, or a trigger's: never retried
         except Exception as exc:
             if attempt == attempts:
                 logger.error(

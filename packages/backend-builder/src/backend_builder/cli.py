@@ -109,6 +109,7 @@ def trigger(
             app.resolve(reaction),
             payload,
             max_attempts=app.max_attempts,
+            timeout=app.timeout,
             triggers=app.triggers,
         )
     )

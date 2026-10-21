@@ -135,8 +135,8 @@ ctx.delete(row)                             # deleted_at = now()
 ctx.save(name, value)                       # free-form, held by the session for the run
 ctx.load(name) -> Any                       # KeyError if absent
 
-await ctx.trigger(Reaction, input) -> Context           # runs now; returns the child context
-await ctx.trigger(Reaction, input, deferred=True) -> None   # outbox row at flush; runs after commit
+await ctx.trigger(Reaction, input, timeout=None) -> Context        # runs now; returns the child context
+await ctx.trigger(Reaction, input, deferred=True, timeout=None)   # outbox row at flush; runs after commit
 ```
 
 `get` and `get_by_id` are awaited because the Postgres store does I/O and the interface has one shape. Today the in-memory implementation returns immediately.
@@ -247,6 +247,7 @@ Endpoint(
     headers=TenantHeaders,      # x_tenant_id reads X-Tenant-Id
     response=LineResponse,
     build=line_response,
+    timeout=None,               # seconds; None is the app default
 )
 ```
 
@@ -336,7 +337,6 @@ Each of these was designed in the earlier draft and is parked, with what has to 
 
 - **Deferred execution.** Built; see section 16.
 - **Data-change triggers and schedules.** Built; see section 16.
-- **Timeouts and concurrent triggers.** A task group per context and a per-trigger timeout.
 - **Kubernetes.** Per [infrastructure.md](infrastructure.md). Docker is built; see section 17.
 
 ## 16. Deferred execution
@@ -379,7 +379,23 @@ Declarations are validated when the `App` is built: fields must exist on the ent
 
 **The eight ways a reaction runs.** Endpoint, generic endpoint or CLI, immediate trigger from a reaction, deferred trigger from a reaction, `OnCreate`, `OnChange`, `OnDelete`, `OnSchedule`. Every one ends in the same `run` with the app's retry policy and the app's triggers, so a deferred or scheduled reaction can trigger immediately, defer further work, or cause more data-change rows exactly as a request-driven one can. The reaction never knows which started it.
 
-## 17. The image, the stack and the end-to-end suite
+## 17. Timeouts
+
+Built.
+
+**One deadline per run.** `App(timeout=60)` is the budget for a whole run: the seed reaction, everything it triggers immediately, the flush, and every retry attempt together, so three attempts cannot take three times the budget. `run` wraps the attempt loop in `asyncio.timeout`. When it expires the current attempt is cancelled, its transaction rolls back, and `TimeoutError` propagates: a 500 over HTTP, a released outbox row in the worker, an error from the CLI. A timeout is never retried. On Postgres the cancelled statement is abandoned and the connection discarded; the store is usable again immediately.
+
+**Per-endpoint budgets.** `Endpoint(..., timeout=5)` bounds that endpoint's run and its response builder together, tighter or looser than the app default, since each request is its own run. The generic route and the CLI use the app default. A client that gives up first does not cancel the run; it continues to its own deadline and commits if it finishes. The builder runs after the commit, so a budget that expires during the builder returns a 500 for a run that did commit; builders are expected to be trivial.
+
+**Per-trigger budgets.** `await ctx.trigger(R, input, timeout=5)` bounds an immediate sub-reaction within the run's remaining budget; it can only tighten, because a transaction cannot be extended from inside, and its expiry aborts the whole run, because a cancelled transaction cannot be resumed. `await ctx.trigger(R, input, deferred=True, timeout=3600)` sets the budget of that delivery's own run and may be any value. `OnCreate`, `OnChange`, `OnDelete` and `OnSchedule` take `timeout=` for the rows they produce. `None` everywhere means the app default.
+
+**The outbox carries the budget.** Every row has `timeout_seconds`, filled at enqueue. The worker runs each delivery under its row's budget, and a worker's lease on a row is that budget plus `BACKEND_BUILDER_OUTBOX_LEASE_GRACE_SECONDS` (default 10). A row is therefore never claimed twice while it is legitimately running, however long that is, and a short job's row is reclaimable seconds after a worker dies. There is no global lease.
+
+**Long work.** A run is one serializable transaction. Held for an hour it conflicts with every concurrent write to what it read, and a retry starts from zero; that is acceptable when the hour is spent waiting on an external system and wrong for mass writes. The shape for bulk work is an orchestrator reaction that queries ids and defers one chunk reaction per few hundred rows: each chunk is a short transaction, retried on its own, spread across the workers. Fan-in, running something after all chunks complete, is not built; it would be a completion counter entity with an `OnChange` on it, and is a later discussion.
+
+**Triggers are sequential.** A run has one connection and one connection executes one statement at a time, so sub-reactions run one after another. The earlier idea of gathering several triggers concurrently is dropped.
+
+## 18. The image, the stack and the end-to-end suite
 
 Built.
 
@@ -389,7 +405,7 @@ Built.
 
 **The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
 
-## 18. Decisions
+## 19. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 

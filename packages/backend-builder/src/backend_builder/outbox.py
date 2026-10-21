@@ -4,7 +4,10 @@ A row is written in the same transaction as the run that produced it, so it
 exists if and only if that run committed. Workers claim rows with a lease,
 run them as ordinary runs, delete them inside the run's transaction on
 success, and release them with backoff on failure. After ``max_attempts``
-failed deliveries a row is marked dead and kept for inspection.
+failed deliveries a row is marked dead and kept for inspection. Every row
+carries its delivery budget, ``timeout_seconds``; the lease a worker holds
+on a row is that budget plus a grace period, so a row is never claimed
+twice while it is legitimately running.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ def outbox_table(metadata: sa.MetaData) -> sa.Table:
         sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("dead_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("scheduled_for", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("timeout_seconds", sa.Float(), nullable=False, server_default="60"),
         sa.Index("_outbox_claim_idx", "available_at", postgresql_where=sa.text("dead_at IS NULL")),
         sa.Index(
             "_outbox_schedule_idx",
@@ -73,6 +77,9 @@ class OutboxEntry:
     scheduled_for: datetime | None = None
     """Set for rows produced by a schedule. Unique per reaction, so two
     workers seeding the same occurrence write one row."""
+    timeout_seconds: float | None = None
+    """The delivery's budget. ``None`` means the app default, filled in by
+    the session at enqueue."""
     id: str = field(default_factory=lambda: str(uuid4()))
 
 
@@ -86,6 +93,7 @@ class OutboxRow:
     attempts: int
     available_at: datetime
     created_at: datetime
+    timeout_seconds: float
     scheduled_for: datetime | None = None
 
 
