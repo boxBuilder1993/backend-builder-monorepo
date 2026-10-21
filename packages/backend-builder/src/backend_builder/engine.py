@@ -6,15 +6,19 @@ from typing import Any
 
 from backend_builder.context import Context
 from backend_builder.reaction import Reaction
-from backend_builder.store import Store
+from backend_builder.store import Session, Store
 
 
 async def run(store: Store, reaction: type[Reaction], input: dict[str, Any]) -> Context:
     """Run ``reaction`` as the seed of a new run against ``store``.
 
-    Builds the root context with a fresh ``reaction_id`` and no parent, runs
-    the reaction, and returns the context so the caller can inspect the store.
+    Opens a session over ``store``, runs the reaction in a root context with a
+    fresh ``reaction_id`` and no parent, and flushes the session on success.
+    Any exception propagates and the session is discarded, leaving ``store``
+    untouched. Returns the root context.
     """
-    ctx = Context(store, input)
+    session = Session(store)
+    ctx = Context(session, input)
     await reaction().calculate(ctx)
+    session.flush()
     return ctx
