@@ -408,7 +408,25 @@ A `_run` row: the run's reaction id as key, the reaction, `source` (`endpoint PO
 
 `BACKEND_BUILDER_RUN_RECORDS` is `full` (default), `summary` (no input or vars) or `off`. `BACKEND_BUILDER_RUN_RETENTION_DAYS` (default 7) bounds the tables; the scheduler purges older records once an hour. These tables are what the admin console reads; they are never returned by the API.
 
-## 19. The image, the stack and the end-to-end suite
+## 19. Metrics
+
+Built.
+
+Every process serves Prometheus-format metrics and a health check on its own port, `BACKEND_BUILDER_METRICS_PORT` (default 9100), separate from the API's listener so metrics never sit on a public port. Metrics live in the process's memory and are updated where things happen; `/metrics` renders them for a scraper to poll; nothing is pushed. Labels are bounded, reaction names, sources, outcomes, route templates and statuses, never a reaction id.
+
+| Metric | Type | Updated |
+| --- | --- | --- |
+| `bb_runs_total{reaction, source, outcome}` | counter | end of every run |
+| `bb_run_duration_seconds{reaction}`, `bb_run_attempts{reaction}` | histograms | end of every run |
+| `bb_span_duration_seconds{name}` | histogram | every span of every attempt |
+| `bb_http_requests_total{route, method, status}`, `bb_http_request_duration_seconds{route, method}` | counter, histogram | API middleware, by route template |
+| `bb_outbox_deliveries_total{reaction, outcome}` | counter | worker, per delivery: `ok`, `error`, `unknown` |
+| `bb_outbox_pending`, `bb_outbox_claimed`, `bb_outbox_dead`, `bb_outbox_oldest_pending_seconds` | gauges | worker, refreshed on every poll |
+| `bb_schedule_seeds_total`, `bb_run_records_purged_total` | counters | scheduler |
+
+Outbox depth and the oldest row's age are the worker autoscaling signals; runs by outcome is the error-rate alert; dead rows above zero is a page. The compose stack publishes each process's metrics port, and the e2e suite scrapes all three.
+
+## 20. The image, the stack and the end-to-end suite
 
 Built.
 
@@ -418,7 +436,7 @@ Built.
 
 **The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a missing order answered with a 404 reply from a run that committed; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
 
-## 20. Decisions
+## 21. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 

@@ -14,7 +14,7 @@ from typing import Any
 
 import typer
 
-from backend_builder import migrations
+from backend_builder import metrics, migrations
 from backend_builder.app import App
 from backend_builder.engine import run
 from backend_builder.log import configure, get_logger
@@ -85,8 +85,16 @@ def serve(
         uvicorn.run(
             "backend_builder.cli:http_factory", factory=True, host=host, port=port, reload=True
         )
-    else:
-        uvicorn.run(app.http(), host=host, port=port)
+        return
+
+    http = app.http()
+    store = app.check_store(app.create_store())
+
+    async def main() -> None:
+        api = uvicorn.Server(uvicorn.Config(http, host=host, port=port))
+        await asyncio.gather(api.serve(), metrics.serve(current.metrics_port, store.ping))
+
+    asyncio.run(main())
 
 
 @cli.command()
@@ -181,8 +189,12 @@ def worker(package: str, once: bool = False, log_level: str | None = None) -> No
         claimed = asyncio.run(worker.run_once())
         typer.echo(f"claimed={claimed}")
         return
+
+    async def main() -> None:
+        await asyncio.gather(worker.run_forever(), metrics.serve(current.metrics_port, store.ping))
+
     try:
-        asyncio.run(worker.run_forever())
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
 
@@ -201,8 +213,14 @@ def scheduler(package: str, once: bool = False, log_level: str | None = None) ->
         seeded = asyncio.run(scheduler.tick())
         typer.echo(f"seeded={seeded}")
         return
+
+    async def main() -> None:
+        await asyncio.gather(
+            scheduler.run_forever(), metrics.serve(current.metrics_port, store.ping)
+        )
+
     try:
-        asyncio.run(scheduler.run_forever())
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
 

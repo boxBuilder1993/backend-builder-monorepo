@@ -29,12 +29,16 @@ REPO = Path(__file__).resolve().parents[4]
 PROJECT = "backend-builder-e2e"
 API_PORT = int(os.environ.get("E2E_API_PORT", "18080"))
 POSTGRES_PORT = int(os.environ.get("E2E_POSTGRES_PORT", "15432"))
+METRICS_PORTS = {"api": 19100, "worker": 19101, "scheduler": 19102}
 
 ENV = {
     **os.environ,
     "COMPOSE_PROJECT_NAME": PROJECT,
     "API_PORT": str(API_PORT),
     "POSTGRES_PORT": str(POSTGRES_PORT),
+    "API_METRICS_PORT": str(METRICS_PORTS["api"]),
+    "WORKER_METRICS_PORT": str(METRICS_PORTS["worker"]),
+    "SCHEDULER_METRICS_PORT": str(METRICS_PORTS["scheduler"]),
     "BACKEND_BUILDER_OUTBOX_POLL_SECONDS": "0.2",
     "BACKEND_BUILDER_SCHEDULER_TICK_SECONDS": "1",
     "BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS": "2",
@@ -78,6 +82,9 @@ class Stack:
     def cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         """Run a backend-builder command in a one-off container on the stack."""
         return compose("run", "--rm", "--no-deps", "-T", "api", *args, check=False, timeout=120)
+
+    def metrics_url(self, service: str) -> str:
+        return f"http://127.0.0.1:{METRICS_PORTS[service]}/metrics"
 
     def status(self) -> dict[str, str]:
         out = compose("ps", "--all", "--format", "{{.Service}}\t{{.Status}}", check=False).stdout

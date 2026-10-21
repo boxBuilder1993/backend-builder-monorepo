@@ -20,6 +20,7 @@ x-shop: &shop
     BACKEND_BUILDER_OUTBOX_POLL_SECONDS: ${BACKEND_BUILDER_OUTBOX_POLL_SECONDS:-1}
     BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS: ${BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS:-5}
     BACKEND_BUILDER_SCHEDULER_TICK_SECONDS: ${BACKEND_BUILDER_SCHEDULER_TICK_SECONDS:-15}
+    BACKEND_BUILDER_METRICS_PORT: "9100"
 
 services:
   postgres:
@@ -51,6 +52,7 @@ services:
     command: ["serve", "shop", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "${API_PORT:-8000}:8000"
+      - "${API_METRICS_PORT:-9100}:9100"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -63,16 +65,30 @@ services:
   worker:
     <<: *shop
     command: ["worker", "shop"]
+    ports:
+      - "${WORKER_METRICS_PORT:-9101}:9100"
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/health').status == 200 else 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
   scheduler:
     <<: *shop
     command: ["scheduler", "shop"]
+    ports:
+      - "${SCHEDULER_METRICS_PORT:-9102}:9100"
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/health').status == 200 else 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
 volumes:
   postgres:
