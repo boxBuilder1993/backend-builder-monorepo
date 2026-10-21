@@ -2,7 +2,7 @@ import asyncio
 from typing import Any
 
 import pytest
-from backend_builder import Context, Endpoint, Entity, InMemoryStore, Reaction, create_app
+from backend_builder import Context, Endpoint, Entity, InMemoryStore, Reaction, Reply, create_app
 from backend_builder.http import REACTION_ID_HEADER
 from backend_builder.reaction import qualified_name
 from fastapi.testclient import TestClient
@@ -321,3 +321,59 @@ def test_openapi_documents_every_source(client: TestClient) -> None:
     line = schema["paths"]["/orders/{order_id}/lines/{position}"]["get"]
     position = next(p for p in line["parameters"] if p["name"] == "position")
     assert position["schema"]["type"] == "integer"
+
+
+class Gate(Reaction):
+    """Records an outcome instead of raising; the builder decides the status."""
+
+    async def calculate(self, ctx: Context) -> None:
+        token = ctx.input["headers"]["x_token"]
+        if token != "open-sesame":
+            ctx.save("denied", {"error": "Unauthenticated", "message": "bad token"})
+            return
+        ctx.create(Order, user_id="gated")
+        ctx.save("order", (await ctx.get(Order))[0])
+
+
+class ErrorOut(BaseModel):
+    error: str
+    message: str
+
+
+class TokenHeaders(BaseModel):
+    x_token: str = ""
+
+
+async def gate_response(ctx: Context) -> OrderOut | Reply:
+    if "denied" in ctx.vars:
+        return Reply(status=401, body=ErrorOut(**ctx.load("denied")))
+    return OrderOut.model_validate(ctx.load("order"))
+
+
+def test_builder_reply_sets_the_status_and_the_run_still_commits(store: InMemoryStore) -> None:
+    endpoint = Endpoint(
+        method="POST",
+        path="/gated",
+        reaction=Gate,
+        headers=TokenHeaders,
+        response=OrderOut,
+        responses={401: ErrorOut},
+        build=gate_response,
+    )
+    client = TestClient(create_app(store, [endpoint]), raise_server_exceptions=False)
+
+    denied = client.post("/gated", headers={"X-Token": "nope"})
+    assert denied.status_code == 401
+    assert denied.json() == {"error": "Unauthenticated", "message": "bad token"}
+    assert len(denied.headers[REACTION_ID_HEADER]) == 36
+    assert rows(store, Order) == []
+
+    allowed = client.post("/gated", headers={"X-Token": "open-sesame"})
+    assert allowed.status_code == 200 and allowed.json()["user_id"] == "gated"
+    assert len(rows(store, Order)) == 1
+
+    schema = client.get("/openapi.json").json()
+    post = schema["paths"]["/gated"]["post"]
+    assert post["responses"]["401"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "ErrorOut"
+    )

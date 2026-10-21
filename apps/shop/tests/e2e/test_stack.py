@@ -74,8 +74,12 @@ async def test_openapi_documents_the_shop(client: AsyncClient) -> None:
         "/orders/{order_id}/lines/{line_id}",
         "/reactions/{name}",
     }
-    assert {"CreateOrderBody", "OrderResponse", "LineResponse"} <= set(
+    assert {"CreateOrderBody", "OrderResponse", "LineResponse", "ErrorOut"} <= set(
         schema["components"]["schemas"]
+    )
+    get = schema["paths"]["/orders/{order_id}"]["get"]
+    assert get["responses"]["404"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "ErrorOut"
     )
 
 
@@ -155,19 +159,35 @@ async def test_validation_errors_name_their_source(client: AsyncClient) -> None:
     assert res.json()["detail"][0]["loc"] == ["query", "include_lines"]
 
 
-async def test_run_failure_is_500_with_correlation_id_and_no_writes(
+async def test_missing_order_is_a_404_reply_from_a_committed_run(
     stack: Stack, client: AsyncClient
 ) -> None:
     missing = str(uuid4())
     before = await stack.sql('select count(*) as n from "order"')
 
     res = await client.get(f"/orders/{missing}")
+    assert res.status_code == 404
+    assert res.json() == {"error": "NotFound", "message": f"no order {missing}"}
+    reaction_id = res.headers["X-Reaction-Id"]
+    assert await stack.sql('select count(*) as n from "order"') == before
+    assert f"run finished reaction_id={reaction_id}" in stack.logs("api")
+    assert "run gave up" not in stack.logs("api")
+
+
+async def test_run_failure_is_500_with_correlation_id_and_no_writes(
+    stack: Stack, client: AsyncClient
+) -> None:
+    # A line id on the wrong order: UpdateLine raises, so this is a genuine failure.
+    order = (await create_order(client))["order"]
+    other = (await create_order(client))["order"]
+    line = (await get_order(client, order["id"]))["lines"][0]
+
+    res = await client.patch(f"/orders/{other['id']}/lines/{line['id']}", json={"qty": 3})
     assert res.status_code == 500
     body = res.json()
-    assert body["error"] == "LookupError" and missing in body["message"]
+    assert body["error"] == "LookupError" and line["id"] in body["message"]
     assert body["reaction_id"] == res.headers["X-Reaction-Id"]
-    assert await stack.sql('select count(*) as n from "order"') == before
-    assert f"run gave up reaction=GetOrderApi reaction_id={body['reaction_id']}" in stack.logs(
+    assert f"run gave up reaction=UpdateLineApi reaction_id={body['reaction_id']}" in stack.logs(
         "api"
     )
 

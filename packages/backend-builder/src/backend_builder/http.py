@@ -10,7 +10,9 @@ and documents every source as declared. The reaction input keeps them apart::
 with only declared sources present. The endpoint's reaction is the API
 reaction: it reads that structure and builds the inputs of whatever domain
 reactions it triggers. After the run, ``build`` reads the root context and
-returns the response, validated against ``response``.
+returns the response, validated against ``response``, or a ``Reply`` with a
+status of its own for outcomes the run understood, an authentication
+failure, a missing resource, which are not errors: the run committed.
 
 A generic ``POST /reactions/{name}`` route triggers any registered reaction by
 qualified name with the JSON body as its input and returns an empty object.
@@ -21,8 +23,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -66,6 +68,9 @@ class Endpoint:
     timeout: float | None = None
     """Budget for this endpoint's run and its response builder, in seconds.
     None means the app default. May be tighter or looser."""
+    responses: Mapping[int, type[BaseModel]] = field(default_factory=dict[int, type[BaseModel]])
+    """Alternative statuses a builder may ``Reply`` with, and their body
+    models, for the OpenAPI document."""
 
     def __post_init__(self) -> None:
         names: set[str] = set(_PATH_PARAM.findall(self.path))
@@ -75,6 +80,18 @@ class Endpoint:
                 f"{self.method} {self.path}: path parameters {sorted(names)} "
                 f"do not match path_model fields {sorted(declared)}"
             )
+
+
+@dataclass(frozen=True, kw_only=True)
+class Reply:
+    """A response with a status other than 200, returned by a builder.
+
+    ``body`` is a Pydantic model or a JSON-shaped value. Declared for the
+    schema through ``Endpoint.responses``.
+    """
+
+    status: int
+    body: Any = None
 
 
 class RunFailed(Exception):
@@ -119,6 +136,7 @@ def create_app(
             _handler(store, endpoint, max_attempts, timeout, triggers),
             methods=[endpoint.method],
             response_model=endpoint.response,
+            responses={status: {"model": model} for status, model in endpoint.responses.items()},
             name=endpoint.reaction.__name__,
         )
 
@@ -184,6 +202,13 @@ def _handler(
                 body: Any = await endpoint.build(ctx) if endpoint.build is not None else {}
         except Exception as exc:
             raise RunFailed(reaction_id, exc) from exc
+        if isinstance(body, Reply):
+            content = (
+                body.body.model_dump(mode="json") if isinstance(body.body, BaseModel) else body.body
+            )
+            return JSONResponse(
+                status_code=body.status, content=content, headers={REACTION_ID_HEADER: reaction_id}
+            )
         response.headers[REACTION_ID_HEADER] = reaction_id
         return body
 

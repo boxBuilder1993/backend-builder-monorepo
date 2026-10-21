@@ -68,6 +68,12 @@ class Context:
         """Soft-delete ``row``. It disappears from reads unless asked for."""
         self._session.delete(row)
 
+    @property
+    def vars(self) -> dict[str, Any]:
+        """The run's saved values, the dict ``save`` and ``load`` manage.
+        Handy for ``"name" in ctx.vars``."""
+        return self._session.vars
+
     def save(self, name: str, value: Any) -> None:
         """Keep ``value`` under ``name`` in the session for the rest of the run."""
         self._session.vars[name] = value
