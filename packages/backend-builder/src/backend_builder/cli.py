@@ -1,0 +1,94 @@
+"""The ``backend-builder`` command: the one launcher for every process.
+
+Each command takes an app by package name, imports it, reads its ``app``
+object and derives what to run from it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+import os
+from typing import Any
+
+import typer
+
+from backend_builder.app import App
+from backend_builder.engine import run
+from backend_builder.log import configure
+
+cli = typer.Typer(no_args_is_help=True, add_completion=False)
+
+APP_ENV = "BACKEND_BUILDER_APP"
+
+
+def load_app(package: str) -> App:
+    """Import ``package`` and return its ``app``."""
+    try:
+        module = importlib.import_module(package)
+    except ModuleNotFoundError as exc:
+        raise typer.BadParameter(f"cannot import {package!r}: {exc}") from exc
+    found = getattr(module, "app", None)
+    if not isinstance(found, App):
+        raise typer.BadParameter(f"{package!r} has no App named 'app'")
+    return found
+
+
+def http_factory() -> Any:
+    """Uvicorn factory for reload mode; the app comes from the environment."""
+    return load_app(os.environ[APP_ENV]).http()
+
+
+@cli.command()
+def serve(
+    package: str,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    reload: bool = False,
+    log_level: str = "INFO",
+) -> None:
+    """Serve an app's endpoints over HTTP."""
+    import uvicorn
+
+    configure(log_level.upper())
+    app = load_app(package)
+    if reload:
+        os.environ[APP_ENV] = package
+        uvicorn.run(
+            "backend_builder.cli:http_factory", factory=True, host=host, port=port, reload=True
+        )
+    else:
+        uvicorn.run(app.http(), host=host, port=port)
+
+
+@cli.command()
+def trigger(
+    package: str,
+    reaction: str,
+    input: str = "{}",
+    log_level: str = "INFO",
+) -> None:
+    """Run one of an app's reactions by qualified name with a JSON input."""
+    configure(log_level.upper())
+    app = load_app(package)
+    parsed: Any = json.loads(input)
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter("input must be a JSON object")
+    payload: dict[str, Any] = {str(k): v for k, v in parsed.items()}  # type: ignore[union-attr]
+    ctx = asyncio.run(run(app.create_store(), app.resolve(reaction), payload))
+    typer.echo(f"reaction_id={ctx.reaction_id} total_ms={ctx.trace.total_ms():.1f}")
+
+
+@cli.command()
+def graph(package: str) -> None:
+    """Print an app's entities, reactions and endpoints."""
+    app = load_app(package)
+    for section, items in app.describe().items():
+        typer.echo(f"{section}:")
+        for item in items:
+            typer.echo(f"  {item}")
+
+
+def main() -> None:
+    cli()

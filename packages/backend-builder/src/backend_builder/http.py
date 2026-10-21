@@ -83,11 +83,17 @@ class RunFailed(Exception):
 
 
 def create_app(
-    store: Store, endpoints: Sequence[Endpoint] = (), *, generic: bool = True
+    store: Store,
+    endpoints: Sequence[Endpoint] = (),
+    *,
+    generic: bool = True,
+    resolver: Callable[[str], type[Reaction]] = resolve,
+    title: str = "backend-builder",
 ) -> FastAPI:
     """A FastAPI app over ``store`` exposing ``endpoints`` and, if ``generic``,
-    the ``POST /reactions/{name}`` route."""
-    app = FastAPI()
+    the ``POST /reactions/{name}`` route. ``resolver`` maps a qualified name to
+    a reaction for that route; an ``App`` passes one scoped to its package."""
+    app = FastAPI(title=title)
     app.add_exception_handler(RunFailed, _run_failed)
 
     for endpoint in endpoints:
@@ -106,7 +112,7 @@ def create_app(
             if not isinstance(body, dict):
                 return _bad_request("body must be a JSON object")
             input: dict[str, Any] = {str(k): v for k, v in body.items()}  # type: ignore[union-attr]
-            ctx = await _run(store, resolve(name), input)
+            ctx = await _run(store, resolver(name), input)
             response.headers[REACTION_ID_HEADER] = ctx.reaction_id
             return {}
 
