@@ -15,7 +15,7 @@ class OrderLine(Entity):
 
 class OrderTotal(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        order_id: int = ctx.input
+        order_id: str = ctx.input
         lines = ctx.get(OrderLine, lambda row: row["order_id"] == order_id)
         (order,) = ctx.get(Order, lambda row: row["id"] == order_id)
         order["total"] = sum(line["price"] * line["qty"] for line in lines)
@@ -41,8 +41,8 @@ async def test_create_order_computes_total(store: InMemoryStore) -> None:
     await Context(store, request).trigger(CreateOrder, request)
 
     (order,) = store.get(Order)
-    assert order == {"id": 1, "user_id": 7, "total": 25}
-    assert [line["order_id"] for line in store.get(OrderLine)] == [1, 1]
+    assert order == {"id": order["id"], "user_id": 7, "total": 25}
+    assert [line["order_id"] for line in store.get(OrderLine)] == [order["id"]] * 2
 
 
 async def test_rows_are_returned_by_reference(store: InMemoryStore) -> None:
@@ -51,10 +51,10 @@ async def test_rows_are_returned_by_reference(store: InMemoryStore) -> None:
     assert store.get(Order)[0]["total"] == 99
 
 
-async def test_ids_are_per_entity(store: InMemoryStore) -> None:
-    assert store.create(Order)["id"] == 1
-    assert store.create(Order)["id"] == 2
-    assert store.create(OrderLine)["id"] == 1
+async def test_ids_are_unique_uuid_strings(store: InMemoryStore) -> None:
+    ids = {store.create(Order)["id"] for _ in range(3)} | {store.create(OrderLine)["id"]}
+    assert len(ids) == 4
+    assert all(isinstance(i, str) and len(i) == 36 for i in ids)
 
 
 def test_registry_resolves_qualified_name() -> None:
