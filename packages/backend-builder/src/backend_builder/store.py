@@ -69,8 +69,10 @@ class Store(ABC):
         ``DuplicateKeyError``."""
 
     @abstractmethod
-    async def update[E: Entity](self, entity: type[E], row: E) -> None:
-        """Replace the stored row with the same ``id`` as ``row``."""
+    async def update(self, entity: type[Entity], row_id: str, changes: dict[str, Any]) -> None:
+        """Apply ``changes``, field name to new value, to the stored row with
+        this ``id``. Only changed fields are passed. ``MissingRowError`` if
+        the row does not exist."""
 
     @asynccontextmanager
     async def run_scope(self) -> AsyncGenerator[None]:
@@ -146,11 +148,12 @@ class InMemoryStore(Store):
         table[row.id] = row
         return row
 
-    async def update[E: Entity](self, entity: type[E], row: E) -> None:
-        table = self._table(entity)
-        if row.id not in table:
-            raise MissingRowError(f"{entity.__name__} id {row.id!r} does not exist")
-        table[row.id] = row
+    async def update(self, entity: type[Entity], row_id: str, changes: dict[str, Any]) -> None:
+        row = self._table(entity).get(row_id)
+        if row is None:
+            raise MissingRowError(f"{entity.__name__} id {row_id!r} does not exist")
+        for name, value in changes.items():
+            setattr(row, name, value)
 
 
 class Session:
@@ -166,6 +169,9 @@ class Session:
         self._backing = backing
         self._rows: dict[type[Entity], dict[str, Entity]] = {}
         self._created: set[tuple[type[Entity], str]] = set()
+        self._snapshots: dict[tuple[type[Entity], str], dict[str, Any]] = {}
+        """Field values of each loaded row as it came from the backing store.
+        Flush compares against these and writes only what changed."""
         self._fully_loaded: set[type[Entity]] = set()
         self.vars: dict[str, Any] = {}
         """Free-form values kept for the run. Shared by every reaction in the
@@ -184,6 +190,7 @@ class Session:
             return existing
         copied = _clone(row)
         table[row.id] = copied
+        self._snapshots[(entity, row.id)] = _field_values(_clone(row))
         return copied
 
     async def get[E: Entity](
@@ -249,12 +256,21 @@ class Session:
         The row stays in the working set and is written back on flush."""
         row.deleted_at = datetime.now(UTC)
 
+    def changes(self, row: Entity) -> dict[str, Any]:
+        """Fields of a loaded ``row`` whose value differs from the snapshot
+        taken at load, name to current value. Empty for an unchanged row.
+        Created rows have no snapshot and raise ``KeyError``."""
+        snapshot = self._snapshots[(type(row), row.id)]
+        current = _field_values(row)
+        return {name: value for name, value in current.items() if value != snapshot[name]}
+
     async def flush(self, *, reaction_id: str | None = None) -> None:
-        """Write every row in the working set to the backing store: created
-        rows as inserts, loaded rows as updates."""
+        """Write the working set to the backing store: created rows as
+        inserts, loaded rows as updates of only their changed fields. Rows
+        that did not change produce no write."""
         if self._backing is None:
             return
-        inserted = updated = 0
+        inserted = updated = unchanged = 0
         logger.info("flush started reaction_id=%s", reaction_id)
         for entity, table in self._rows.items():
             for row in table.values():
@@ -262,11 +278,27 @@ class Session:
                     logger.debug("flush insert reaction_id=%s row=%r", reaction_id, row)
                     await self._backing.create(entity, **_field_values(_clone(row)))
                     inserted += 1
-                else:
-                    logger.debug("flush update reaction_id=%s row=%r", reaction_id, row)
-                    await self._backing.update(entity, _clone(row))
-                    updated += 1
+                    continue
+                changed = self.changes(row)
+                if not changed:
+                    unchanged += 1
+                    continue
+                logger.debug(
+                    "flush update reaction_id=%s entity=%s id=%s changes=%r",
+                    reaction_id,
+                    entity.__name__,
+                    row.id,
+                    changed,
+                )
+                await self._backing.update(entity, row.id, copy.deepcopy(changed))
+                updated += 1
+            for row in table.values():
+                self._snapshots[(entity, row.id)] = _field_values(_clone(row))
         self._created.clear()
         logger.info(
-            "flush finished reaction_id=%s inserted=%d updated=%d", reaction_id, inserted, updated
+            "flush finished reaction_id=%s inserted=%d updated=%d unchanged=%d",
+            reaction_id,
+            inserted,
+            updated,
+            unchanged,
         )

@@ -123,15 +123,14 @@ async def test_duplicate_id_against_backing_is_rejected_at_flush(store: InMemory
 
 async def test_update_missing_row_raises(store: InMemoryStore) -> None:
     with pytest.raises(MissingRowError):
-        await store.update(Account, Account(balance=1))
+        await store.update(Account, "missing", {"balance": 1})
 
 
 async def test_run_flushes_on_success(store: InMemoryStore) -> None:
     account = await store.create(Account, balance=10)
     await run(store, Deposit, {"account_id": account.id, "amount": 5})
-    assert account.balance == 10
     after = await store.get_by_id(Account, account.id)
-    assert after is not None and after.balance == 15
+    assert after is account and account.balance == 15
 
 
 async def test_run_discards_everything_on_error(store: InMemoryStore) -> None:
