@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import fields
 from datetime import UTC, datetime
+from datetime import datetime as _datetime
 from typing import TYPE_CHECKING, Any
 
 from backend_builder.codec import to_jsonable
@@ -18,7 +19,7 @@ from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
 from backend_builder.schema import persisted_fields
 
 if TYPE_CHECKING:
-    from backend_builder.triggers import Trigger
+    from backend_builder.triggers import OnSchedule, Trigger
 
 logger = get_logger(__name__)
 
@@ -114,6 +115,12 @@ class Store(ABC):
         raise NotSupported(f"{type(self).__name__} has no outbox")
 
     async def outbox_stats(self) -> OutboxStats:
+        raise NotSupported(f"{type(self).__name__} has no outbox")
+
+    async def seed_schedule(self, schedule: OnSchedule, moment: _datetime) -> bool:
+        """If the schedule's last seeded occurrence is before ``moment``,
+        enqueue the next occurrence after ``moment`` and record it. Returns
+        whether a row was enqueued. Safe to call from several processes."""
         raise NotSupported(f"{type(self).__name__} has no outbox")
 
     async def ping(self) -> bool:

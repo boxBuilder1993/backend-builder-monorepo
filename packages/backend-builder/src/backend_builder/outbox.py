@@ -18,6 +18,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as pg
 
 OUTBOX_TABLE = "_outbox"
+SCHEDULE_TABLE = "_schedule"
 
 
 def outbox_table(metadata: sa.MetaData) -> sa.Table:
@@ -43,6 +44,19 @@ def outbox_table(metadata: sa.MetaData) -> sa.Table:
             unique=True,
             postgresql_where=sa.text("scheduled_for IS NOT NULL"),
         ),
+    )
+
+
+def schedule_table(metadata: sa.MetaData) -> sa.Table:
+    """One row per scheduled reaction: the cron it was last seeded with and
+    the last occurrence seeded. The scheduler advances it under a row lock."""
+    return sa.Table(
+        SCHEDULE_TABLE,
+        metadata,
+        sa.Column("reaction", sa.Text(), primary_key=True),
+        sa.Column("cron", sa.Text(), nullable=False),
+        sa.Column("last_scheduled_for", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
 
 

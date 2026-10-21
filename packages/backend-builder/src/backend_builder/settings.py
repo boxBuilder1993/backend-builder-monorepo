@@ -20,6 +20,7 @@ OUTBOX_BATCH = "BACKEND_BUILDER_OUTBOX_BATCH"
 OUTBOX_LEASE_SECONDS = "BACKEND_BUILDER_OUTBOX_LEASE_SECONDS"
 OUTBOX_MAX_ATTEMPTS = "BACKEND_BUILDER_OUTBOX_MAX_ATTEMPTS"
 OUTBOX_CONCURRENCY = "BACKEND_BUILDER_OUTBOX_CONCURRENCY"
+SCHEDULER_TICK_SECONDS = "BACKEND_BUILDER_SCHEDULER_TICK_SECONDS"
 
 
 class RuntimeEnv(StrEnum):
@@ -42,6 +43,9 @@ class Settings:
     outbox_lease_seconds: float = 60.0
     outbox_max_attempts: int = 5
     outbox_concurrency: int = 4
+    scheduler_tick_seconds: float = 15.0
+    """Must stay under the finest cron granularity, one minute, so no
+    occurrence is missed while the scheduler runs."""
 
     @property
     def store_name(self) -> str:
@@ -69,6 +73,7 @@ class Settings:
             outbox_lease_seconds=_number(env, OUTBOX_LEASE_SECONDS, 60.0),
             outbox_max_attempts=int(_number(env, OUTBOX_MAX_ATTEMPTS, 5)),
             outbox_concurrency=int(_number(env, OUTBOX_CONCURRENCY, 4)),
+            scheduler_tick_seconds=_number(env, SCHEDULER_TICK_SECONDS, 15.0),
         )
 
 

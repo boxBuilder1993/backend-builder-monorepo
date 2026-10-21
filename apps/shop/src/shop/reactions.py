@@ -4,6 +4,8 @@ from backend_builder import Context, Reaction
 
 from shop.entities import Order, OrderLine
 
+UNPAID_EXPIRY = "1 hour"
+
 
 class OrderTotal(Reaction):
     """Deferred: runs after any order line is created, repriced or deleted.
@@ -30,3 +32,42 @@ class CreateOrder(Reaction):
         for line in ctx.input["lines"]:
             ctx.create(OrderLine, order_id=order.id, price=line["price"], qty=line["qty"])
         ctx.save("order", order)
+
+
+class UpdateLine(Reaction):
+    """Reprice or requantify a line. The total follows through OnChange."""
+
+    async def calculate(self, ctx: Context) -> None:
+        line = await ctx.get_by_id(OrderLine, ctx.input["line_id"])
+        if line is None or line.order_id != ctx.input["order_id"]:
+            raise LookupError(f"no line {ctx.input['line_id']} on order {ctx.input['order_id']}")
+        if "price" in ctx.input:
+            line.price = ctx.input["price"]
+        if "qty" in ctx.input:
+            line.qty = ctx.input["qty"]
+        ctx.save("line", line)
+
+
+class DeleteLine(Reaction):
+    """Soft-delete a line. The total follows through OnDelete."""
+
+    async def calculate(self, ctx: Context) -> None:
+        line = await ctx.get_by_id(OrderLine, ctx.input["line_id"])
+        if line is None or line.order_id != ctx.input["order_id"]:
+            raise LookupError(f"no line {ctx.input['line_id']} on order {ctx.input['order_id']}")
+        ctx.delete(line)
+        ctx.save("line", line)
+
+
+class ExpireUnpaidOrders(Reaction):
+    """Scheduled: every minute, expire orders still ``new`` after the expiry window."""
+
+    async def calculate(self, ctx: Context) -> None:
+        stale = await ctx.query(
+            Order,
+            f"select * from \"order\" where status = 'new' and deleted_at is null "
+            f"and created_at < now() - interval '{UNPAID_EXPIRY}'",
+        )
+        for order in stale:
+            order.status = "expired"
+        ctx.save("expired", [order.id for order in stale])

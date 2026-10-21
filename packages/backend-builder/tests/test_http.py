@@ -289,7 +289,8 @@ def test_generic_trigger_by_qualified_name(client: TestClient, store: InMemorySt
     assert res.status_code == 200 and res.json() == {}
     assert [o.user_id for o in rows(store, Order)] == ["via-generic"]
 
-    assert client.post("/reactions/nowhere.Missing", json={}).status_code == 500
+    missing = client.post("/reactions/nowhere.Missing", json={})
+    assert missing.status_code == 404 and missing.json()["error"] == "LookupError"
     assert client.post(f"/reactions/{qualified_name(Ping)}", json=[1]).status_code == 400
 
 

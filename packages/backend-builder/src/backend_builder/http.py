@@ -119,12 +119,18 @@ def create_app(
 
     if generic:
 
-        async def trigger(name: str, request: Request, response: Response) -> dict[str, Any]:
+        async def trigger(name: str, request: Request, response: Response) -> Any:
             body: Any = await request.json() if await request.body() else {}
             if not isinstance(body, dict):
                 return _bad_request("body must be a JSON object")
             input: dict[str, Any] = {str(k): v for k, v in body.items()}  # type: ignore[union-attr]
-            ctx = await _run(store, resolver(name), input, max_attempts, triggers)
+            try:
+                reaction = resolver(name)
+            except LookupError as exc:
+                return JSONResponse(
+                    status_code=404, content={"error": "LookupError", "message": str(exc)}
+                )
+            ctx = await _run(store, reaction, input, max_attempts, triggers)
             response.headers[REACTION_ID_HEADER] = ctx.reaction_id
             return {}
 

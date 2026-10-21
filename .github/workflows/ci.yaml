@@ -46,3 +46,23 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --all-packages --locked
+
+      - name: End-to-end against the compose stack
+        run: uv run pytest -m e2e apps/shop/tests/e2e -q -p no:cacheprovider
+
+      - name: Stack logs on failure
+        if: failure()
+        run: COMPOSE_PROJECT_NAME=backend-builder-e2e docker compose --profile shop logs --no-log-prefix || true

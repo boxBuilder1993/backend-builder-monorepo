@@ -58,7 +58,7 @@ def test_http_serves_endpoints_and_scopes_the_generic_route() -> None:
         client.post(f"/reactions/{reaction_name(MakeWidget)}", json={"name": "w2"}).status_code
         == 200
     )
-    assert client.post(f"/reactions/{reaction_name(OutsideReaction)}", json={}).status_code == 500
+    assert client.post(f"/reactions/{reaction_name(OutsideReaction)}", json={}).status_code == 404
     assert client.get("/openapi.json").json()["info"]["title"] == "fixture_app"
 
 

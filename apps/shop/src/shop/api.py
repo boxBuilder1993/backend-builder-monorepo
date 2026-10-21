@@ -8,7 +8,7 @@ from backend_builder import Context, Endpoint, Reaction
 from pydantic import BaseModel, ConfigDict
 
 from shop.entities import Order, OrderLine
-from shop.reactions import CreateOrder
+from shop.reactions import CreateOrder, DeleteLine, UpdateLine
 
 # --- request models -----------------------------------------------------------
 
@@ -35,6 +35,16 @@ class GetOrderQuery(BaseModel):
     include_lines: bool = False
 
 
+class LinePath(BaseModel):
+    order_id: str
+    line_id: str
+
+
+class UpdateLineBody(BaseModel):
+    price: int | None = None
+    qty: int | None = None
+
+
 # --- response models ----------------------------------------------------------
 
 
@@ -51,6 +61,12 @@ class OrderOut(BaseModel):
     user_id: str
     tenant: str
     total: int
+    status: str
+
+
+class LineResponse(BaseModel):
+    line: LineOut
+    deleted: bool = False
 
 
 class OrderResponse(BaseModel):
@@ -85,6 +101,21 @@ class GetOrderApi(Reaction):
         ctx.save("include_lines", ctx.input["query"]["include_lines"])
 
 
+class UpdateLineApi(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        path = ctx.input["path"]
+        body = {k: v for k, v in ctx.input["body"].items() if v is not None}
+        await ctx.trigger(
+            UpdateLine, {"order_id": path["order_id"], "line_id": path["line_id"], **body}
+        )
+
+
+class DeleteLineApi(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        path = ctx.input["path"]
+        await ctx.trigger(DeleteLine, {"order_id": path["order_id"], "line_id": path["line_id"]})
+
+
 # --- builders -----------------------------------------------------------------
 
 
@@ -101,6 +132,11 @@ async def order_response(ctx: Context) -> OrderResponse:
         order=OrderOut.model_validate(order),
         lines=[LineOut.model_validate(line) for line in lines],
     )
+
+
+async def line_response(ctx: Context) -> LineResponse:
+    line: OrderLine = ctx.load("line")
+    return LineResponse(line=LineOut.model_validate(line), deleted=line.deleted_at is not None)
 
 
 endpoints = [
@@ -121,5 +157,22 @@ endpoints = [
         query=GetOrderQuery,
         response=OrderResponse,
         build=order_response,
+    ),
+    Endpoint(
+        method="PATCH",
+        path="/orders/{order_id}/lines/{line_id}",
+        reaction=UpdateLineApi,
+        path_model=LinePath,
+        body=UpdateLineBody,
+        response=LineResponse,
+        build=line_response,
+    ),
+    Endpoint(
+        method="DELETE",
+        path="/orders/{order_id}/lines/{line_id}",
+        reaction=DeleteLineApi,
+        path_model=LinePath,
+        response=LineResponse,
+        build=line_response,
     ),
 ]
