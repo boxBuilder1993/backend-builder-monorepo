@@ -312,7 +312,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 
 **Instance to row.** The reverse, on flush. Dicts and lists recurse, dataclasses become dicts, datetimes and dates become ISO strings, `Decimal` becomes a string. Anything else raises at flush naming the entity, field and type.
 
-**Local Postgres for tests.** The `pgserver` package bundles Postgres and starts it from `pip install`, with no Docker and no sudo. One server per test session; one database per test, created from a template and dropped. CI uses the same package.
+**Local Postgres for tests.** `docker compose up -d` starts Postgres 17 from `compose.yaml`. The test harness creates one empty database per test on it and drops it afterwards; tests that need it skip when the server is unreachable, except in CI, where a Postgres service container must be present.
 
 **One database per app** by convention; the URL is the user's.
 
@@ -320,7 +320,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 
 1. Async reads and `query` on the interface, in-memory raising on `query`; shop and fixture apps updated.
 2. Snapshot-and-compare flush. Done.
-3. Field-to-column mapping and Alembic: `makemigration`, `migrate`, `--check`, `--empty`; the shop app's first migration committed.
+3. Field-to-column mapping and Alembic: `makemigration`, `migrate --check`, `--empty`; the shop app's first migration committed. Done.
 4. `PostgresStore` with `run_scope`, retry, `query`; the `pgserver` test harness; the shop suite running on both stores.
 5. Settings and the store factory.
 

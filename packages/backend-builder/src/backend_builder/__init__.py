@@ -1,3 +1,4 @@
+from backend_builder import migrations
 from backend_builder.app import App
 from backend_builder.context import Context
 from backend_builder.engine import run
@@ -30,6 +31,7 @@ __all__ = [
     "Span",
     "Store",
     "Trace",
+    "migrations",
     "create_app",
     "run",
     "serve",
