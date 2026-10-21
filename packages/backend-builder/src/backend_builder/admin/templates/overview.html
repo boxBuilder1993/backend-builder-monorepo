@@ -1,0 +1,29 @@
+{% extends "base.html" %}{% set title = "overview" %}
+{% block body %}
+<h1>{{ app.name }}</h1>
+<div class="cards">
+  <div class="card"><div class="n">{{ app.reactions | length }}</div><div class="l">reactions</div></div>
+  <div class="card"><div class="n">{{ app.entities | length }}</div><div class="l">entities</div></div>
+  <div class="card"><div class="n">{{ app.endpoints | length }}</div><div class="l">endpoints</div></div>
+  <div class="card"><div class="n">{{ app.triggers | length }}</div><div class="l">triggers</div></div>
+</div>
+{% if summary %}
+<h2>Runs in the last {{ summary.since_hours | int }}h</h2>
+<div class="cards">
+  {% for outcome in ["ok", "error", "timeout"] %}
+  <div class="card"><div class="n {{ outcome }}">{{ summary.outcomes.get(outcome, 0) }}</div><div class="l">{{ outcome }}</div></div>
+  {% endfor %}
+</div>
+<h2>Outbox</h2>
+<div class="cards">
+  <div class="card"><div class="n">{{ summary.outbox.pending }}</div><div class="l">pending</div></div>
+  <div class="card"><div class="n">{{ summary.outbox.claimed }}</div><div class="l">claimed</div></div>
+  <div class="card"><div class="n {{ 'dead' if summary.outbox.dead else '' }}">{{ summary.outbox.dead }}</div><div class="l">dead</div></div>
+  <div class="card"><div class="n">{{ summary.outbox.oldest_pending.strftime('%H:%M:%S') if summary.outbox.oldest_pending else '–' }}</div><div class="l">oldest pending</div></div>
+</div>
+<h2>Recent runs</h2>
+{% include "_runs_table.html" %}
+{% else %}
+<p class="muted">This store keeps no run records or outbox; the graph is still available.</p>
+{% endif %}
+{% endblock %}

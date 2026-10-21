@@ -1,0 +1,16 @@
+<table>
+<tr><th>started</th><th>reaction</th><th>source</th><th>outcome</th><th>attempts</th><th>duration</th><th>error</th></tr>
+{% for r in (rows if rows is defined else recent) %}
+<tr>
+  <td><a href="/runs/{{ r.id }}">{{ r.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</a></td>
+  <td><a href="/reactions/{{ r.reaction }}">{{ r.reaction | reaction_short }}</a></td>
+  <td class="muted">{{ r.source }}</td>
+  <td class="{{ r.outcome }}">{{ r.outcome }}</td>
+  <td>{{ r.attempts }}</td>
+  <td>{{ r.duration_ms | ms }}</td>
+  <td class="muted">{{ r.error or '' }}</td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="muted">none</td></tr>
+{% endfor %}
+</table>

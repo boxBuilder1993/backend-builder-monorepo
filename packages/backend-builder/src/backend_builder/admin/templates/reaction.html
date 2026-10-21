@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% set title = info.name %}
+{% block body %}
+<h1>{{ info.name }} <span class="muted"><code>{{ info.qualified }}</code></span></h1>
+{% if info.doc %}<p>{{ info.doc }}</p>{% endif %}
+<h2>Reached by</h2>
+<ul>{% for e in info.endpoints %}<li><code>{{ e }}</code></li>{% endfor %}{% for t in info.triggers %}<li><code>{{ t }}</code></li>{% endfor %}
+{% if not info.endpoints and not info.triggers %}<li class="muted">explicit triggers from other reactions only</li>{% endif %}</ul>
+{% if stats %}
+<h2>Last {{ stats.since_hours | int }}h</h2>
+<table><tr><th>outcome</th><th>runs</th><th>p50</th><th>p95</th></tr>
+{% for s in stats.by_outcome %}<tr><td class="{{ s.outcome }}">{{ s.outcome }}</td><td>{{ s.n }}</td><td>{{ s.p50 | ms }}</td><td>{{ s.p95 | ms }}</td></tr>{% else %}<tr><td colspan="4" class="muted">no runs</td></tr>{% endfor %}
+</table>
+<p class="muted">{{ stats.pending }} outbox row(s) waiting for this reaction.</p>
+<h2>Recent runs</h2>
+{% with rows = recent %}{% include "_runs_table.html" %}{% endwith %}
+{% endif %}
+{% endblock %}

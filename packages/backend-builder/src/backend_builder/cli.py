@@ -226,6 +226,30 @@ def scheduler(package: str, once: bool = False, log_level: str | None = None) ->
 
 
 @cli.command()
+def admin(
+    package: str, host: str = "127.0.0.1", port: int | None = None, log_level: str | None = None
+) -> None:
+    """Serve the admin console: graph, reactions, runs, outbox, schedules."""
+    import uvicorn
+
+    from backend_builder.admin import create_admin_app
+
+    current = settings()
+    configure((log_level or current.log_level).upper())
+    app = load_app(package)
+    store = app.check_store(app.create_store())
+    console = create_admin_app(app, store, token=current.admin_token)
+    logger.info(
+        "admin console app=%s host=%s port=%d token=%s",
+        app.name,
+        host,
+        port or current.admin_port,
+        "required" if current.admin_token else "none",
+    )
+    uvicorn.run(console, host=host, port=port or current.admin_port)
+
+
+@cli.command()
 def outbox(package: str) -> None:
     """Print outbox depth: pending, claimed and dead rows, and the oldest pending."""
     app = load_app(package)

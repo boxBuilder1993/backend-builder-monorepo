@@ -30,12 +30,14 @@ PROJECT = "backend-builder-e2e"
 API_PORT = int(os.environ.get("E2E_API_PORT", "18080"))
 POSTGRES_PORT = int(os.environ.get("E2E_POSTGRES_PORT", "15432"))
 METRICS_PORTS = {"api": 19100, "worker": 19101, "scheduler": 19102}
+ADMIN_PORT = int(os.environ.get("E2E_ADMIN_PORT", "19200"))
 
 ENV = {
     **os.environ,
     "COMPOSE_PROJECT_NAME": PROJECT,
     "API_PORT": str(API_PORT),
     "POSTGRES_PORT": str(POSTGRES_PORT),
+    "ADMIN_PORT": str(ADMIN_PORT),
     "API_METRICS_PORT": str(METRICS_PORTS["api"]),
     "WORKER_METRICS_PORT": str(METRICS_PORTS["worker"]),
     "SCHEDULER_METRICS_PORT": str(METRICS_PORTS["scheduler"]),
@@ -63,6 +65,7 @@ def compose(
 class Stack:
     base_url: str
     database_url: str
+    admin_url: str = f"http://127.0.0.1:{ADMIN_PORT}"
 
     async def sql(self, statement: str, **params: Any) -> list[dict[str, Any]]:
         """Run a statement against the stack's database and return rows."""

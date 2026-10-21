@@ -228,6 +228,7 @@ An app is any importable package. The monorepo keeps apps under `apps/`, but the
 | `graph <package>` | prints entities, reactions, endpoints, triggers |
 | `worker <package> [--once]` | delivers outbox rows |
 | `scheduler <package> [--once]` | keeps each schedule's next occurrence in the outbox; purges old run records |
+| `admin <package> [--host --port]` | the admin console |
 | `outbox <package>` | prints pending, claimed and dead counts |
 | `makemigration <package> [-m] [--empty] [--check] [--merge]` | decided, section 13 |
 | `migrate <package>` | decided, section 13 |
@@ -426,7 +427,25 @@ Every process serves Prometheus-format metrics and a health check on its own por
 
 Outbox depth and the oldest row's age are the worker autoscaling signals; runs by outcome is the error-rate alert; dead rows above zero is a page. The compose stack publishes each process's metrics port, and the e2e suite scrapes all three.
 
-## 20. The image, the stack and the end-to-end suite
+## 20. The admin console
+
+Built.
+
+`backend-builder admin <app>` serves the console on `BACKEND_BUILDER_ADMIN_PORT` (default 9200), a separate process on its own port, never the API's. It is server-rendered HTML with no build step, lives in the core, and reads the run records, the outbox and the schedule table alongside the app's own declarations. `BACKEND_BUILDER_ADMIN_TOKEN`, when set, is asked for once on a login page and kept in a cookie; it is also accepted as an `X-Admin-Token` header. The console belongs behind network policy regardless.
+
+| Page | Shows |
+| --- | --- |
+| Overview | counts of reactions, entities, endpoints and triggers; runs by outcome in the last 24 hours; outbox depth; recent runs |
+| Graph | entities with their tables and fields; reactions with what reaches them, endpoints, triggers, schedules, and their docstrings; endpoints with their budgets |
+| Reaction | one reaction: what reaches it, runs by outcome with p50 and p95 over the last 24 hours, outbox rows waiting for it, recent runs |
+| Runs | filter by reaction, outcome and source prefix |
+| Run | outcome, source, timing, attempts, the error; the span tree per attempt with sub-triggers nested; the input; the saved vars; the changes written; the deferred rows and their state |
+| Outbox | pending, claimed and dead rows; a row's input, error and budget; requeue and discard |
+| Schedules | each schedule's cron, last seeded occurrence and next due; declared schedules not yet seeded |
+
+Requeue clears `dead_at` and the attempt count and makes the row due now; discard deletes it. Those are the only writes the console makes. On the in-memory store the console serves the graph and says the store keeps no records.
+
+## 21. The image, the stack and the end-to-end suite
 
 Built.
 
@@ -436,7 +455,7 @@ Built.
 
 **The end-to-end suite** in `apps/shop/tests/e2e` is the repository's standard for what "working" means. Its session fixture builds the image, brings the stack up under its own compose project and ports with fast poll and tick settings, and tears it down afterwards. The tests drive the published API with an HTTP client and observe the published database and the container logs. They cover: every service up and healthy, migrations at head; the OpenAPI document; an order created with lines, committed, then totalled by the worker through `OnCreate`; a line repriced and deleted, retotalled through `OnChange` and `OnDelete`; ten concurrent orders all totalled; validation errors naming their source; a missing order answered with a 404 reply from a run that committed; a failing run returning a 500 with its correlation id, writing nothing, and logging the failure; the generic trigger route scoped to the app; the scheduler seeding the schedule, the worker delivering it and expiring a stale order, and the scheduler re-seeding; an undeliverable row retried with backoff and marked dead, visible through the `outbox` command; and the worker stopped, work accumulating, and the worker restarted and catching up. `pytest -m e2e apps/shop/tests/e2e` runs it; the regular `pytest` excludes it; CI runs both.
 
-## 21. Decisions
+## 22. Decisions
 
 Settled in discussion, listed so they are not reopened by accident.
 
