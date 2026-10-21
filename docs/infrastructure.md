@@ -101,7 +101,7 @@ Initial recipes:
 | Database | fresh per test from a template, dropped after | persistent compose Postgres, or the in-cluster StatefulSet | in-cluster StatefulSet for now; managed Postgres later |
 | Workers | in-process, drained explicitly by tests | separate processes or pods | separate pods |
 | Logging | captured by pytest | human-readable to stdout | JSON to stdout |
-| Secrets | fixed values in `test.toml` | `.env` file, gitignored | Kubernetes Secret objects |
+| Secrets | `SECRET_*` set by the test | `SECRET_*` from compose or a gitignored `.env` | `SECRET_*` injected from Kubernetes Secret objects |
 | Reload | n/a | on | off |
 
 The `prod` environment exists from the start so that its configuration, manifests and behaviour are exercised locally. Nothing about it assumes a cloud.
@@ -115,7 +115,7 @@ Settings are a typed model loaded in this order, each layer overriding the last:
 3. Environment variables prefixed `BACKEND_BUILDER_`, mapped by name: `BACKEND_BUILDER_DATABASE_URL`, `BACKEND_BUILDER_OUTBOX_POLL_SECONDS`.
 4. Kubernetes injects layer 3 from a ConfigMap for non-secret values and a Secret for the rest.
 
-Secrets never appear in a TOML file except `test.toml`. The settings model refuses to start in `prod` if a secret has its default value.
+Secrets are not settings. They are `SECRET_<NAME>` environment variables read by reactions through `ctx.secret(name)` (design doc §21), injected by the platform and never written to a TOML file.
 
 The settings model is the single source of truth for what is configurable. It is defined once in the core and extended by apps for their own settings.
 

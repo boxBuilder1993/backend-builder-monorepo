@@ -28,6 +28,16 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"{ROOT}.{name}")
 
 
+class _Redacting(logging.Formatter):
+    """Masks every secret the process has read, so a payload logged at DEBUG
+    or an exception message never carries one out."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        from backend_builder import secrets
+
+        return secrets.default.redact(super().format(record))
+
+
 class _CurrentStderr:
     """A stream-like object that always writes to the current ``sys.stderr``,
     so a handler survives test runners and tools that swap or close it."""
@@ -48,9 +58,7 @@ def configure(level: int | str = logging.INFO, *, stream: TextIO | None = None) 
     """
     logger = logging.getLogger(ROOT)
     handler = logging.StreamHandler(stream if stream is not None else _CurrentStderr())  # type: ignore[arg-type]
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)-5s %(name)s %(message)s", "%H:%M:%S")
-    )
+    handler.setFormatter(_Redacting("%(asctime)s %(levelname)-5s %(name)s %(message)s", "%H:%M:%S"))
     logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
     logger.addHandler(handler)
     logger.setLevel(level)
