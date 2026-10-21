@@ -115,7 +115,7 @@ Settings are a typed model loaded in this order, each layer overriding the last:
 3. Environment variables prefixed `BACKEND_BUILDER_`, mapped by name: `BACKEND_BUILDER_DATABASE_URL`, `BACKEND_BUILDER_OUTBOX_POLL_SECONDS`.
 4. Kubernetes injects layer 3 from a ConfigMap for non-secret values and a Secret for the rest.
 
-Secrets are not settings. They are `SECRET_<NAME>` environment variables read by reactions through `ctx.secret(name)` (design doc §21), injected by the platform and never written to a TOML file.
+Secrets are not settings. They are `SECRET_<NAME>` environment variables read by reactions through `ctx.secret(name)` (design doc §22), injected by the platform and never written to a TOML file.
 
 The settings model is the single source of truth for what is configurable. It is defined once in the core and extended by apps for their own settings.
 
