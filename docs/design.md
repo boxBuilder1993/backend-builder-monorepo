@@ -180,7 +180,7 @@ Each store keeps its native reads native. The interface does not define a portab
 
 **In-memory store.** `entity -> id -> instance`. Rows returned by reference. `run_scope` holds an `asyncio.Lock`, so runs on one store execute one at a time; that is what makes concurrent requests safe without transactions, and it is the throughput ceiling of this backend. Enforces the primary key and nothing else. Does not serialize values. State lives in the process and dies with it.
 
-**Postgres store.** Built. SQLAlchemy Core with asyncpg. `run_scope` opens a transaction at `SERIALIZABLE` and holds its connection in a context variable; every store call inside the run uses it; it commits on exit. Calls outside a run use their own short transaction. A serialization failure, a deadlock, or a primary key violation on `id` raise `TransientError`, and the engine retries the run from the seed with a fresh session, three attempts with jittered backoff. `get` raises `NotSupported`. `query` and `query_raw` run statements with bound parameters and return exactly what the statement returns, with no `deleted_at` filter added; `uuid` values from raw statements are normalised to strings. One engine, so one connection pool, per running event loop, because asyncpg connections are loop-bound. Reactions writing raw SQL quote `"order"` themselves.
+**Postgres store.** Built. SQLAlchemy Core with asyncpg. `run_scope` opens a transaction at `SERIALIZABLE` and holds its connection in a context variable; every store call inside the run uses it; it commits on exit. Calls outside a run use their own short transaction. A serialization failure, a deadlock, or a primary key violation on `id` raise `TransientError`, which the engine's retry handles like any other exception. `get` raises `NotSupported`. `query` and `query_raw` run statements with bound parameters and return exactly what the statement returns, with no `deleted_at` filter added; `uuid` values from raw statements are normalised to strings. One engine, so one connection pool, per running event loop, because asyncpg connections are loop-bound. Reactions writing raw SQL quote `"order"` themselves.
 
 ## 8. Run lifecycle
 
@@ -198,6 +198,8 @@ ctx = await run(store, reaction, input, reaction_id=None)
 6. Leave the scope. Log the trace, success or failure. Return the root context.
 
 An exception at step 4 or 5 propagates; steps 5 and 6 still log; nothing is written.
+
+**Retry.** Any exception discards the session and the run starts again from the seed with a fresh session, up to the app's `max_attempts`, three by default, with a short jittered pause. One policy for every reaction of the app, over HTTP and the CLI. A run is a function of its input and the store, so a retry is safe; a reaction that does something outside the session would repeat it. The last attempt's exception propagates.
 
 **Concurrency.** Within a run there is one task. Across runs on the in-memory store, the lock serialises them. Across runs on Postgres, serializable isolation and retry handle interaction.
 

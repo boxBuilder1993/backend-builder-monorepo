@@ -194,6 +194,7 @@ async def test_concurrent_serializable_runs_retry_and_converge(store: PostgresSt
     assert after is not None
     assert after.balance == 4 - len(failures)
     assert all(isinstance(f, TransientError) for f in failures)
+    assert len(failures) <= 1  # four conflicting writers, three attempts each: at most one gives up
 
 
 async def test_ping(store: PostgresStore) -> None:

@@ -30,23 +30,19 @@ class NotSupported(Exception):
 
 
 class TransientError(Exception):
-    """The run failed for a reason that a fresh attempt may not hit: a
-    serialization conflict, a deadlock. The engine retries the run."""
+    """The run failed for a reason a fresh attempt may not hit: a
+    serialization conflict, a deadlock, an id collision. Informational; the
+    engine retries every exception the same way."""
 
 
 class Store(ABC):
     """Where rows live between runs. Each backend implements this.
-
-    ``max_attempts`` is how many times the engine runs a run before giving up
-    on ``TransientError``. One means no retry.
 
     Reads are awaited because some backends do I/O. Each backend keeps its
     native reads native: ``get`` takes a Python predicate and exists only on
     the in-memory store; ``query`` takes a native statement and exists only
     on SQL stores. ``get_by_id``, ``create`` and ``update`` exist everywhere.
     """
-
-    max_attempts: int = 1
 
     async def get[E: Entity](
         self,

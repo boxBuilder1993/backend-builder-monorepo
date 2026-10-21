@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import random
 from typing import Any
+from uuid import uuid4
 
 from backend_builder.context import Context
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, invoke
-from backend_builder.store import Session, Store, TransientError
+from backend_builder.store import Session, Store
 
 logger = get_logger(__name__)
+
+DEFAULT_MAX_ATTEMPTS = 3
 
 
 async def run(
@@ -20,20 +23,22 @@ async def run(
     input: dict[str, Any],
     *,
     reaction_id: str | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> Context:
     """Run ``reaction`` as the seed of a new run against ``store``.
 
     Opens a session over ``store``, runs the reaction in a root context with
     ``reaction_id`` (fresh if not given) and no parent, and flushes the session
-    on success. Any exception propagates and the session is discarded, leaving
-    ``store`` untouched. The whole run happens inside ``store.run_scope()``.
+    on success. The whole run happens inside ``store.run_scope()``.
 
-    A ``TransientError`` from the store, such as a serialization conflict,
-    makes the whole run start again with a fresh session, up to
-    ``store.max_attempts`` times. A run is a function of its input and the
-    store, so a retry is safe. The trace is logged for every attempt.
+    Any exception discards the session, leaving ``store`` untouched, and the
+    run starts again from the seed with a fresh session, up to
+    ``max_attempts`` times with a short jittered pause between attempts. A run
+    is a function of its input and the store, so a retry is safe. The last
+    attempt's exception propagates. The trace is logged for every attempt.
     """
-    attempts = max(1, store.max_attempts)
+    attempts = max(1, max_attempts)
+    reaction_id = reaction_id or str(uuid4())  # one id for the run, whatever the attempt count
     for attempt in range(1, attempts + 1):
         session = Session(store)
         ctx = Context(session, input, reaction_id=reaction_id)
@@ -44,23 +49,25 @@ async def run(
                     with ctx.trace.span("flush", ctx.reaction_id, None):
                         await session.flush(reaction_id=ctx.reaction_id)
             return ctx
-        except TransientError as exc:
+        except Exception as exc:
             if attempt == attempts:
                 logger.error(
-                    "run gave up reaction=%s reaction_id=%s attempts=%d error=%s",
+                    "run gave up reaction=%s reaction_id=%s attempts=%d error=%s: %s",
                     reaction.__name__,
                     ctx.reaction_id,
                     attempt,
+                    type(exc).__name__,
                     exc,
                 )
                 raise
             delay = random.uniform(0, 0.05 * attempt)
             logger.warning(
-                "run retrying reaction=%s reaction_id=%s attempt=%d delay_ms=%.0f error=%s",
+                "run retrying reaction=%s reaction_id=%s attempt=%d delay_ms=%.0f error=%s: %s",
                 reaction.__name__,
                 ctx.reaction_id,
                 attempt,
                 delay * 1000,
+                type(exc).__name__,
                 exc,
             )
             await asyncio.sleep(delay)

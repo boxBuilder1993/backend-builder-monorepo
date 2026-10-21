@@ -18,6 +18,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from backend_builder.engine import DEFAULT_MAX_ATTEMPTS
 from backend_builder.entity import Entity, registered_entities
 from backend_builder.entity import qualified_name as entity_name
 from backend_builder.http import Endpoint, create_app
@@ -39,9 +40,13 @@ class App:
         store: Callable[[], Store] = InMemoryStore,
         include: Sequence[type[Reaction] | type[Entity]] = (),
         migrations: Path | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ) -> None:
         self.package = package
         self.endpoints = list(endpoints)
+        self.max_attempts = max_attempts
+        """How many times a run is attempted before its error propagates.
+        One policy for every reaction of the app, over HTTP and the CLI."""
         self._store_factory = store
         self._include = list(include)
         root = self._import_package()
@@ -105,6 +110,7 @@ class App:
             generic=generic,
             resolver=self.resolve,
             title=self.name,
+            max_attempts=self.max_attempts,
         )
 
     def describe(self) -> dict[str, list[str]]:

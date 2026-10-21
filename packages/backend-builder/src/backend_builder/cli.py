@@ -85,7 +85,9 @@ def trigger(
     if not isinstance(parsed, dict):
         raise typer.BadParameter("input must be a JSON object")
     payload: dict[str, Any] = {str(k): v for k, v in parsed.items()}  # type: ignore[union-attr]
-    ctx = asyncio.run(run(app.create_store(), app.resolve(reaction), payload))
+    ctx = asyncio.run(
+        run(app.create_store(), app.resolve(reaction), payload, max_attempts=app.max_attempts)
+    )
     typer.echo(f"reaction_id={ctx.reaction_id} total_ms={ctx.trace.total_ms():.1f}")
 
 

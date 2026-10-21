@@ -55,8 +55,6 @@ def _sqlstate(exc: BaseException) -> str | None:
 
 
 class PostgresStore(Store):
-    max_attempts = 3
-
     def __init__(self, url: str, entities: Iterable[type[Entity]]) -> None:
         self.url = async_url(url)
         self.metadata = build_metadata(entities)
