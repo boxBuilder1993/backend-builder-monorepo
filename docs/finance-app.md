@@ -168,7 +168,7 @@ the first version.
 
 1. **Progress visible during a run.** A leg is one serializable transaction, so a `DataFile` row written
    at the start of an hour-long run is invisible until the commit, and the console shows a running
-   the kite leg with no rows. A sanctioned write outside the run's transaction, `ctx.note(entity, id,
+   kite leg with no rows. A sanctioned write outside the run's transaction, `ctx.note(entity, id,
    changes)` in its own short transaction, would let a long reaction report progress. Until then the
    runtime's span log and the row count at the end are what there is.
 2. **Chunked legs with pacing.** The right shape for the nse leg is one `FetchDay(source, day)` per
