@@ -13,7 +13,7 @@ from typing import Any
 
 from backend_builder import Context, Reaction
 
-from finance import store
+from finance import settings, store
 from finance.entities import DataFile
 from finance.settings import DATA_DIR, HF_REPO, RECENT_DAYS
 from finance.sources import BUDGETS, LEGS, SOURCES, Ledger, LegResult
@@ -135,7 +135,8 @@ class SyncLeg(Reaction):
 class Publish(Reaction):
     """Uploads every ok DataFile with published_at null to the store in chunked commits and stamps
     published_at. Triggered by NightlySync after the legs; runnable alone from the CLI. The token is
-    SECRET_HF_TOKEN. A failed upload is an outcome: the rows stay unstamped and go out next time."""
+    SECRET_HF_TOKEN. A failed upload is an outcome: the rows stay unstamped and go out next time.
+    FINANCE_PUBLISH=off leaves them unstamped on purpose, for the shadow phase."""
 
     async def calculate(self, ctx: Context) -> None:
         rows = await ctx.query(
@@ -144,6 +145,9 @@ class Publish(Reaction):
         )
         ctx.save("files", len(rows))
         if not rows:
+            return
+        if not settings.PUBLISH:
+            ctx.save("disabled", True)
             return
         token = ctx.secret("hf_token")
         paths = [r.path for r in rows]

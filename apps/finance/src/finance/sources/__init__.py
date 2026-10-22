@@ -68,7 +68,8 @@ LEGS: dict[str, Leg] = {
     "us": _stub,
     "kite": _stub,
 }
-"""Leg name -> function. Filled in one source at a time (docs/finance-app.md, Order of the move)."""
+"""Leg name -> function. Filled in one source at a time (docs/finance-app.md, Order of the move).
+The leg modules import the types above, so they are registered at the bottom of this file."""
 
 SOURCES: dict[str, tuple[str, ...]] = {
     "reference": ("corp_actions", "holidays", "symbol_changes", "equity_master", "securities"),
@@ -80,3 +81,12 @@ SOURCES: dict[str, tuple[str, ...]] = {
 
 BUDGETS: dict[str, float] = {"reference": 3600, "nse": 3600, "us": 3600, "kite": 7200}
 """Seconds per leg, inside the night's budget. Kite's backfill is 9,000 requests at 3 a second."""
+
+
+def _register() -> None:
+    from finance.sources import nse
+
+    LEGS["nse"] = nse.leg
+
+
+_register()

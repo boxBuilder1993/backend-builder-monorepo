@@ -7,6 +7,9 @@ requires-python = ">=3.13"
 dependencies = [
     "backend-builder",
     "huggingface-hub>=2.2.0",
+    "requests>=2.32",
+    "curl-cffi>=0.10",
+    "polars>=1.30,<2",
 ]
 
 [build-system]

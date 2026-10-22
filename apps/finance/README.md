@@ -10,6 +10,7 @@ Environment, in `~/.config/backend-builder/finance.env`:
 | `FINANCE_DATA_DIR` | working copy of the store: `parquet/`, `raw/` (default `~/finance-data`) |
 | `FINANCE_HF_REPO` | the private Hugging Face dataset repo (default `shr22avan/finance-data`) |
 | `SECRET_HF_TOKEN` | fine-grained token with write access to that repo |
+| `FINANCE_PUBLISH` | `off` runs the legs but uploads nothing: the shadow phase beside the old poller (default `on`) |
 
 One run a night at 20:00 and 22:00 IST: the four legs in order, then the publish. Legs not yet implemented
 record `implemented=false` and write nothing. Run a piece by hand:
