@@ -1,8 +1,9 @@
 # Finance app
 
-Status: proposal, 2026-10-22. The market-data poller that lives today in the `indian-finance` repo
-(`ifin`, a Makefile and a systemd timer) becomes an app on Backend Builder, and the `mlkit` library and
-its experiments follow it. This document is the design of the poller as an app and the order of the move.
+Status: proposal, 2026-10-22. A new app, `apps/finance`, written from scratch on Backend Builder, takes
+over the market-data poller that lives today in the `indian-finance` repo (`ifin`, a Makefile and a
+systemd timer); the `mlkit` library and its experiments follow it. The old repo is the reference for
+every source quirk and the record of what the data looks like; none of its code is imported or moved.
 [design.md](design.md) is the authority on the runtime; this document only says how the finance work uses it.
 
 ## Why move it
@@ -24,23 +25,35 @@ manual, every token under `~/.config/ifin/`, both repos private.
 ## Layout
 
 ```
-packages/ifin/            the existing indian_finance package as a library: fetchers, builders, DuckDB views,
-                          the Hugging Face store, the research code. Keeps its `ifin` CLI for manual use.
-packages/mlkit/           the ML library (docs/mlkit/). No dependency on backend-builder.
-apps/finance/             this app: entities, reactions, triggers. Depends on ifin and mlkit.
+apps/finance/
   src/finance/
     __init__.py           app = App(package="finance", triggers=triggers, timeout=..., max_attempts=1)
-    entities.py
-    poller.py             the reactions in this document
-    ml.py                 the mlkit reactions, later
+    entities.py           the ledger, below
+    reactions.py          the reactions, below
     triggers.py
+    sources/              one module per external source: HTTP, pacing, the raw-file format, the date check
+      nse.py              cm bhavcopy (old and UDiFF layouts), sec_bhavdata_full, ind_close_all, the meta files
+      mcx.py              futures bhavcopy
+      yahoo.py            US equities in batches, the listings
+      kite.py             minute candles, the instrument master, the login state
+    build/                raw -> Parquet, one module per table family; byte-deterministic writers
+    store.py              the Hugging Face store: changed files, chunked commits, the private check
+    calendar.py           trading dates per market from the holiday table; weekends are not skipped by rule
     migrations/
   tests/
+packages/mlkit/           the ML library (docs/mlkit/), later. No dependency on backend-builder.
 ```
 
-`ifin` stays a library with no knowledge of the runtime, so its functions are called from reactions and
-from its own CLI alike, and its tests keep running on files. The app owns no fetching logic; it owns when
-things run, what is recorded, and what is retried.
+Everything under `sources/` and `build/` is plain Python with no knowledge of the runtime: functions that
+take dates and paths and return what they fetched or wrote. Reactions call them and write rows. That split
+is what keeps the fetch code testable on files and the reactions testable on the in-memory store.
+
+The old repo's README and its parsers are the specification for `sources/` and `build/`: the UDiFF cutover
+dates, the 404 after July 2024 for the old cm layout, MCX trading on NSE holidays, Yahoo's symbol form
+versus Nasdaq's, Kite's 60-day ceiling and the 15:14 end of its history for some symbols, ETFs duplicated
+in the Kite backfill, every one of them found by probing and recorded there. Each is carried over as a
+test here before the source that needs it is written. The file formats and paths stay identical, so the
+store the old poller filled is the store this app continues.
 
 The data directory on the worker's host is `FINANCE_DATA_DIR`, the working copy of the store, the same
 layout as today's `data/`. The Hugging Face token is `SECRET_HF_TOKEN`, read with `ctx.secret`, so it is
@@ -148,8 +161,8 @@ class PublishChanged(Reaction):
     a repo that is not private. At-least-once is harmless: the store dedupes identical bytes."""
 ```
 
-The reactions call `ifin` functions that do the HTTP and the file writes; the reaction's own job is the
-rows. File writes are not part of the transaction, which is why the order inside a reaction is always
+The reactions call the `sources/` and `build/` functions that do the HTTP and the file writes; the
+reaction's own job is the rows. File writes are not part of the transaction, which is why the order inside a reaction is always
 file first, row second, and why every file write is idempotent: a raw file that exists is never
 rewritten, a Parquet write compares bytes. A retry after a crash between the two finds the file and
 writes the row.
@@ -197,19 +210,20 @@ the first version.
 
 ## Order of the move
 
-1. **Library in.** `packages/ifin` is the `src/indian_finance` tree and its tests, unchanged apart from the
-   package layout; the DuckDB views, fetchers, builders, store and research code come with it. The
-   monorepo is Python 3.13; `numba` and `kiteconnect` are checked against it first.
-2. **App.** `apps/finance` with the entities, reactions and triggers above, a `finance` compose profile
-   (Postgres, migrate, worker, scheduler, admin) and the migrations. Tests: the gap query and the
-   row-writing of each reaction on the in-memory store with the fetchers stubbed; `migrations.check`
-   against Postgres.
+1. **Skeleton.** `apps/finance` in the workspace with the entities, `NightlySync`, `PublishChanged`, the
+   triggers, the migrations and a `finance` compose profile (Postgres, migrate, worker, scheduler,
+   admin). `backend-builder graph finance` prints it; `migrations.check` passes.
+2. **Sources, one at a time**, each with its quirk tests, its reaction and its builder: NSE cm and full
+   bhavcopy first, since `equity` depends on both, then the NSE indices, MCX, the reference files, Yahoo,
+   Kite. After each, the reaction is run by hand against a copy of the store and its Parquet compared
+   byte for byte with the old poller's file for the same day. The old poller keeps running throughout.
 3. **Shadow nights.** The new worker runs on the Linux box with `PublishChanged` disabled and
    `FINANCE_DATA_DIR` pointing at a copy of the poller's data. For a week its ledger is compared with the
    files the systemd poller produced the same night. Then the timer is disabled, `PublishChanged` is
    enabled, and the old poller's clone is kept as a cold copy of the data.
-4. **The old repo.** `indian-finance` on GitHub becomes the archive of the data history and nothing else;
-   the code lives here. Rewriting its history to drop the 5 GB of data is a separate decision.
+4. **The old repo.** `indian-finance` on GitHub becomes the archive: the data history and the reference
+   for quirks. The research code (dip search, signal scans, the notebooks) stays there until the mlkit
+   work gives it a home. Rewriting its history to drop the 5 GB of data is a separate decision.
 5. **mlkit.** `packages/mlkit` and the `Experiment`, `FitRun`, `Model` and `InferenceRun` entities with
    their reactions, per `docs/mlkit/`. The first two framework items above matter more here: a fit is an
    hour of GPU time, and it wants a subprocess and a progress row.
@@ -222,4 +236,6 @@ the first version.
 - File first, row second, every file write idempotent. The transaction covers the rows, never the files.
 - Legs run with one attempt; the outbox's backoff is the retry.
 - The Kite login stays manual and outside the app; a missing token is an outcome.
-- `ifin` stays a library and a CLI; the app owns scheduling, the ledger and retries, not fetching.
+- The app is written anew; nothing is imported from the old repo. Its quirks become tests here, and the
+  byte-for-byte comparison of Parquet files is the acceptance test for each source.
+- `sources/` and `build/` know nothing about the runtime; reactions know nothing about HTTP or Parquet.
