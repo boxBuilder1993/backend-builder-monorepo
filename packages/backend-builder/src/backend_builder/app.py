@@ -69,7 +69,16 @@ class App:
     def _validate_triggers(self) -> None:
         entities = set(self.entities)
         reactions = set(self.reactions)
+        seen: set[tuple[str, type[Reaction]]] = set()
         for trigger in self.triggers:
+            if isinstance(trigger, OnSchedule):
+                key = (trigger.cron, trigger.reaction)
+                if key in seen:
+                    raise TriggerError(
+                        f"{self.package}: OnSchedule({trigger.cron!r}) -> "
+                        f"{trigger.reaction.__name__} is declared twice"
+                    )
+                seen.add(key)
             if trigger.reaction not in reactions:
                 raise TriggerError(
                     f"{self.package}: trigger names {trigger.reaction.__name__}, "
