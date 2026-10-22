@@ -1,0 +1,17 @@
+# One process of one app: instance name is <app>:<role>, e.g. bb@finance:worker.
+# Installed by `make up APP=<app>` into ~/.config/systemd/user/ with @REPO@ replaced by the checkout path.
+[Unit]
+Description=backend-builder %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/bin/bb-run %i
+Restart=always
+RestartSec=5
+Environment=RUNTIME_ENV=prod
+
+[Install]
+WantedBy=default.target
