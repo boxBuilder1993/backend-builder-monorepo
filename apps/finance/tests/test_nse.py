@@ -15,7 +15,7 @@ import pytest
 from finance.build import mcx as M
 from finance.build import nse as N
 from finance.build.xlsx import is_xlsx, xlsx_to_csv
-from finance.files import parquet_rel, raw_rel
+from finance.files import marker_rel, parquet_rel, raw_rel
 from finance.http import Mcx, Transient
 from finance.sources import Ledger, LegResult
 from finance.sources import nse as S
@@ -234,12 +234,13 @@ def test_fetch_sources_registers_skips_and_fetches(
     existing = tmp_path / raw_rel("nse_cm", date(2024, 7, 5), "zip")
     existing.parent.mkdir(parents=True)
     existing.write_bytes(zipped(OLD_CM.replace("08-JUL-2024", "05-JUL-2024")))
+    (tmp_path / marker_rel("nse_cm", date(2024, 7, 7))).write_text("404")  # the old poller's marker
     cm = _Fake("nse_cm", "zip", {D: zipped(UDIFF_CM)})
     ledger = Ledger(no_data=frozenset({("nse_cm", date(2024, 7, 6))}))
     pauses: list[float] = []
     r = S.fetch_sources(tmp_path, today, ledger, [cm], sleep=pauses.append)
 
-    assert cm.asked == [date(2024, 7, 7), D, date(2024, 7, 9)]  # 5th on disk, 6th trusted no_data
+    assert cm.asked == [D, date(2024, 7, 9)]  # 5th on disk, 6th trusted no_data, 7th old marker
     assert [(w.source, w.day, w.kind) for w in r.written] == [
         ("nse_cm", date(2024, 7, 5), "raw"),
         ("nse_cm", D, "raw"),
@@ -249,7 +250,7 @@ def test_fetch_sources_registers_skips_and_fetches(
         ("nse_cm", date(2024, 7, 9)),
     ]
     assert (tmp_path / raw_rel("nse_cm", D, "zip")).read_bytes() == zipped(UDIFF_CM)
-    assert r.notes["requests"] == 3 and pauses == [0.25] * 3
+    assert r.notes["requests"] == 2 and pauses == [0.25] * 2
     assert all(w.sha256 and w.bytes > 0 for w in r.written)
 
 

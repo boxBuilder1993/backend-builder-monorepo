@@ -19,7 +19,15 @@ import polars as pl
 
 from finance.build import mcx as M
 from finance.build import nse as N
-from finance.files import parquet_rel, raw_rel, read_raw, sha256, write_if_changed, write_raw
+from finance.files import (
+    marker_rel,
+    parquet_rel,
+    raw_rel,
+    read_raw,
+    sha256,
+    write_if_changed,
+    write_raw,
+)
 from finance.http import NseArchives, Transient, looks_html, retry
 from finance.settings import BACKFILL_START, OLD_CM_END, REQUEST_PAUSE, UDIFF_START
 from finance.sources import Ledger, LegResult, NoData, Written
@@ -143,7 +151,10 @@ def fetch_sources(
 ) -> LegResult:
     """Every calendar day from the backfill start to today, per source: a file on disk is
     registered, a trusted no-data day is skipped, anything else is fetched. Weekends are never
-    skipped by rule; NSE has Saturday sessions. Sequential, a pause after every request."""
+    skipped by rule; NSE has Saturday sessions. Sequential, a pause after every request.
+
+    The old poller's ``.nodata`` marker files count as no-data days too, so a ledger built over a
+    store it filled starts with its knowledge instead of asking the exchange about every holiday."""
     out = LegResult()
     requests = 0
     for src in srcs:
@@ -154,6 +165,9 @@ def fetch_sources(
                 out.written.append(written_file(root, rel, "raw", src.name, day))
                 continue
             if (src.name, day) in ledger.no_data:
+                continue
+            if (root / marker_rel(src.name, day)).exists():
+                out.no_data.append(NoData(src.name, day))
                 continue
             try:
                 got = retry(functools.partial(src.fetch, day), what=f"{src.name} {day}")

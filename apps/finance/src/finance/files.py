@@ -17,6 +17,11 @@ def raw_rel(source: str, day: date, ext: str) -> str:
     return f"raw/{source}/{day:%Y}/{source}_{day:%Y%m%d}.{ext}"
 
 
+def marker_rel(source: str, day: date) -> str:
+    """The old poller's no-data marker. Read, never written: the ledger holds no-data days now."""
+    return f"raw/{source}/{day:%Y}/{source}_{day:%Y%m%d}.nodata"
+
+
 def parquet_rel(table: str, day: date) -> str:
     return f"parquet/{table}/year={day:%Y}/{table}_{day:%Y%m%d}.parquet"
 
