@@ -1,4 +1,5 @@
-"""The three reactions: NightlySync runs the legs in order and then Publish, all in one run.
+"""The poller's reactions, NightlySync running the legs in order and then Publish in one run, and
+PullStore, which brings the local mirror of the store to the store's current revision.
 
 Files are written by the legs and the store, outside the transaction, so the order is always file
 first, row second, and every file write is idempotent; the rows are the only thing the transaction
@@ -9,18 +10,24 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from backend_builder import Context, Reaction
 
-from finance import settings, store
-from finance.entities import DataFile
-from finance.settings import DATA_DIR, HF_REPO, RECENT_DAYS
+from finance import mirror, settings, store
+from finance.entities import DataFile, StoreSync
+from finance.settings import HF_REPO, RECENT_DAYS
 from finance.sources import BUDGETS, LEGS, SOURCES, Ledger, LegResult
 
 
 def nodata_path(source: str, day: date) -> str:
     return f"{source}/.nodata/{day.isoformat()}"
+
+
+def data_root() -> Path:
+    """Where the data is on this host: the store's mirror. Patched in tests."""
+    return mirror.mirror_dir(HF_REPO)
 
 
 class NightlySync(Reaction):
@@ -59,7 +66,7 @@ class SyncLeg(Reaction):
         ledger, rows = await self._ledger(ctx, SOURCES[leg], today)
         ctx.save("leg", leg)
         try:
-            result: LegResult = await asyncio.to_thread(LEGS[leg], DATA_DIR, today, ledger)
+            result: LegResult = await asyncio.to_thread(LEGS[leg], data_root(), today, ledger)
         except Exception as exc:  # a source that is down is an outcome, not the night's failure
             ctx.save("error", f"{type(exc).__name__}: {exc}")
             ctx.save("implemented", True)
@@ -154,7 +161,7 @@ class Publish(Reaction):
         paths = [r.path for r in rows]
         try:
             commits = await asyncio.to_thread(
-                store.upload, DATA_DIR, paths, HF_REPO, token, f"data: sync {date.today()}"
+                store.upload, data_root(), paths, HF_REPO, token, f"data: sync {date.today()}"
             )
         except Exception as exc:  # noqa: BLE001 - the store being down must not undo the legs' rows
             ctx.save("error", f"{type(exc).__name__}: {exc}")
@@ -164,3 +171,59 @@ class Publish(Reaction):
             r.published_at = now
         ctx.save("commits", [c.sha for c in commits])
         ctx.save("bytes", sum(c.bytes for c in commits))
+
+
+class PullStore(Reaction):
+    """Bring the mirror to the store's current revision, or find it already there. Input:
+    {"patterns": [...]} (default parquet/**; the ML never needs raw). One API call when nothing
+    moved; a download of only the files whose hash differs when it did. Every outcome is a StoreSync
+    row: current, pulled, or failed with the error, so the next read tries again."""
+
+    DEFAULT_PATTERNS = ["parquet/**"]
+
+    async def calculate(self, ctx: Context) -> None:
+        patterns: list[str] = list(ctx.input.get("patterns") or self.DEFAULT_PATTERNS)
+        token = ctx.secret("hf_token")
+        root = data_root()
+        last = await ctx.query(
+            StoreSync,
+            "select * from store_sync where repo = :repo and status in ('current', 'pulled') "
+            "order by created_at desc limit 1",
+            repo=HF_REPO,
+        )
+        known = last[0] if last else None
+        try:
+            revision = await asyncio.to_thread(mirror.store_revision, HF_REPO, token)
+            covered = known is not None and set(patterns) <= set(known.patterns)
+            if known is not None and known.revision == revision and covered and root.is_dir():
+                ctx.create(StoreSync, repo=HF_REPO, revision=revision, patterns=patterns)
+                ctx.save("status", "current")
+                ctx.save("revision", revision)
+                return
+            pulled = await asyncio.to_thread(mirror.pull, HF_REPO, token, revision, patterns, root)
+        except Exception as exc:  # noqa: BLE001 - the store being down is an outcome
+            ctx.create(
+                StoreSync,
+                repo=HF_REPO,
+                revision=known.revision if known is not None else "",
+                patterns=patterns,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            ctx.save("status", "failed")
+            ctx.save("error", f"{type(exc).__name__}: {exc}")
+            return
+        ctx.create(
+            StoreSync,
+            repo=HF_REPO,
+            revision=revision,
+            patterns=patterns,
+            files=pulled.files,
+            bytes=pulled.bytes,
+            seconds=round(pulled.seconds, 1),
+            status="pulled",
+        )
+        ctx.save("status", "pulled")
+        ctx.save("revision", revision)
+        ctx.save("files", pulled.files)
+        ctx.save("bytes", pulled.bytes)

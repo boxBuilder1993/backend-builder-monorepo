@@ -36,11 +36,11 @@ x-finance: &finance
     BACKEND_BUILDER_DATABASE_URL: postgresql://backend_builder:backend_builder@postgres:5432/finance
     BACKEND_BUILDER_LOG_LEVEL: ${BACKEND_BUILDER_LOG_LEVEL:-INFO}
     BACKEND_BUILDER_METRICS_PORT: "9100"
-    FINANCE_DATA_DIR: /data
+    XDG_DATA_HOME: /data
     FINANCE_HF_REPO: ${FINANCE_HF_REPO:-shr22avan/finance-data}
     SECRET_HF_TOKEN: ${SECRET_HF_TOKEN:-}
   volumes:
-    - ${FINANCE_DATA_DIR:-./data}:/data
+    - ${FINANCE_MIRROR_HOME:-./data}:/data
 
 services:
   postgres:
