@@ -187,7 +187,7 @@ done: `_schedule` is keyed by (reaction, cron) since #24.
    bhavcopy first, since `equity` depends on both, then the NSE indices, MCX, the reference files, Yahoo,
    Kite. After each, the reaction is run by hand against a copy of the store and its Parquet compared
    byte for byte with the old poller's file for the same day. The old poller keeps running throughout.
-3. **Shadow nights.** The new worker runs on the Linux box with `Publish` disabled and
+3. **Shadow nights.** The new worker runs on the Linux box with `FINANCE_PUBLISH=off` and
    `FINANCE_DATA_DIR` pointing at a copy of the poller's data. For a week its ledger is compared with the
    files the systemd poller produced the same night. Then the timer is disabled, `Publish` is
    enabled, and the old poller's clone is kept as a cold copy of the data.

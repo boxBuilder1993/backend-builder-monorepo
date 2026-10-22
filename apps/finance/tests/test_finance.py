@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from backend_builder import PostgresStore, migrations, run
-from finance import app, sources
+from finance import app, settings, sources
 from finance import store as hfstore
 from finance.entities import DataFile
 from finance.reactions import NightlySync, Publish, SyncLeg, nodata_path
@@ -146,6 +146,16 @@ async def test_publish_stamps_rows(
 
     ctx = await run(store, Publish, {"scheduled_for": "y"})  # nothing left: no upload call
     assert ctx.load("files") == 0 and len(uploaded) == 1
+
+
+async def test_publish_switch_off_uploads_nothing(
+    store: PostgresStore, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "PUBLISH", False)
+    await store.create(DataFile, path="raw/a", kind="raw", source="nse_cm", status="ok", bytes=10)
+    ctx = await run(store, Publish, {})
+    assert ctx.load("files") == 1 and ctx.load("disabled") is True
+    assert await store.query_raw("select published_at from data_file") == [{"published_at": None}]
 
 
 async def test_publish_failure_keeps_rows_unstamped(
