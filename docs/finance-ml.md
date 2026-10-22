@@ -10,13 +10,13 @@ fit first; this document says how fitting works.
 ## The idea in one paragraph
 
 A **Fit** is a definition: a SQL query that produces the rows to learn from, the features and their
-kinds, the target, an optional validation query, and a search over algorithms and parameters. Running
+kinds, the target, and a search over algorithms and parameters. Running
 it is a **FitRun**, with the query parameters actually used, and it produces one **Model** per point of
 the search, each with its own id and its artifact uploaded to the store before it is called fitted. An
 **InferRun** takes a model id and a query, checks the query against the model's schema, scores the rows
-and writes a table of key plus predictions. Validation is inference: when a Fit has a validation query,
-every model is scored on it as soon as it is fitted, and the prediction tables are what any metric is
-later computed from. All of it is visible in the console as runs and rows, and queryable from DuckDB
+and writes a table of key plus predictions. Validation is inference under a label, and an **Evaluation**
+is a set of metrics computed over one inference run's prediction table; a model can have any number of
+either. All of it is visible in the console as runs and rows, and queryable from DuckDB
 next to the prices.
 
 ## Entities
@@ -31,7 +31,6 @@ class Fit(Entity):
     key: list[str]                # columns identifying a row, e.g. ["market", "symbol", "date"]
     features: list[dict]          # [{"name": "ret_5d", "kind": "numeric"}, {"name": "sector", "kind": "categorical"}]
     target: dict                  # {"columns": ["fwd_ret_20d"], "task": "regression" | "binary" | "multiclass"}
-    validation_query: str | None  # same shape and params as query; every fitted model is scored on it
     search: list[dict]            # [{"algorithm": "xgboost", "params": {"max_depth": [3, 6], "n_estimators": [300]}}]
     content_hash: str             # of everything above except name and description
 
@@ -76,10 +75,19 @@ class InferRun(Entity):
     unknown_levels: dict | None = None   # per categorical, how many values were not in the fitted levels
     path: str | None = None              # parquet/inference/<infer run id>.parquet, a DataFile
     error: str | None = None
+
+class Evaluation(Entity):
+    """Metrics over one InferRun's prediction table. Several may sit on one run."""
+    infer_run_id: str
+    metrics: list[str]            # names from the metric registry, e.g. ["net_return_per_trade", "mae"]
+    params: dict[str, Any]        # what the metrics need: costs, principal, threshold
+    results: dict | None = None   # {"<metric>.<column>": value}
+    status: str                   # done | failed
+    error: str | None = None
 ```
 
 Indexes and uniqueness are migrations: `Fit.name` unique, `content_hash` unique on `Fit` so registering
-the same definition twice returns the existing row, `fit_run_id` on `Model`, `model_id` on `InferRun`.
+the same definition twice returns the existing row, `fit_run_id` on `Model`, `model_id` on `InferRun`, `infer_run_id` on `Evaluation`.
 
 **The schema is the contract.** `Model.schema` records the key, every feature with its kind and, for
 categoricals, the levels seen at fit time, and the target. Inference coerces each column to the kind,
@@ -98,10 +106,10 @@ model id resolves from any machine; the local directory is a cache. Models are n
 they are not data, and the data ledger stays about data. Inference outputs are data, one Parquet each,
 and are `DataFile` rows published with the rest.
 
-**No metrics on the entities.** A model's quality is not a number frozen at fit time. It is whatever is
-computed over its prediction tables, in SQL or a notebook, against whichever validation you choose. When
-a fixed metric set earns its place, it becomes an `Evaluation` entity over an `InferRun`, without
-touching `Fit`, `Model` or `InferRun`.
+**A Fit says how a model is made, nothing about judging it.** Validation is an `InferRun` with a label
+over whatever query you choose, and metrics are an `Evaluation` over that run. A model's quality is
+never a number frozen at fit time; it is as many evaluations, over as many validation runs, as the
+question needs, and comparing models is a query across the three tables.
 
 ## Reactions
 
@@ -112,11 +120,11 @@ RunFit(fit_id, params?)                         one FitRun; LoadRows; one deferr
   LoadRows(query, params, schema?)              DuckDB -> frame, coerced; saves rows and data hash
   FitModel(fit_run_id, spec)      [deferred]    fit in a subprocess, write the directory, upload, Model row
     UploadModel(model_id)                       the directory to the store; records revision and sha256
-    Infer(model_id, validation)                 when the Fit has a validation query
   CloseFitRun                     [OnChange(Model, ["status"])]   FitRun done when its last model is terminal
 Infer(model_id, label, query, params?)          LoadRows against the model's schema; score; write; InferRun row
   LoadRows
   PublishArtifact(paths)                        the output Parquet to the store, its DataFile row stamped
+Evaluate(infer_run_id, metrics, params?)        the prediction table -> named metrics; Evaluation row
 ```
 
 **`RunFit`** resolves the params (defaults overlaid with the input), expands `search` into concrete
@@ -129,8 +137,7 @@ anything itself, so it returns in seconds and the console shows the fan-out.
 query and params are, and the data hash is checked against the `FitRun`'s), trains in a subprocess so a
 CUDA fault or an out-of-memory kills the child and not the worker, writes the directory into the cache
 (`fitting` → `uploading`, `cache_path` set), then `UploadModel` pushes it to the store and records
-`repo`, `path`, `revision`, `sha256`; only then is the model `fitted`. If the Fit has a validation
-query, `Infer` runs on the new model with the label `validation`. A training failure is the model's
+`repo`, `path`, `revision`, `sha256`; only then is the model `fitted`. A training failure is the model's
 outcome, `failed` with the error; a store outage leaves it `uploading` with its cache path, and the
 upload is retried by the next `FitModel` attempt or by hand. The other models of the run are unaffected.
 
@@ -146,6 +153,15 @@ key columns, the target columns when the query yields them, `pred_<col>` per tar
 minutes; `deferred=True` on its trigger if a scoring ever is not. Validating a model against several
 datasets is several `Infer` runs on the same model id, each its own table and label.
 
+**`Evaluate`** takes an infer run id and metric names with their params, reads the prediction table,
+which carries the true target columns when the query yielded them, computes each metric per target
+column, and writes an `Evaluation`. Metrics are a registry of named functions over (truth, prediction,
+params): the generic ones, mae, rmse, log loss, auc; and the finance ones, net return per trade after
+costs at a principal, hit rate above a threshold. Several evaluations on one run, with different costs
+or different metric sets, are the normal case. Judging a sweep is `Infer` on every model with the same
+validation query and label, `Evaluate` on each, and one query over the three tables; a small
+orchestrating reaction can wrap that once the pattern settles.
+
 **Deferral and state.** Fits are deferred because they are long. The state is built for it: a `FitRun`
 is `queued`, then `running` from the first `FitModel`, and `done` only through `CloseFitRun`; a `Model` is
 `queued` from the moment its outbox row exists, so the console shows the whole sweep before a single
@@ -154,7 +170,7 @@ in `fitting` or `uploading` is how a stuck fit is found. Nothing is inferred fro
 whose models never arrive is visible as `running` with `specs` larger than its terminal models, and the
 row can be requeued from the console.
 
-**Budgets.** `RunFit` and `Infer` minutes; `FitModel` from the algorithm registry (gradient boosting on
+**Budgets.** `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
 the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`.
 
 ## Data
@@ -188,6 +204,7 @@ not an hour into a sweep.
 | `POST /ml/fits/{id}/runs` | `RunFit` | start a run with optional params; returns the fit run id |
 | `GET /ml/runs/{id}` | builder only | run status and its models |
 | `POST /ml/models/{id}/infer` | `Infer` | score a query under a label; returns the infer run id and output path |
+| `POST /ml/infer-runs/{id}/evaluate` | `Evaluate` | metrics over a run's prediction table; returns the evaluation |
 
 The CLI's `trigger` covers all of them without HTTP, and the console shows every run. A Fit can live as
 a JSON file in this repo and be registered with one command; the row is the record.
@@ -196,34 +213,35 @@ a JSON file in this repo and be registered with one command; the row is the reco
 
 ```
 apps/finance/src/finance/ml/
-  entities.py       Fit, FitRun, Model, InferRun
-  reactions.py      RegisterFit, RunFit, LoadRows, FitModel, UploadModel, CloseFitRun, Infer, PublishArtifact
-  api.py            the four endpoints
+  entities.py       Fit, FitRun, Model, InferRun, Evaluation
+  reactions.py      RegisterFit, RunFit, LoadRows, FitModel, UploadModel, CloseFitRun, Infer, PublishArtifact, Evaluate
+  api.py            the five endpoints
   data.py           DuckDB connection over the data dir, query execution, coercion and encoding, data hash
   schema.py         the Model.schema shape, its validation against a frame
   search.py         search expansion, Params validation
   estimators/       protocol, registry, xgboost.py, lightgbm.py, linear.py
   artifacts.py      the model directory: save, load, schema.json, fit.json; archive and hash
+  metrics.py        the metric registry: generic ones and the finance ones (costs, principal)
   modelstore.py     upload a model directory to the store and fetch one by (repo, path, revision)
 ```
 
-`data.py`, `schema.py`, `search.py`, `estimators/`, `artifacts.py` and `modelstore.py` know nothing
+`data.py`, `schema.py`, `search.py`, `estimators/`, `artifacts.py`, `metrics.py` and `modelstore.py` know nothing
 about the runtime and are tested on frames and temp directories; the reactions write rows.
 
 ## Acceptance
 
 - Unit: search expansion, Params validation, coercion and encoding round trip, unknown-level handling,
-  artifact save and load, archive hash stable, each adapter on a small frame on CPU.
+  artifact save and load, archive hash stable, each adapter on a small frame on CPU, each metric on
+  known inputs.
 - Postgres: `RunFit` fans out the right specs and rows; a `FitModel` with a fake estimator and a fake
-  store fills `Model` through `uploading` to `fitted`, runs the validation `Infer`, and triggers
-  `CloseFitRun`; `Infer` refuses a schema mismatch and writes the output table; a failed fit and a store
-  outage are outcomes with the right statuses.
+  store fills `Model` through `uploading` to `fitted` and triggers `CloseFitRun`; `Infer` refuses a schema
+  mismatch and writes the output table; `Evaluate` reads it back and writes the row; a failed fit and
+  a store outage are outcomes with the right statuses.
 - The first Fit of [finance-modelling.md](finance-modelling.md) run end to end on the box, with the GPU,
   its models fetched back from the store by id and scored.
 
 ## Not in the first version
 
-Metric sets and their storage (an `Evaluation` over an `InferRun`), cross-validation folds (a validation
-query is one split; folds are several Fits for now), Optuna or other sequential search, per-row
+Cross-validation folds (several Fits for now), Optuna or other sequential search, per-row
 weights, model promotion or aliases, a feature store. Each has a place in the entities above when it is
 needed.

@@ -13,9 +13,9 @@ Status: proposal, 2026-10-22. The two problems from the dip research, stated as 
   called anything.
 - **No hindsight universe.** Liquidity and price filters use trailing data up to the row's date.
 - **Unadjusted prices, corporate actions as unit scaling.** As in the simulator rules.
-- **The number that matters is net return per trade, then its consistency.** It is computed over the
-  prediction tables the validation inferences produce, in SQL, alongside whatever else is useful;
-  accuracy and AUC are looked at, never optimised.
+- **The number that matters is net return per trade, then its consistency.** It is an `Evaluation`
+  over each validation inference, with the costs and principal as its params; accuracy and AUC are
+  looked at, never optimised.
 
 ## The row
 
@@ -50,9 +50,10 @@ several sizes.
 
 ## Splits
 
-Fit on 2021-09 to 2024-12 with the validation query over 2025-01 to 2025-12, then a second `Infer` on
-every model with the label `validation 2026` over 2026-01 to today. Two prediction tables per model;
-the comparison is a query over both. The same for the US data, separately; the markets are not pooled until a pooled model beats
+Fit on 2021-09 to 2024-12. Then, on every model, `Infer` with the label `validation 2025` over 2025-01
+to 2025-12 and again with `validation 2026` over 2026-01 to today, and `Evaluate` on each with net
+return per trade at the principal in question. Two prediction tables and two evaluations per model;
+the comparison is one query over `Evaluation`, `InferRun` and `Model`. The same for the US data, separately; the markets are not pooled until a pooled model beats
 both single-market ones on both validations.
 
 ## Search
