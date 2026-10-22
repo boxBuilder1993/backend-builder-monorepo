@@ -16,7 +16,7 @@ from backend_builder.codec import to_jsonable
 from backend_builder.entity import Entity
 from backend_builder.log import get_logger
 from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
-from backend_builder.records import RunRecord
+from backend_builder.records import LOST_ERROR, RunRecord
 from backend_builder.schema import persisted_fields
 
 if TYPE_CHECKING:
@@ -128,11 +128,17 @@ class Store(ABC):
     # --- run records -----------------------------------------------------------------
 
     async def record_run(self, record: RunRecord) -> None:
-        """Store a run record in a transaction of its own. Never inside a run."""
+        """Store a run record in a transaction of its own, replacing any record
+        with the same id. Never inside a run."""
         raise NotSupported(f"{type(self).__name__} keeps no run records")
 
     async def purge_runs(self, before: _datetime) -> int:
         """Delete run records started before ``before``. Returns how many."""
+        raise NotSupported(f"{type(self).__name__} keeps no run records")
+
+    async def mark_lost(self, moment: _datetime) -> int:
+        """Mark ``running`` records whose deadline passed before ``moment`` as
+        ``lost``. Returns how many."""
         raise NotSupported(f"{type(self).__name__} keeps no run records")
 
     async def ping(self) -> bool:
@@ -167,6 +173,7 @@ class InMemoryStore(Store):
         """Run records, newest last. Native: a list, inspectable by tests."""
 
     async def record_run(self, record: RunRecord) -> None:
+        self.records = [r for r in self.records if r.id != record.id]
         self.records.append(record)
 
     async def purge_runs(self, before: _datetime) -> int:
@@ -174,6 +181,14 @@ class InMemoryStore(Store):
         purged = len(self.records) - len(keep)
         self.records = keep
         return purged
+
+    async def mark_lost(self, moment: _datetime) -> int:
+        lost = 0
+        for i, r in enumerate(self.records):
+            if r.outcome == "running" and r.deadline_at is not None and r.deadline_at < moment:
+                self.records[i] = replace(r, outcome="lost", error=LOST_ERROR)
+                lost += 1
+        return lost
 
     @asynccontextmanager
     async def run_scope(self) -> AsyncGenerator[None]:

@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from backend_builder import (
@@ -234,3 +236,84 @@ async def test_scheduler_purges_old_records(pg: PostgresStore) -> None:
     remaining = await pg.query_raw("select input->>'owner' as owner from _run")
     assert remaining == [{"owner": "new"}]
     assert await pg.query_raw("select count(*) as n from _span") != [{"n": 0}]
+
+
+# --- running and lost -----------------------------------------------------------------
+
+
+async def test_a_running_record_exists_while_the_run_executes_and_is_replaced() -> None:
+    store = InMemoryStore()
+    seen: list[tuple[str, int]] = []
+
+    class Peek(Reaction):
+        async def calculate(self, ctx: Context) -> None:
+            seen.append((store.records[0].outcome, len(store.records)))
+            assert store.records[0].id == ctx.reaction_id
+            assert store.records[0].deadline_at is not None
+
+    ctx = await run(store, Peek, {"k": "v"}, timeout=5, source="test")
+    assert seen == [("running", 1)]
+    (record,) = store.records
+    assert record.id == ctx.reaction_id and record.outcome == "ok"
+    assert record.deadline_at == record.started_at + timedelta(seconds=5)
+
+
+async def test_running_records_past_their_deadline_are_marked_lost() -> None:
+    store = InMemoryStore()
+    stale = RunRecord(
+        id=str(uuid4()),
+        reaction="x.Dead",
+        source="test",
+        outcome="running",
+        error=None,
+        attempts=0,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        duration_ms=0,
+        input=None,
+        vars=None,
+        changes=[],
+        enqueued=[],
+        spans=[],
+        deadline_at=datetime.now(UTC) - timedelta(minutes=4),
+    )
+    fresh = replace(stale, id=str(uuid4()), deadline_at=datetime.now(UTC) + timedelta(minutes=1))
+    await store.record_run(stale)
+    await store.record_run(fresh)
+    app = App(package="fixture_app", include=[Account, OuterMem, Inner])
+    assert await Scheduler(app, store, Settings()).sweep_lost() == 1
+    by_id = {r.id: r for r in store.records}
+    assert by_id[stale.id].outcome == "lost" and "stopped reporting" in (
+        by_id[stale.id].error or ""
+    )
+    assert by_id[fresh.id].outcome == "running"
+
+
+async def test_postgres_shows_the_running_row_mid_run_and_sweeps_lost_ones(
+    pg: PostgresStore,
+) -> None:
+    class PeekPg(Reaction):
+        async def calculate(self, ctx: Context) -> None:
+            rows = await ctx.query_raw(
+                "select outcome, deadline_at from _run where id = :id", id=ctx.reaction_id
+            )
+            assert rows[0]["outcome"] == "running" and rows[0]["deadline_at"] is not None
+            ctx.create(Account, owner="peeked")
+
+    ctx = await run(pg, PeekPg, {}, source="test")
+    (row,) = await pg.query_raw(
+        "select outcome, changes from _run where id = :id", id=ctx.reaction_id
+    )
+    assert row["outcome"] == "ok" and len(row["changes"]) == 1
+    assert await pg.query_raw("select count(*) as n from _run") == [{"n": 1}]
+
+    await pg.query_raw(
+        "update _run set outcome = 'running', deadline_at = now() - interval '2 minutes' "
+        "where id = :id returning id",
+        id=ctx.reaction_id,
+    )
+    app = App(package="fixture_app", include=[Account, Outer, Inner, Audit])
+    assert await Scheduler(app, pg, Settings()).sweep_lost() == 1
+    (row,) = await pg.query_raw(
+        "select outcome, error from _run where id = :id", id=ctx.reaction_id
+    )
+    assert row["outcome"] == "lost" and "stopped reporting" in row["error"]

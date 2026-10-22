@@ -36,7 +36,7 @@ from backend_builder.outbox import (
     OutboxStats,
     now,
 )
-from backend_builder.records import RUN_TABLE, SPAN_TABLE, RunRecord
+from backend_builder.records import LOST_ERROR, RUN_TABLE, SPAN_TABLE, RunRecord
 from backend_builder.schema import build_metadata, persisted_fields, table_name
 from backend_builder.store import DuplicateKeyError, MissingRowError, Store, TransientError
 
@@ -385,22 +385,25 @@ class PostgresStore(Store):
     async def record_run(self, record: RunRecord) -> None:
         runs = self.metadata.tables[RUN_TABLE]
         spans = self.metadata.tables[SPAN_TABLE]
+        values: dict[str, Any] = {
+            "reaction": record.reaction,
+            "source": record.source,
+            "outcome": record.outcome,
+            "error": record.error,
+            "attempts": record.attempts,
+            "started_at": record.started_at,
+            "duration_ms": record.duration_ms,
+            "input": record.input,
+            "vars": record.vars,
+            "changes": record.changes,
+            "enqueued": record.enqueued,
+            "deadline_at": record.deadline_at,
+        }
         async with self.engine.begin() as connection:
             await connection.execute(
-                sa.insert(runs).values(
-                    id=record.id,
-                    reaction=record.reaction,
-                    source=record.source,
-                    outcome=record.outcome,
-                    error=record.error,
-                    attempts=record.attempts,
-                    started_at=record.started_at,
-                    duration_ms=record.duration_ms,
-                    input=record.input,
-                    vars=record.vars,
-                    changes=record.changes,
-                    enqueued=record.enqueued,
-                )
+                pg.insert(runs)
+                .values(id=record.id, **values)
+                .on_conflict_do_update(index_elements=["id"], set_=values)
             )
             if record.spans:
                 await connection.execute(
@@ -420,6 +423,16 @@ class PostgresStore(Store):
                         for s in record.spans
                     ],
                 )
+
+    async def mark_lost(self, moment: datetime) -> int:
+        runs = self.metadata.tables[RUN_TABLE]
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                sa.update(runs)
+                .where(runs.c.outcome == "running", runs.c.deadline_at < moment)
+                .values(outcome="lost", error=LOST_ERROR)
+            )
+        return int(result.rowcount)
 
     async def purge_runs(self, before: datetime) -> int:
         runs = self.metadata.tables[RUN_TABLE]

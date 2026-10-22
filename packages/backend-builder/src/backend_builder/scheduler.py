@@ -53,8 +53,22 @@ class Scheduler:
         )
         while True:
             await self.tick()
+            await self.sweep_lost()
             await self.purge_if_due()
             await asyncio.sleep(self.settings.scheduler_tick_seconds)
+
+    async def sweep_lost(self, *, grace_seconds: float = 30.0) -> int:
+        """Mark ``running`` run records whose deadline passed more than
+        ``grace_seconds`` ago as ``lost``: their process died before it could
+        report. Returns how many."""
+        try:
+            lost = await self.store.mark_lost(now() - timedelta(seconds=grace_seconds))
+        except NotSupported:
+            return 0
+        if lost:
+            metrics.runs_lost_total.inc(lost)
+            logger.warning("scheduler marked runs lost app=%s rows=%d", self.app.name, lost)
+        return lost
 
     async def purge_if_due(self, *, every_seconds: float = 3600.0) -> int:
         """Delete run records older than the retention window, at most once

@@ -16,8 +16,10 @@ async def overview(store: Store, since_hours: float = 24) -> dict[str, Any]:
         since=since,
     )
     stats = await store.outbox_stats()
+    running = await runs(store, outcome="running", limit=100)
     return {
         "outcomes": {str(r["outcome"]): int(r["n"]) for r in outcomes},
+        "running": running,
         "outbox": stats,
         "since_hours": since_hours,
     }
