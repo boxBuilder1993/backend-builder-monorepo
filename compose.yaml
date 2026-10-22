@@ -26,6 +26,7 @@ x-shop: &shop
 services:
   postgres:
     image: postgres:17
+    restart: unless-stopped          # the one Postgres on a host; every app has its own database in it
     environment:
       POSTGRES_USER: backend_builder
       POSTGRES_PASSWORD: backend_builder
