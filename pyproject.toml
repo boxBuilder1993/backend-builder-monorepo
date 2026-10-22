@@ -8,6 +8,7 @@ dependencies = []
 members = [
     "packages/*",
     "apps/shop",
+    "apps/finance",
 ]
 
 [tool.uv.sources]

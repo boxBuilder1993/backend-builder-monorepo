@@ -11,9 +11,9 @@ every source quirk and the record of what the data looks like; none of its code 
 The poller is a nightly batch job with hand-written state: `.nodata` marker files decide what is missing,
 a JSON manifest decides what to publish, a shell script decides when to run, and a log file is the only
 record of what happened. Each of those is something the runtime already provides: a ledger is an entity,
-a schedule is `OnSchedule`, a retry is the outbox, a record is the run table and the admin console. The
-exchanges, Yahoo and Kite are external systems that fail in ordinary ways, and the outbox's retry, backoff
-and dead letters are the right tool for that.
+a schedule is `OnSchedule`, a record is the run table and the admin console, and a failed source is an
+outcome saved on the run rather than a line in a log file. The exchanges, Yahoo and Kite are external
+systems that fail in ordinary ways; the next scheduled run catches up whatever a night missed.
 
 What does not move: the data. Parquet and raw files stay files, published to the private Hugging Face
 dataset repo `shr22avan/finance-data` and read by DuckDB. Postgres holds the ledger and the ML control
@@ -94,21 +94,22 @@ on `(source, day)` are a migration.
 
 ## Reactions
 
-Three reactions. Fetching is work against an external system, so it is deferred work, retried by the
-worker. Each leg is one run per night, sequential inside, because each source has its own pacing (NSE
-0.25 s between requests, Kite 3 a second) and that pacing is simplest to keep inside one process. A run
-that is retried after a failure skips every file already on disk, so a retry costs the remaining work.
+Three reactions, one run a night. `NightlySync` triggers each leg in turn and then `Publish`, all inside
+one run and one transaction, the way the old poller runs its legs in sequence and publishes at the end.
+Each leg has its own pacing (NSE 0.25 s between requests, Kite 3 a second), which is simplest to keep
+inside one process, and a normal night is a few minutes in total.
 
 ```python
 class NightlySync(Reaction):
-    """Scheduled 14:30 and 16:30 UTC (20:00 and 22:00 IST). Defers one SyncLeg per leg, each with its own
-    budget. Input: {"scheduled_for": ...}. Writes nothing itself."""
+    """Scheduled 14:30 and 16:30 UTC (20:00 and 22:00 IST). Triggers SyncLeg for reference, nse, us and
+    kite in that order, each with its own budget, then Publish. Saves a summary per leg and of the
+    publish. Input: {"scheduled_for": ...}."""
 
 class SyncLeg(Reaction):
     """Input: {"leg": "reference" | "nse" | "us" | "kite"}. Calls the leg's function in sources/, which
     fetches what is missing and writes files, then builds the Parquet for the days that are now complete,
-    then writes one DataFile row per file written or day found empty. The leg name is saved to vars so
-    the console can filter runs by leg.
+    then writes one DataFile row per file written or day found empty. A failure of the source is caught
+    and saved as the leg's outcome, so the other legs run and the publish happens.
 
     reference: corporate actions, holidays, symbol changes, equity master; write_if_changed, a row only
                when the bytes changed.
@@ -117,54 +118,52 @@ class SyncLeg(Reaction):
                Parquet for complete days.
     us:        Yahoo in batches; failed batches wait for the next night, as today.
     kite:      minute candles for the universe in 60-day requests, then equity_1m per day. A missing or
-               expired Kite token saves {"kite": "login needed"} and returns: an outcome, not an error."""
+               expired Kite token is an outcome, not an error."""
 
 class Publish(Reaction):
-    """Scheduled every 30 minutes. Uploads every DataFile with published_at null to the Hugging Face store
-    in commits of at most 1000 files or 1 GB, stamping published_at per commit. Refuses a repo that is not
-    private. At-least-once is harmless: the store dedupes identical bytes."""
+    """Uploads every DataFile with published_at null to the Hugging Face store in commits of at most 1000
+    files or 1 GB, stamping published_at. Refuses a repo that is not private. A failed upload is an
+    outcome: the rows stay unstamped and go out the next night. Runnable alone from the CLI."""
 ```
 
 The reactions call the `sources/` and `build/` functions that do the HTTP and the file writes; the
 reaction's own job is the rows. File writes are not part of the transaction, which is why the order inside
 a reaction is always file first, row second, and why every file write is idempotent: a raw file that
-exists is never rewritten, a Parquet write compares bytes. A retry after a crash between the two finds the
-file and writes the row.
+exists is never rewritten, a Parquet write compares bytes. A night that dies between the two loses rows,
+never files; the next night finds the files on disk and registers them.
 
 The fetchers are synchronous `requests` code. A reaction runs them with `asyncio.to_thread` so the worker's
-loop, its poll and its metrics endpoint stay responsive. One worker runs the legs; `OUTBOX_CONCURRENCY`
-stays at the default four so the four legs run side by side.
+loop, its poll and its metrics endpoint stay responsive.
 
-Budgets: `NightlySync` 60 s. `SyncLeg` 3600 s for reference, nse and us, 7200 s for kite (the backfill is
-9,000 requests at 3 a second; a normal night is a minute). `Publish` 3600 s. `App.max_attempts=1`: a leg
-that fails is released to the outbox with backoff, not re-run from the top inside the same budget, and the
-next `NightlySync` covers whatever the backoff did not.
+Budgets: the night, `App.timeout`, is four hours; the legs have 3600 s each and kite 7200 s inside it (the
+backfill is 9,000 requests at 3 a second; a normal night is a minute). `App.max_attempts=1`: a night that
+fails is not retried, it is caught up by the next scheduled run.
 
 Triggers:
 
 ```python
 triggers = [
-    OnSchedule("30 14 * * *", NightlySync, timeout=60),
-    OnSchedule("30 16 * * *", NightlySync, timeout=60),
-    OnSchedule("*/30 * * * *", Publish, timeout=3600),
+    OnSchedule("30 14 * * *", NightlySync),
+    OnSchedule("30 16 * * *", NightlySync),
 ]
 ```
 
 **Catch-up.** Every `NightlySync` recomputes the gaps over the whole range, so a night the machine was off,
-a leg that died, or a file the exchange published late is filled by the next run that happens, with no
-manual step. A failed leg is retried by the outbox with backoff up to five times, then marked dead and
-shown in the console; even then nothing is lost, the next `NightlySync` defers the leg again. A tick that
-falls while the machine is off is skipped, as cron does: the data is caught up at the next scheduled run,
-not at boot. That is deliberate; a machine switched on in the afternoon should not start a backfill.
+a source that was down, or a file the exchange published late is filled by the next run that happens, with
+no manual step. A leg's failure is saved on the run and shown in the console; the night still commits and
+publishes what the other legs produced. A tick that falls while the machine is off is skipped, as cron
+does: the data is caught up at the next scheduled run, not at boot. That is deliberate; a machine
+switched on in the afternoon should not start a backfill.
 
-No data-change triggers in the first version. `OnChange(DataFile, ["status"], ...)` is the natural next
-step once the legs are chunked per day, and would make the build follow every fetch instead of running at
-the end of the leg.
+Nothing is deferred in the first version. If a leg ever needs its own worker or its own retries, say Kite
+on a box with the GPU, `deferred=True` on its trigger makes it an outbox row with the outbox's backoff
+and dead letters, and the rest is unchanged.
 
 ## What the runtime does not have yet
 
-Three things came up in the design and are worth doing in the runtime rather than around it. None blocks
-the first version.
+Three things came up in the design and are worth doing in the runtime rather than around it. None
+blocks the first version. A fourth, several schedules for one reaction, came up in the build and is
+done: `_schedule` is keyed by (reaction, cron) since #24.
 
 1. **Progress visible during a run.** A leg is one serializable transaction, so a `DataFile` row written
    at the start of an hour-long run is invisible until the commit, and the console shows a running
@@ -204,10 +203,11 @@ the first version.
 - Files are the data and are published to the Hugging Face store; Postgres holds only the ledger and the
   ML control state. No market data is loaded into Postgres.
 - One entity, the file ledger; three reactions. State the files already hold is not duplicated in rows.
-- One run per leg per night, sequential inside, until the runtime has queues with pacing.
+- One run a night: the legs in order, then the publish, one transaction. Failures of a source or of the
+  store are outcomes saved on the run, never exceptions.
 - Missed ticks are not replayed at boot; the next scheduled run catches up.
 - File first, row second, every file write idempotent. The transaction covers the rows, never the files.
-- Legs run with one attempt; the outbox's backoff is the retry.
+- One attempt a night; the next scheduled run is the retry.
 - The Kite login stays manual and outside the app; a missing token is an outcome.
 - The app is written anew; nothing is imported from the old repo. Its quirks become tests here, and the
   byte-for-byte comparison of Parquet files is the acceptance test for each source.

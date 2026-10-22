@@ -1,0 +1,17 @@
+[project]
+name = "finance"
+version = "0.1.0"
+description = "Market-data poller: NSE, MCX, US equities, Kite minute bars, published to a private Hugging Face store"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "backend-builder",
+    "huggingface-hub>=2.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+backend-builder = { workspace = true }
