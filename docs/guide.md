@@ -438,7 +438,7 @@ Locally, `compose.yaml` runs all of it for the shop under the `shop` profile; co
 
 ## 15. Observing it
 
-**Run records.** Every run, succeeded or failed, leaves a row in `_run`: the reaction, where it came from, outcome, attempts, duration, the input, the saved vars, every row it changed, every reaction it deferred, and in `_span` the span tree of every attempt. Written after the run in its own transaction, so a failed run is recorded too. The retention window is purged by the scheduler.
+**Run records.** Every run leaves a row in `_run`, written as `running` when it starts and replaced when it ends, so the console shows what is executing right now. A `running` row whose deadline has passed is marked `lost` by the scheduler: the process died mid-run, and Postgres rolled its transaction back. A finished row holds the reaction, where it came from, outcome, attempts, duration, the input, the saved vars, every row it changed, every reaction it deferred, and in `_span` the span tree of every attempt. Written after the run in its own transaction, so a failed run is recorded too. The retention window is purged by the scheduler.
 
 **The admin console** (`backend-builder admin myshop`, port 9200) reads those tables: an overview of recent runs and outbox depth, the app's graph, a page per reaction with its stats and recent runs, a page per run with its span tree, inputs, vars and changes, the outbox with requeue and discard for dead rows, and the schedules. Set `BACKEND_BUILDER_ADMIN_TOKEN` anywhere it isn't on a private network.
 

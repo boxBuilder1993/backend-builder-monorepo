@@ -405,9 +405,9 @@ Built.
 
 Built.
 
-Every run leaves a record: what it was, where it came from, what came in, what the reactions saved, what was written, what was deferred, how it ended, and every attempt's spans. Two system tables hold them, `_run` and `_span`, written in a short transaction of their own after the run finishes, never on the run's transaction, so a failed or timed-out run is recorded with its error and a committed run with its changes. Recording never fails a run: an error while writing a record is logged and swallowed, and a store without records, the in-memory one keeps a plain list, is simply skipped.
+Every run leaves a record: what it was, where it came from, what came in, what the reactions saved, what was written, what was deferred, how it ended, and every attempt's spans. Two system tables hold them, `_run` and `_span`. A `running` record is written before the first attempt and replaced, by id, after the run finishes, each in a short transaction of its own, never the run's, so a failed or timed-out run is recorded with its error, a committed run with its changes, and a run in progress is visible while it runs. A `running` record whose deadline has passed means the process died before it could report; the scheduler marks it `lost` on every tick, after a short grace period. Recording never fails a run: an error while writing a record is logged and swallowed, and a store without records, the in-memory one keeps a plain list, is simply skipped.
 
-A `_run` row: the run's reaction id as key, the reaction, `source` (`endpoint POST /orders`, `generic`, `cli`, `outbox`, `schedule`, `direct`), `outcome` (`ok`, `error`, `timeout`), the error, attempt count, start time, duration, `input`, `vars`, `changes` (entity, id, kind, changed fields per row written) and `enqueued` (the outbox rows produced). A `_span` row per span of every attempt, tagged with the attempt number, so a retried run shows why its first attempt failed. Vars are encoded like `jsonb`; a value the codec rejects is stored as its `repr`.
+A `_run` row: the run's reaction id as key, the reaction, `source` (`endpoint POST /orders`, `generic`, `cli`, `outbox`, `schedule`, `direct`), `outcome` (`running`, `ok`, `error`, `timeout`, `lost`), the error, attempt count, start time, duration, `input`, `vars`, `changes` (entity, id, kind, changed fields per row written) and `enqueued` (the outbox rows produced). A `_span` row per span of every attempt, tagged with the attempt number, so a retried run shows why its first attempt failed. Vars are encoded like `jsonb`; a value the codec rejects is stored as its `repr`.
 
 `BACKEND_BUILDER_RUN_RECORDS` is `full` (default), `summary` (no input or vars) or `off`. `BACKEND_BUILDER_RUN_RETENTION_DAYS` (default 7) bounds the tables; the scheduler purges older records once an hour. These tables are what the admin console reads; they are never returned by the API.
 
@@ -425,7 +425,7 @@ Every process serves Prometheus-format metrics and a health check on its own por
 | `bb_http_requests_total{route, method, status}`, `bb_http_request_duration_seconds{route, method}` | counter, histogram | API middleware, by route template |
 | `bb_outbox_deliveries_total{reaction, outcome}` | counter | worker, per delivery: `ok`, `error`, `unknown` |
 | `bb_outbox_pending`, `bb_outbox_claimed`, `bb_outbox_dead`, `bb_outbox_oldest_pending_seconds` | gauges | worker, refreshed on every poll |
-| `bb_schedule_seeds_total`, `bb_run_records_purged_total` | counters | scheduler |
+| `bb_schedule_seeds_total`, `bb_run_records_purged_total`, `bb_runs_lost_total` | counters | scheduler |
 
 **No application metrics.** These are the runtime's metrics and the only ones. A reaction that wants to record that something happened creates an entity: an event is a row, committed with the run, so a retried attempt never double-counts, consumers hang off `OnCreate`, SQL answers the questions, and a scheduled reaction rolls it up or purges it. A reaction that wants to measure something is itself a reaction, scheduled or triggered. There is no `ctx.metric`, no free-form counters, and no registry of app metrics to review; decided, see §23.
 

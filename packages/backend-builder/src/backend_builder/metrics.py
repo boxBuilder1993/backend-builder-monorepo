@@ -92,6 +92,11 @@ schedule_seeds_total = Counter(
 run_records_purged_total = Counter(
     "bb_run_records_purged_total", "Run records purged", registry=registry
 )
+runs_lost_total = Counter(
+    "bb_runs_lost_total",
+    "Runs whose process stopped reporting before the deadline",
+    registry=registry,
+)
 
 
 def render() -> bytes:

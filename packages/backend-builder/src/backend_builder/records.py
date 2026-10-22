@@ -1,9 +1,11 @@
 """Run records: what each run was, received, decided, wrote and deferred.
 
-Written in a short transaction of their own after the run finishes, success
-or failure, so a failed or timed-out run is recorded too, and never on the
-run's own transaction. Recording never fails a run: an error while writing
-a record is logged and swallowed.
+A ``running`` record is written when the run starts and replaced, by id,
+when it finishes, success or failure, so a failed or timed-out run is
+recorded too; both writes are short transactions of their own, never the
+run's. Recording never fails a run: an error while writing a record is
+logged and swallowed. A ``running`` record whose deadline has passed means
+the process died mid-run; the scheduler marks it ``lost``.
 
 Level ``full`` stores the input and the saved vars; ``summary`` stores
 everything except those; ``off`` stores nothing. A retention window, purged
@@ -23,10 +25,14 @@ from sqlalchemy.dialects import postgresql as pg
 from backend_builder.codec import EncodeError, to_jsonable
 
 RUN_TABLE = "_run"
+LOST_ERROR = "lost: the process stopped reporting before the run's deadline passed"
 SPAN_TABLE = "_span"
 
 RecordLevel = Literal["full", "summary", "off"]
-Outcome = Literal["ok", "error", "timeout"]
+Outcome = Literal["running", "ok", "error", "timeout", "lost"]
+"""``running`` is written when a run starts and replaced when it ends.
+``lost`` is set by the scheduler when a ``running`` record's deadline has
+passed and nothing replaced it: the process died mid-run."""
 
 
 def run_tables(metadata: sa.MetaData) -> tuple[sa.Table, sa.Table]:
@@ -45,8 +51,14 @@ def run_tables(metadata: sa.MetaData) -> tuple[sa.Table, sa.Table]:
         sa.Column("vars", pg.JSONB(), nullable=True),
         sa.Column("changes", pg.JSONB(), nullable=False),
         sa.Column("enqueued", pg.JSONB(), nullable=False),
+        sa.Column("deadline_at", sa.DateTime(timezone=True), nullable=True),
         sa.Index("_run_started_idx", "started_at"),
         sa.Index("_run_reaction_idx", "reaction", "started_at"),
+        sa.Index(
+            "_run_running_idx",
+            "deadline_at",
+            postgresql_where=sa.text("outcome = 'running'"),
+        ),
     )
     span = sa.Table(
         SPAN_TABLE,
@@ -97,6 +109,8 @@ class RunRecord:
     enqueued: list[str]
     """Ids of the outbox rows the run produced."""
     spans: list[SpanRecord]
+    deadline_at: datetime | None = None
+    """When the run's budget expires. A ``running`` record past it is lost."""
 
 
 def safe_jsonable(value: Any) -> Any:

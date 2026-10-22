@@ -10,10 +10,15 @@
 {% if summary %}
 <h2>Runs in the last {{ summary.since_hours | int }}h</h2>
 <div class="cards">
-  {% for outcome in ["ok", "error", "timeout"] %}
+  <div class="card"><div class="n running">{{ summary.running | length }}</div><div class="l">running now</div></div>
+  {% for outcome in ["ok", "error", "timeout", "lost"] %}
   <div class="card"><div class="n {{ outcome }}">{{ summary.outcomes.get(outcome, 0) }}</div><div class="l">{{ outcome }}</div></div>
   {% endfor %}
 </div>
+{% if summary.running %}
+<h2>Running now</h2>
+{% with rows = summary.running %}{% include "_runs_table.html" %}{% endwith %}
+{% endif %}
 <h2>Outbox</h2>
 <div class="cards">
   <div class="card"><div class="n">{{ summary.outbox.pending }}</div><div class="l">pending</div></div>

@@ -6,7 +6,7 @@ import asyncio
 import random
 import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -62,17 +62,20 @@ async def run(
     the row's removal commit together. ``triggers`` are the app's data-change
     triggers, matched at flush.
 
-    After the run, whatever its outcome, a record of it is written to the
-    store in a transaction of its own, at ``records`` level: what came in,
-    what was saved, what was written, what was deferred, and every attempt's
-    spans. ``source`` names where the run came from. Recording never fails
-    the run.
+    A ``running`` record is written to the store before the first attempt and
+    replaced after the run, whatever its outcome, each in a transaction of
+    its own, at ``records`` level: what came in, what was saved, what was
+    written, what was deferred, and every attempt's spans. ``source`` names
+    where the run came from. Recording never fails the run.
     """
     attempts = max(1, max_attempts)
     reaction_id = reaction_id or str(uuid4())  # one id for the run, whatever the attempt count
     state = _RunState(started_at=datetime.now(UTC), clock=time.perf_counter())
+    state.deadline_at = state.started_at + timedelta(seconds=timeout)
     outcome: Outcome = "ok"
     error: str | None = None
+    if records != "off":
+        await _record(store, reaction, reaction_id, input, source, records, state, "running", None)
     try:
         async with asyncio.timeout(timeout):
             return await _attempts(
@@ -124,6 +127,7 @@ class _RunState:
         self.attempts = 0
         self.traces: list[Trace] = []
         self.session: Session | None = None
+        self.deadline_at: datetime | None = None
 
 
 async def _attempts(
@@ -232,6 +236,7 @@ async def _record(
         changes=changes,
         enqueued=list(session.enqueued) if committed and session is not None else [],
         spans=spans,
+        deadline_at=state.deadline_at,
     )
     try:
         await store.record_run(record)

@@ -2,7 +2,7 @@
 {% block body %}
 <h1><span class="{{ record.outcome }}">{{ record.outcome }}</span> {{ record.reaction | reaction_short }} <span class="muted"><code>{{ record.id }}</code></span></h1>
 <div class="cards">
-  <div class="card"><div class="n">{{ record.duration_ms | ms }}</div><div class="l">duration</div></div>
+  <div class="card"><div class="n">{% if record.outcome == 'running' %}<span class="running">running</span>{% else %}{{ record.duration_ms | ms }}{% endif %}</div><div class="l">duration</div></div>
   <div class="card"><div class="n">{{ record.attempts }}</div><div class="l">attempts</div></div>
   <div class="card"><div class="n" style="font-size:14px">{{ record.source }}</div><div class="l">source</div></div>
   <div class="card"><div class="n" style="font-size:14px">{{ record.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</div><div class="l">started</div></div>

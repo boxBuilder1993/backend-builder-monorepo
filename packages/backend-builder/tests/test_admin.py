@@ -108,6 +108,14 @@ async def test_overview_graph_and_schedules_render(
     page = console.get("/")
     assert page.status_code == 200
     assert "reactions" in page.text and "pending" in page.text and "Recent runs" in page.text
+    assert "running now" in page.text and "Running now" not in page.text  # none in flight
+
+    await pg.query_raw(
+        "update _run set outcome = 'running', deadline_at = now() + interval '1 minute' "
+        "where outcome = 'ok' returning id"
+    )
+    live = console.get("/").text
+    assert "Running now" in live and "since " in live
 
     graph = console.get("/graph").text
     assert "Account" in graph and "OnCreate(Account)" in graph and "OnSchedule" in graph
