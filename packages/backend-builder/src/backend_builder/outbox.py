@@ -52,13 +52,15 @@ def outbox_table(metadata: sa.MetaData) -> sa.Table:
 
 
 def schedule_table(metadata: sa.MetaData) -> sa.Table:
-    """One row per scheduled reaction: the cron it was last seeded with and
-    the last occurrence seeded. The scheduler advances it under a row lock."""
+    """One row per schedule, keyed by reaction and cron, holding the last
+    occurrence seeded. The scheduler advances it under a row lock. A reaction
+    may have several schedules; an edited cron is a new row and the old one
+    goes idle."""
     return sa.Table(
         SCHEDULE_TABLE,
         metadata,
         sa.Column("reaction", sa.Text(), primary_key=True),
-        sa.Column("cron", sa.Text(), nullable=False),
+        sa.Column("cron", sa.Text(), primary_key=True),
         sa.Column("last_scheduled_for", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )

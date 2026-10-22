@@ -251,7 +251,9 @@ async def test_scheduler_seeds_once_and_worker_delivers(store: PostgresStore) ->
     assert later > datetime.now(UTC)
 
 
-async def test_scheduler_reseeds_when_the_cron_changes(store: PostgresStore) -> None:
+async def test_an_edited_cron_is_a_new_schedule_and_the_old_one_goes_idle(
+    store: PostgresStore,
+) -> None:
     app = App(
         package="fixture_app",
         include=[Account, Tick],
@@ -263,6 +265,35 @@ async def test_scheduler_reseeds_when_the_cron_changes(store: PostgresStore) -> 
         include=[Account, Tick],
         triggers=[OnSchedule("*/5 * * * *", Tick)],
     )
-    assert await Scheduler(changed, store, Settings()).tick() == 1
-    record = await store.query_raw("select cron from _schedule")
-    assert record == [{"cron": "*/5 * * * *"}]
+    scheduler = Scheduler(changed, store, Settings())
+    assert await scheduler.tick() == 1
+    assert await scheduler.tick() == 0
+    record = await store.query_raw("select cron from _schedule order by cron")
+    assert record == [{"cron": "* * * * *"}, {"cron": "*/5 * * * *"}]
+
+
+async def test_two_schedules_for_one_reaction_each_keep_their_own_occurrence(
+    store: PostgresStore,
+) -> None:
+    app = App(
+        package="fixture_app",
+        include=[Account, Tick],
+        triggers=[OnSchedule("0 20 * * *", Tick), OnSchedule("0 21 * * *", Tick)],
+    )
+    scheduler = Scheduler(app, store, Settings())
+    assert await scheduler.tick() == 2
+    assert await scheduler.tick() == 0  # neither flips the other
+    rows = await _outbox(store)
+    assert sorted(r["scheduled_for"].hour for r in rows) == [20, 21]  # type: ignore[union-attr]
+    record = await store.query_raw("select cron, last_scheduled_for from _schedule order by cron")
+    assert [r["cron"] for r in record] == ["0 20 * * *", "0 21 * * *"]
+    assert all(r["last_scheduled_for"] is not None for r in record)
+
+
+def test_the_same_schedule_twice_is_refused() -> None:
+    with pytest.raises(TriggerError, match="declared twice"):
+        App(
+            package="fixture_app",
+            include=[Account, Tick],
+            triggers=[OnSchedule("0 3 * * *", Tick), OnSchedule("0 3 * * *", Tick)],
+        )

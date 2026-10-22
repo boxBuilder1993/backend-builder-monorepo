@@ -174,5 +174,5 @@ async def schedules(store: Store) -> list[dict[str, Any]]:
         "select s.reaction, s.cron, s.last_scheduled_for, s.updated_at, "
         "(select min(available_at) from _outbox o where o.reaction = s.reaction "
         " and o.scheduled_for is not null and o.dead_at is null) as next_due "
-        "from _schedule s order by s.reaction"
+        "from _schedule s order by s.reaction, s.cron"
     )

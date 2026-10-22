@@ -340,17 +340,18 @@ class PostgresStore(Store):
             upsert = pg.insert(table).values(
                 reaction=name, cron=schedule.cron, last_scheduled_for=None, updated_at=moment
             )
-            await connection.execute(upsert.on_conflict_do_nothing(index_elements=["reaction"]))
+            await connection.execute(
+                upsert.on_conflict_do_nothing(index_elements=["reaction", "cron"])
+            )
             row = (
                 await connection.execute(
-                    sa.select(table.c.cron, table.c.last_scheduled_for)
-                    .where(table.c.reaction == name)
+                    sa.select(table.c.last_scheduled_for)
+                    .where(table.c.reaction == name, table.c.cron == schedule.cron)
                     .with_for_update()
                 )
             ).one()
             last: datetime | None = row.last_scheduled_for
-            cron_changed = row.cron != schedule.cron
-            if last is not None and last >= moment and not cron_changed:
+            if last is not None and last >= moment:
                 return False
             occurrence = schedule.next_after(moment)
             entry = schedule.entry(occurrence)
@@ -374,8 +375,8 @@ class PostgresStore(Store):
             )
             await connection.execute(
                 sa.update(table)
-                .where(table.c.reaction == name)
-                .values(cron=schedule.cron, last_scheduled_for=occurrence, updated_at=moment)
+                .where(table.c.reaction == name, table.c.cron == schedule.cron)
+                .values(last_scheduled_for=occurrence, updated_at=moment)
             )
         return True
 
