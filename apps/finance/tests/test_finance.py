@@ -12,9 +12,25 @@ from finance.sources import Ledger, LegResult, NoData, Written
 
 
 def test_app_scope() -> None:
-    assert {e.__name__ for e in app.entities} == {"DataFile", "StoreSync"}
-    assert {r.__name__ for r in app.reactions} == {"NightlySync", "SyncLeg", "Publish", "PullStore"}
+    assert {e.__name__ for e in app.entities} == {
+        "DataFile", "StoreSync", "Fit", "FitRun", "Model", "InferRun", "Evaluation"
+    }  # fmt: skip
+    poller = {"NightlySync", "SyncLeg", "Publish", "PullStore"}
+    ml = {
+        "RegisterFit",
+        "LoadRows",
+        "RunFit",
+        "FitModel",
+        "UploadModel",
+        "CloseFitRun",
+        "Infer",
+        "PublishArtifact",
+        "Evaluate",
+    }
+    api = {"RegisterFitApi", "RunFitApi", "GetRunApi", "InferApi", "EvaluateApi"}
+    assert {r.__name__ for r in app.reactions} == poller | ml | api
     assert [t.cron for t in app.schedules] == ["30 14 * * *", "30 16 * * *"]
+    assert [f"{e.method} {e.path}" for e in app.endpoints][0] == "POST /ml/fits"
     assert set(sources.LEGS) == set(sources.BUDGETS) == set(sources.SOURCES)
 
 

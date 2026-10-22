@@ -198,7 +198,8 @@ validation query and label, `Evaluate` on each, and one query over the three tab
 orchestrating reaction can wrap that once the pattern settles.
 
 **Deferral and state.** Fits are deferred because they are long. The state is built for it: a `FitRun`
-is `queued`, then `running` from the first `FitModel`, and `done` only through `CloseFitRun`; a `Model` is
+is `running` from the moment `RunFit` has fanned it out, and `done` only through `CloseFitRun`; the
+`FitModel` runs never write the `FitRun` row, so concurrent fits of one sweep cannot conflict on it; a `Model` is
 `queued` from the moment its outbox row exists, so the console shows the whole sweep before a single
 fit starts; a worker that dies leaves its outbox row to be reclaimed after its lease, and a `Model` left
 in `fitting` or `uploading` is how a stuck fit is found. Nothing is inferred from timing. A `FitRun`
