@@ -2,9 +2,7 @@
 
 import os
 from datetime import date
-from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("FINANCE_DATA_DIR", "~/finance-data")).expanduser()
 HF_REPO = os.environ.get("FINANCE_HF_REPO", "shr22avan/finance-data")
 PUBLISH = os.environ.get("FINANCE_PUBLISH", "on").lower() not in ("off", "0", "false", "no")
 """FINANCE_PUBLISH=off runs the legs but never uploads: the shadow phase next to the old poller."""

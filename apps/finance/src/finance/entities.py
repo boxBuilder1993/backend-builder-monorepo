@@ -23,3 +23,20 @@ class DataFile(Entity):
     written_at: datetime | None = None
     checked_at: datetime | None = None
     published_at: datetime | None = None
+
+
+class StoreSync(Entity):
+    """One check or pull of the store into the local mirror. The store is the source of truth; the
+    mirror is never read before it has been brought to the store's current revision."""
+
+    repo: str
+    revision: str
+    """The store's commit the mirror was brought to, or found to be at."""
+    patterns: list[str]
+    files: int = 0
+    """Fetched this time; zero when the mirror was already current."""
+    bytes: int = 0
+    seconds: float = 0
+    status: str = "current"
+    """``current`` | ``pulled`` | ``failed``."""
+    error: str | None = None

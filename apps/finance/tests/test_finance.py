@@ -12,8 +12,8 @@ from finance.sources import Ledger, LegResult, NoData, Written
 
 
 def test_app_scope() -> None:
-    assert {e.__name__ for e in app.entities} == {"DataFile"}
-    assert {r.__name__ for r in app.reactions} == {"NightlySync", "SyncLeg", "Publish"}
+    assert {e.__name__ for e in app.entities} == {"DataFile", "StoreSync"}
+    assert {r.__name__ for r in app.reactions} == {"NightlySync", "SyncLeg", "Publish", "PullStore"}
     assert [t.cron for t in app.schedules] == ["30 14 * * *", "30 16 * * *"]
     assert set(sources.LEGS) == set(sources.BUDGETS) == set(sources.SOURCES)
 

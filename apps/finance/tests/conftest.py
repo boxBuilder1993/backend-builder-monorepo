@@ -24,5 +24,5 @@ async def store(migrated_database_url: str) -> AsyncIterator[PostgresStore]:
 
 @pytest.fixture
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(reactions, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(reactions, "data_root", lambda: tmp_path)
     return tmp_path
