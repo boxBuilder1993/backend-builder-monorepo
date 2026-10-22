@@ -11,4 +11,10 @@ Environment, in `~/.config/backend-builder/finance.env`:
 | `FINANCE_HF_REPO` | the private Hugging Face dataset repo (default `shr22avan/finance-data`) |
 | `SECRET_HF_TOKEN` | fine-grained token with write access to that repo |
 
-Legs not yet implemented record `implemented=false` in their run and write nothing.
+One run a night at 20:00 and 22:00 IST: the four legs in order, then the publish. Legs not yet implemented
+record `implemented=false` and write nothing. Run a piece by hand:
+
+```sh
+uv run backend-builder trigger finance finance.reactions.SyncLeg --input '{"leg": "nse"}'
+uv run backend-builder trigger finance finance.reactions.Publish --input '{}'
+```

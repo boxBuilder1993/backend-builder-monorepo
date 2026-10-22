@@ -1,4 +1,4 @@
-"""The three reactions: NightlySync fans out, SyncLeg runs one leg and writes rows, Publish uploads.
+"""The three reactions: NightlySync runs the legs in order and then Publish, all in one run.
 
 Files are written by the legs and the store, outside the transaction, so the order is always file
 first, row second, and every file write is idempotent; the rows are the only thing the transaction
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from backend_builder import Context, Reaction
 
@@ -23,13 +24,26 @@ def nodata_path(source: str, day: date) -> str:
 
 
 class NightlySync(Reaction):
-    """Scheduled 20:00 and 22:00 IST. Defers one SyncLeg per leg, each with its own budget.
-    Input: {"scheduled_for": ...}. Writes nothing itself."""
+    """Scheduled 20:00 and 22:00 IST. Triggers one SyncLeg per leg, in order, then Publish: one run,
+    one transaction, the night. A leg's failure is an outcome saved under its name, never an
+    exception, so the other legs run and the publish happens. Input: {"scheduled_for": ...}.
+
+    vars are shared by every reaction in a run, so each child's summary is taken out of them right
+    after it returns, before the next child writes its own."""
+
+    LEG_KEYS = ("implemented", "written", "no_data", "error")
+    PUBLISH_KEYS = ("files", "commits", "bytes", "error")
 
     async def calculate(self, ctx: Context) -> None:
+        legs: dict[str, Any] = {}
         for leg, budget in BUDGETS.items():
-            await ctx.trigger(SyncLeg, {"leg": leg}, deferred=True, timeout=budget)
-        ctx.save("deferred", list(BUDGETS))
+            await ctx.trigger(SyncLeg, {"leg": leg}, timeout=budget)
+            legs[leg] = {k: ctx.vars.pop(k, None) for k in self.LEG_KEYS}
+            ctx.vars.pop("leg", None)
+            ctx.vars.pop("notes", None)
+        ctx.save("legs", legs)
+        await ctx.trigger(Publish, {})
+        ctx.save("published", {k: ctx.vars.pop(k, None) for k in self.PUBLISH_KEYS})
 
 
 class SyncLeg(Reaction):
@@ -43,8 +57,13 @@ class SyncLeg(Reaction):
             raise LookupError(f"unknown leg {leg!r}; known: {sorted(LEGS)}")
         today = date.today()
         ledger = await self._ledger(ctx, SOURCES[leg], today)
-        result: LegResult = await asyncio.to_thread(LEGS[leg], DATA_DIR, today, ledger)
         ctx.save("leg", leg)
+        try:
+            result: LegResult = await asyncio.to_thread(LEGS[leg], DATA_DIR, today, ledger)
+        except Exception as exc:  # a source that is down is an outcome, not the night's failure
+            ctx.save("error", f"{type(exc).__name__}: {exc}")
+            ctx.save("implemented", True)
+            return
         ctx.save("implemented", result.implemented)
         if not result.implemented:
             return
@@ -114,9 +133,9 @@ class SyncLeg(Reaction):
 
 
 class Publish(Reaction):
-    """Scheduled every 30 minutes. Uploads every ok DataFile with published_at null to the store in
-    chunked commits and stamps published_at. The token is SECRET_HF_TOKEN. Nothing to upload is the
-    common case and costs one query."""
+    """Uploads every ok DataFile with published_at null to the store in chunked commits and stamps
+    published_at. Triggered by NightlySync after the legs; runnable alone from the CLI. The token is
+    SECRET_HF_TOKEN. A failed upload is an outcome: the rows stay unstamped and go out next time."""
 
     async def calculate(self, ctx: Context) -> None:
         rows = await ctx.query(
@@ -128,9 +147,13 @@ class Publish(Reaction):
             return
         token = ctx.secret("hf_token")
         paths = [r.path for r in rows]
-        commits = await asyncio.to_thread(
-            store.upload, DATA_DIR, paths, HF_REPO, token, f"data: sync {date.today()}"
-        )
+        try:
+            commits = await asyncio.to_thread(
+                store.upload, DATA_DIR, paths, HF_REPO, token, f"data: sync {date.today()}"
+            )
+        except Exception as exc:  # noqa: BLE001 - the store being down must not undo the legs' rows
+            ctx.save("error", f"{type(exc).__name__}: {exc}")
+            return
         now = datetime.now(UTC)
         for r in rows:
             r.published_at = now

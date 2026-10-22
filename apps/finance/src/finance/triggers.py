@@ -2,10 +2,9 @@
 
 from backend_builder import OnSchedule
 
-from finance.reactions import NightlySync, Publish
+from finance.reactions import NightlySync
 
 triggers = [
-    OnSchedule("30 14 * * *", NightlySync, timeout=60),
-    OnSchedule("30 16 * * *", NightlySync, timeout=60),
-    OnSchedule("*/30 * * * *", Publish, timeout=3600),
+    OnSchedule("30 14 * * *", NightlySync),
+    OnSchedule("30 16 * * *", NightlySync),
 ]

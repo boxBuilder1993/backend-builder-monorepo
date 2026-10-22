@@ -4,8 +4,8 @@ from backend_builder import App
 
 from finance.triggers import triggers
 
-# One attempt per run: a leg that fails is released to the outbox with backoff, not re-run inside
-# its budget. The 600 s default covers NightlySync and Publish; legs set their own on the trigger.
-app = App(package="finance", triggers=triggers, max_attempts=1, timeout=600)
+# One attempt per run and a budget of four hours for the night: the legs catch their own failures
+# as outcomes, and a night that still fails is caught up by the next scheduled run, not by a retry.
+app = App(package="finance", triggers=triggers, max_attempts=1, timeout=4 * 3600)
 
 __all__ = ["app"]

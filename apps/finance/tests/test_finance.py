@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from backend_builder import PostgresStore, Worker, migrations, run
+from backend_builder import PostgresStore, migrations, run
 from finance import app, sources
 from finance import store as hfstore
 from finance.entities import DataFile
@@ -14,7 +14,7 @@ from finance.sources import Ledger, LegResult, NoData, Written
 def test_app_scope() -> None:
     assert {e.__name__ for e in app.entities} == {"DataFile"}
     assert {r.__name__ for r in app.reactions} == {"NightlySync", "SyncLeg", "Publish"}
-    assert [t.cron for t in app.schedules] == ["30 14 * * *", "30 16 * * *", "*/30 * * * *"]
+    assert [t.cron for t in app.schedules] == ["30 14 * * *", "30 16 * * *"]
     assert set(sources.LEGS) == set(sources.BUDGETS) == set(sources.SOURCES)
 
 
@@ -22,15 +22,40 @@ def test_migrations_match_entities(migrated_database_url: str) -> None:
     migrations.check(app, migrated_database_url)
 
 
-async def test_nightly_sync_defers_one_run_per_leg(store: PostgresStore) -> None:
+async def test_nightly_sync_runs_legs_then_publish_in_one_run(
+    store: PostgresStore, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SECRET_HF_TOKEN", "hf_test_token_000000000000")
+    uploaded: list[list[str]] = []
+
+    def fake_upload(
+        root: Path, paths: list[str], repo: str, token: str, message: str
+    ) -> list[hfstore.Commit]:
+        uploaded.append(paths)
+        return [hfstore.Commit(tuple(paths), 10, "abc")]
+
+    monkeypatch.setattr(hfstore, "upload", fake_upload)
+    monkeypatch.setitem(sources.LEGS, "nse", _fake_leg([]))
+
+    def broken(data_dir: Path, today: date, ledger: Ledger) -> LegResult:
+        raise ConnectionError("nseindia.com: timed out")
+
+    monkeypatch.setitem(sources.LEGS, "us", broken)
+
     ctx = await run(store, NightlySync, {"scheduled_for": "2026-10-22T14:30:00+00:00"})
-    assert ctx.load("deferred") == ["reference", "nse", "us", "kite"]
-    rows = await store.query_raw(
-        "select reaction, input, timeout_seconds from _outbox order by created_at"
-    )
-    assert [r["input"]["leg"] for r in rows] == ["reference", "nse", "us", "kite"]
-    assert all(r["reaction"] == "finance.reactions.SyncLeg" for r in rows)
-    assert {r["timeout_seconds"] for r in rows} == {3600, 7200}
+    legs = ctx.load("legs")
+    assert list(legs) == ["reference", "nse", "us", "kite"]
+    assert legs["nse"] == {"implemented": True, "written": 1, "no_data": 1, "error": None}
+    assert legs["us"]["error"] == "ConnectionError: nseindia.com: timed out"
+    assert legs["kite"]["implemented"] is False
+    assert ctx.load("published")["files"] == 1 and uploaded == [
+        ["raw/nse_cm/2026/nse_cm_20261021.zip"]
+    ]
+    rows = await store.query_raw("select path from data_file where published_at is not null")
+    assert [r["path"] for r in rows] == ["raw/nse_cm/2026/nse_cm_20261021.zip"]
+    assert await store.query_raw("select count(*) as n from _outbox") == [
+        {"n": 0}
+    ]  # nothing deferred
 
 
 async def test_unimplemented_leg_is_an_outcome(store: PostgresStore, data_dir: Path) -> None:
@@ -123,16 +148,22 @@ async def test_publish_stamps_rows(
     assert ctx.load("files") == 0 and len(uploaded) == 1
 
 
-async def test_worker_delivers_the_legs(store: PostgresStore, data_dir: Path) -> None:
-    await run(store, NightlySync, {"scheduled_for": "x"}, triggers=app.triggers)
-    worker = Worker(app, store)
-    assert await worker.run_once() == 4
-    rows = await store.query_raw(
-        "select reaction, outcome, vars from _run where reaction like '%SyncLeg'"
-        " order by started_at"
-    )
-    assert len(rows) == 4 and {r["outcome"] for r in rows} == {"ok"}
-    assert all(r["vars"]["implemented"] is False for r in rows)
+async def test_publish_failure_keeps_rows_unstamped(
+    store: PostgresStore, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SECRET_HF_TOKEN", "hf_test_token_000000000000")
+
+    def down(
+        root: Path, paths: list[str], repo: str, token: str, message: str
+    ) -> list[hfstore.Commit]:
+        raise RuntimeError("huggingface.co: 503")
+
+    monkeypatch.setattr(hfstore, "upload", down)
+    await store.create(DataFile, path="raw/a", kind="raw", source="nse_cm", status="ok", bytes=10)
+    ctx = await run(store, Publish, {})
+    assert ctx.load("error") == "RuntimeError: huggingface.co: 503"
+    rows = await store.query_raw("select published_at from data_file")
+    assert rows == [{"published_at": None}]
 
 
 def test_chunks_respect_both_limits() -> None:

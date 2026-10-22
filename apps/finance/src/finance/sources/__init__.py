@@ -79,4 +79,4 @@ SOURCES: dict[str, tuple[str, ...]] = {
 """The DataFile sources each leg owns; the ledger handed to a leg covers these."""
 
 BUDGETS: dict[str, float] = {"reference": 3600, "nse": 3600, "us": 3600, "kite": 7200}
-"""Seconds per leg run. Kite's backfill is 9,000 requests at 3 a second; a normal night is short."""
+"""Seconds per leg, inside the night's budget. Kite's backfill is 9,000 requests at 3 a second."""
