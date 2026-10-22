@@ -56,7 +56,7 @@ class SyncLeg(Reaction):
         if leg not in LEGS:
             raise LookupError(f"unknown leg {leg!r}; known: {sorted(LEGS)}")
         today = date.today()
-        ledger = await self._ledger(ctx, SOURCES[leg], today)
+        ledger, rows = await self._ledger(ctx, SOURCES[leg], today)
         ctx.save("leg", leg)
         try:
             result: LegResult = await asyncio.to_thread(LEGS[leg], DATA_DIR, today, ledger)
@@ -69,7 +69,7 @@ class SyncLeg(Reaction):
             return
         now = datetime.now(UTC)
         for w in result.written:
-            row = await self._row(ctx, w.path)
+            row = rows.get(w.path)
             if row is None:
                 ctx.create(
                     DataFile,
@@ -90,7 +90,7 @@ class SyncLeg(Reaction):
                     row.written_at, row.published_at = now, None
         for nd in result.no_data:
             path = nodata_path(nd.source, nd.day)
-            row = await self._row(ctx, path)
+            row = rows.get(path)
             if row is None:
                 ctx.create(
                     DataFile,
@@ -108,28 +108,29 @@ class SyncLeg(Reaction):
         ctx.save("notes", result.notes)
 
     @staticmethod
-    async def _row(ctx: Context, path: str) -> DataFile | None:
-        rows = await ctx.query(DataFile, "select * from data_file where path = :path", path=path)
-        return rows[0] if rows else None
-
-    @staticmethod
-    async def _ledger(ctx: Context, sources: tuple[str, ...], today: date) -> Ledger:
+    async def _ledger(
+        ctx: Context, sources: tuple[str, ...], today: date
+    ) -> tuple[Ledger, dict[str, DataFile]]:
+        """The leg's view of the ledger, and every row of its sources by path. Loaded in one query
+        per source before anything is written: a query flushes the session's pending changes first,
+        so a lookup per file inside the write loop would make the run quadratic."""
         ok: set[tuple[str, date]] = set()
         no_data: set[tuple[str, date]] = set()
+        by_path: dict[str, DataFile] = {}
         recent = today - timedelta(days=RECENT_DAYS)
         for source in sources:
             rows = await ctx.query(
-                DataFile,
-                "select * from data_file where source = :source and day is not null",
-                source=source,
+                DataFile, "select * from data_file where source = :source", source=source
             )
             for r in rows:
-                assert r.day is not None
+                by_path[r.path] = r
+                if r.day is None:
+                    continue
                 if r.status == "ok":
                     ok.add((r.source, r.day))
                 elif r.day < recent:  # recent no_data days are asked again
                     no_data.add((r.source, r.day))
-        return Ledger(ok=frozenset(ok), no_data=frozenset(no_data))
+        return Ledger(ok=frozenset(ok), no_data=frozenset(no_data)), by_path
 
 
 class Publish(Reaction):
