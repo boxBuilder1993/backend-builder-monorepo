@@ -76,6 +76,18 @@ class InferRun(Entity):
     path: str | None = None              # parquet/inference/<infer run id>.parquet, a DataFile
     error: str | None = None
 
+class StoreSync(Entity):
+    """One pull of the store into the local mirror. The store is the source of truth; FINANCE_DATA_DIR
+    is a mirror that is never read before it has been brought to the store's current revision."""
+    repo: str
+    revision: str                 # the store's commit the mirror was brought to
+    patterns: list[str]           # what was pulled, e.g. ["parquet/**"]
+    files: int = 0                # fetched this time; zero when the mirror was already current
+    bytes: int = 0
+    seconds: float = 0
+    status: str                   # current | pulled | failed
+    error: str | None = None
+
 class Evaluation(Entity):
     """Metrics over one InferRun's prediction table. Several may sit on one run."""
     infer_run_id: str
@@ -87,7 +99,8 @@ class Evaluation(Entity):
 ```
 
 Indexes and uniqueness are migrations: `Fit.name` unique, `content_hash` unique on `Fit` so registering
-the same definition twice returns the existing row, `fit_run_id` on `Model`, `model_id` on `InferRun`, `infer_run_id` on `Evaluation`.
+the same definition twice returns the existing row, `fit_run_id` on `Model`, `model_id` on `InferRun`, `infer_run_id` on `Evaluation`, `created_at` on
+`StoreSync`.
 
 **The schema is the contract.** `Model.schema` records the key, every feature with its kind and, for
 categoricals, the levels seen at fit time, and the target. Inference coerces each column to the kind,
@@ -116,8 +129,10 @@ question needs, and comparing models is a query across the three tables.
 Each sub-reaction is there because it is reused or because the run record needs the boundary.
 
 ```
+PullStore(patterns?)                            mirror <- store at its current revision; StoreSync row
 RunFit(fit_id, params?)                         one FitRun; LoadRows; one deferred FitModel per spec
-  LoadRows(query, params, schema?)              DuckDB -> frame, coerced; saves rows and data hash
+  LoadRows(query, params, schema?)              PullStore, then DuckDB -> frame, coerced; rows and data hash
+    PullStore
   FitModel(fit_run_id, spec)      [deferred]    fit in a subprocess, write the directory, upload, Model row
     UploadModel(model_id)                       the directory to the store; records revision and sha256
   CloseFitRun                     [OnChange(Model, ["status"])]   FitRun done when its last model is terminal
@@ -126,6 +141,22 @@ Infer(model_id, label, query, params?)          LoadRows against the model's sch
   PublishArtifact(paths)                        the output Parquet to the store, its DataFile row stamped
 Evaluate(infer_run_id, metrics, params?)        the prediction table -> named metrics; Evaluation row
 ```
+
+**`PullStore`** asks the store for its current revision and compares it with the latest `StoreSync`. If
+the mirror is at that revision and the files are present it saves "current" and returns: one API call.
+Otherwise it runs `snapshot_download` into `FINANCE_DATA_DIR` for the patterns, `parquet/**` by
+default since the ML never needs raw, which fetches only the files whose hash differs, and writes a
+`StoreSync` row with the revision. The first pull on a fresh box is the whole Parquet tree; after that
+it is the previous night's files. Nothing is deleted locally, as nothing is deleted from the store; a
+pull that fails halfway leaves a mirror that is behind, a `failed` row, and the next `LoadRows` tries
+again. On the poller box the mirror is the poller's own data directory, so the pull finds every file
+present and is a no-op; the legs and the pull only ever write the same bytes for the same path.
+
+**`LoadRows`** triggers `PullStore` first, every time, so a fit or an inference never reads stale data
+and never reads at all on a box that has not synced. Then it runs the query through DuckDB over the
+mirror, checks the columns, coerces by kind, encodes categoricals, and returns the frame with the
+encoding used. `(repo, revision)` on the `StoreSync` and `data_hash` on the `FitRun` together record
+the exact store state a fit read.
 
 **`RunFit`** resolves the params (defaults overlaid with the input), expands `search` into concrete
 specs (a Cartesian product per entry; a list value is an axis, a scalar is fixed), writes the `FitRun`
@@ -170,21 +201,23 @@ in `fitting` or `uploading` is how a stuck fit is found. Nothing is inferred fro
 whose models never arrive is visible as `running` with `specs` larger than its terminal models, and the
 row can be requeued from the console.
 
-**Budgets.** `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
+**Budgets.** `PullStore` an hour for a first pull, `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
 the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`.
 
 ## Data
 
-Rows come from DuckDB over the Parquet in `FINANCE_DATA_DIR`, through the same views the research
-code uses (`equity`, `equity_adj`, `us_equity`, `index_daily`, `equity_1m`, the reference tables). A
-Fit's query is any SQL over them; the only rules are that it yields the key, features and target
+The store is the source of truth and `FINANCE_DATA_DIR` is its local mirror, brought up to date by
+`PullStore` before every read. DuckDB reads the mirror's Parquet; it could read `hf://` paths directly,
+and does for an ad hoc look, but one file per day means a thousand footer fetches per table per query
+with nothing cached, so anything that scans history reads locally. Rows come through the same views the
+research code uses (`equity`, `equity_adj`, `us_equity`, `index_daily`, `equity_1m`, the reference
+tables). A Fit's query is any SQL over them; the only rules are that it yields the key, features and target
 columns, and that its parameters are named `:param` and declared in `Fit.params`. Features that need
 lookbacks are written as window functions in the query, not declared separately; the query is the
 feature definition.
 
-`LoadRows` runs the query, checks the columns, coerces by kind, encodes categoricals, and returns a
-frame plus the encoding used; at fit time the encoding becomes part of the schema, at inference time
-the schema dictates the encoding. Row order is the key's order, so the data hash is stable.
+At fit time the encoding `LoadRows` produces becomes part of the schema; at inference time the schema
+dictates the encoding. Row order is the key's order, so the data hash is stable.
 
 ## Estimators
 
@@ -213,8 +246,9 @@ a JSON file in this repo and be registered with one command; the row is the reco
 
 ```
 apps/finance/src/finance/ml/
-  entities.py       Fit, FitRun, Model, InferRun, Evaluation
-  reactions.py      RegisterFit, RunFit, LoadRows, FitModel, UploadModel, CloseFitRun, Infer, PublishArtifact, Evaluate
+  entities.py       Fit, FitRun, Model, InferRun, Evaluation, StoreSync
+  reactions.py      PullStore, RegisterFit, RunFit, LoadRows, FitModel, UploadModel, CloseFitRun, Infer,
+                    PublishArtifact, Evaluate
   api.py            the five endpoints
   data.py           DuckDB connection over the data dir, query execution, coercion and encoding, data hash
   schema.py         the Model.schema shape, its validation against a frame
@@ -223,9 +257,11 @@ apps/finance/src/finance/ml/
   artifacts.py      the model directory: save, load, schema.json, fit.json; archive and hash
   metrics.py        the metric registry: generic ones and the finance ones (costs, principal)
   modelstore.py     upload a model directory to the store and fetch one by (repo, path, revision)
+  mirror.py         the store's current revision, snapshot_download into the mirror, what is present
 ```
 
-`data.py`, `schema.py`, `search.py`, `estimators/`, `artifacts.py`, `metrics.py` and `modelstore.py` know nothing
+`data.py`, `schema.py`, `search.py`, `estimators/`, `artifacts.py`, `metrics.py`, `modelstore.py` and
+`mirror.py` know nothing
 about the runtime and are tested on frames and temp directories; the reactions write rows.
 
 ## Acceptance
@@ -233,7 +269,8 @@ about the runtime and are tested on frames and temp directories; the reactions w
 - Unit: search expansion, Params validation, coercion and encoding round trip, unknown-level handling,
   artifact save and load, archive hash stable, each adapter on a small frame on CPU, each metric on
   known inputs.
-- Postgres: `RunFit` fans out the right specs and rows; a `FitModel` with a fake estimator and a fake
+- Postgres: `PullStore` with a fake store is "current" the second time and `pulled` after a change;
+  `RunFit` fans out the right specs and rows; a `FitModel` with a fake estimator and a fake
   store fills `Model` through `uploading` to `fitted` and triggers `CloseFitRun`; `Infer` refuses a schema
   mismatch and writes the output table; `Evaluate` reads it back and writes the row; a failed fit and
   a store outage are outcomes with the right statuses.
