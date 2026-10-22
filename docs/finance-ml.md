@@ -77,8 +77,8 @@ class InferRun(Entity):
     error: str | None = None
 
 class StoreSync(Entity):
-    """One pull of the store into the local mirror. The store is the source of truth; FINANCE_DATA_DIR
-    is a mirror that is never read before it has been brought to the store's current revision."""
+    """One check or pull of the store into the local mirror. The store is the source of truth; the
+    mirror is never read before it has been brought to the store's current revision."""
     repo: str
     revision: str                 # the store's commit the mirror was brought to
     patterns: list[str]           # what was pulled, e.g. ["parquet/**"]
@@ -143,10 +143,14 @@ Evaluate(infer_run_id, metrics, params?)        the prediction table -> named me
 ```
 
 **`PullStore`** asks the store for its current revision and compares it with the latest `StoreSync`. If
-the mirror is at that revision and the files are present it saves "current" and returns: one API call.
-Otherwise it runs `snapshot_download` into `FINANCE_DATA_DIR` for the patterns, `parquet/**` by
-default since the ML never needs raw, which fetches only the files whose hash differs, and writes a
-`StoreSync` row with the revision. The first pull on a fresh box is the whole Parquet tree; after that
+the mirror is at that revision and present, nothing is downloaded: a `current` row, one API call, and
+the mirror is reused as it is. Only when the store has moved does it run `snapshot_download` into the
+mirror for the patterns, `parquet/**` by default since the ML never needs raw, and that fetches only
+the files whose hash differs, then writes a `pulled` row with the new revision.
+
+The mirror's location is the reaction's, not configuration: `mirror_dir(repo)` in `mirror.py` returns
+`~/.local/share/finance/mirror/<owner>--<repo>/`, and every reader and writer in the app, the poller's
+legs included, goes through it. The repo name is the only setting. The first pull on a fresh box is the whole Parquet tree; after that
 it is the previous night's files. Nothing is deleted locally, as nothing is deleted from the store; a
 pull that fails halfway leaves a mirror that is behind, a `failed` row, and the next `LoadRows` tries
 again. On the poller box the mirror is the poller's own data directory, so the pull finds every file
@@ -206,8 +210,8 @@ the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`.
 
 ## Data
 
-The store is the source of truth and `FINANCE_DATA_DIR` is its local mirror, brought up to date by
-`PullStore` before every read. DuckDB reads the mirror's Parquet; it could read `hf://` paths directly,
+The store is the source of truth and the local mirror, at `mirror_dir(repo)`, is brought up to date by
+`PullStore` before every read and reused untouched when it already is. DuckDB reads the mirror's Parquet; it could read `hf://` paths directly,
 and does for an ad hoc look, but one file per day means a thousand footer fetches per table per query
 with nothing cached, so anything that scans history reads locally. Rows come through the same views the
 research code uses (`equity`, `equity_adj`, `us_equity`, `index_daily`, `equity_1m`, the reference
@@ -257,7 +261,7 @@ apps/finance/src/finance/ml/
   artifacts.py      the model directory: save, load, schema.json, fit.json; archive and hash
   metrics.py        the metric registry: generic ones and the finance ones (costs, principal)
   modelstore.py     upload a model directory to the store and fetch one by (repo, path, revision)
-  mirror.py         the store's current revision, snapshot_download into the mirror, what is present
+  mirror.py         mirror_dir(repo); the store's current revision; snapshot_download into the mirror
 ```
 
 `data.py`, `schema.py`, `search.py`, `estimators/`, `artifacts.py`, `metrics.py`, `modelstore.py` and

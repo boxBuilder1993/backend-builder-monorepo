@@ -55,8 +55,10 @@ in the Kite backfill, every one of them found by probing and recorded there. Eac
 test here before the source that needs it is written. The file formats and paths stay identical, so the
 store the old poller filled is the store this app continues.
 
-The data directory on the worker's host is `FINANCE_DATA_DIR`, the working copy of the store, the same
-layout as today's `data/`. The Hugging Face token is `SECRET_HF_TOKEN`, read with `ctx.secret`, so it is
+The data directory on the worker's host is the store's local mirror at `mirror_dir(repo)`,
+`~/.local/share/finance/mirror/<owner>--<repo>/` (see [finance-ml.md](finance-ml.md), PullStore), the
+same layout as today's `data/`; the legs write into it and `PullStore` brings it up to date before any
+read. Nothing configures the path; the repo name is the only setting. The Hugging Face token is `SECRET_HF_TOKEN`, read with `ctx.secret`, so it is
 redacted from run records. Kite's daily token stays a file under `~/.config/ifin/`, written by the manual
 login; the reaction reads it from disk, and a missing or expired token is an outcome, not an error.
 
