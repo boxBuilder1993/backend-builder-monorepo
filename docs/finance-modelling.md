@@ -13,8 +13,9 @@ Status: proposal, 2026-10-22. The two problems from the dip research, stated as 
   called anything.
 - **No hindsight universe.** Liquidity and price filters use trailing data up to the row's date.
 - **Unadjusted prices, corporate actions as unit scaling.** As in the simulator rules.
-- **The metric that matters is net return per trade, then its consistency.** Accuracy and AUC are
-  reported, never optimised.
+- **The number that matters is net return per trade, then its consistency.** It is computed over the
+  prediction tables the validation inferences produce, in SQL, alongside whatever else is useful;
+  accuracy and AUC are looked at, never optimised.
 
 ## The row
 
@@ -29,12 +30,12 @@ and the sector as categoricals, the day of week. Nothing from after the row's da
 A row per (symbol, buy date d, current date t) for t within a maximum hold. Features: the row's
 features at t, plus the position's own state: sessions held, return since entry, drawdown since entry,
 distance from the target. Target, a vector of two: the net return of selling now versus holding to the
-rule's horizon, and whether the next five sessions' best exit beats selling now. Task: regression on
-the first for the decision, with the second kept as a binary diagnostic in a separate Fit.
+rule's horizon, and whether the next five sessions' best exit beats selling now. Task: regression on both,
+the first for the decision, the second as a diagnostic.
 
 Why first: it is the better-posed problem, the hold decision has a bounded horizon and a clear
 counterfactual, and the dip research already showed the entry edge exists while the exit rule was
-fixed by hand.
+fixed by hand. The diagnostic second column is kept in the same Fit as part of the vector.
 
 ## Problem 2: entry, "given a principal, buy this today, and for how long?"
 
@@ -49,17 +50,17 @@ several sizes.
 
 ## Splits
 
-Fit on 2021-09 to 2024-12, validate on 2025-01 to 2025-12 and again on 2026-01 to today, as two Fits
-differing only in the validation query, or one Fit run twice with `:fit_end` and `:val_start`
-parameters. The same for the US data, separately; the markets are not pooled until a pooled model beats
+Fit on 2021-09 to 2024-12 with the validation query over 2025-01 to 2025-12, then a second `Infer` on
+every model with the label `validation 2026` over 2026-01 to today. Two prediction tables per model;
+the comparison is a query over both. The same for the US data, separately; the markets are not pooled until a pooled model beats
 both single-market ones on both validations.
 
 ## Search
 
 Each Fit: `sklearn.linear` as the baseline, `xgboost` on the GPU over max_depth {3, 5, 7}, learning rate
 {0.03, 0.1}, n_estimators {300, 1000}, min_child_weight {1, 10}: 24 models plus the baseline, about an
-hour on the GTX 1080 for the NSE universe. A model that does not beat the baseline on both validations
-is noise, whatever its training metrics say.
+hour on the GTX 1080 for the NSE universe. A model that does not beat the baseline on both validation
+tables is noise, whatever it looked like in training.
 
 ## What we expect to learn
 
