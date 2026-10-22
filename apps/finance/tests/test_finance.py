@@ -14,7 +14,7 @@ from finance.sources import Ledger, LegResult, NoData, Written
 def test_app_scope() -> None:
     assert {e.__name__ for e in app.entities} == {"DataFile"}
     assert {r.__name__ for r in app.reactions} == {"NightlySync", "SyncLeg", "Publish"}
-    assert [t.cron for t in app.schedules] == ["30 14 * * *", "30 16 * * *", "*/30 * * * *"]
+    assert [t.cron for t in app.schedules] == ["30 14,16 * * *", "*/30 * * * *"]
     assert set(sources.LEGS) == set(sources.BUDGETS) == set(sources.SOURCES)
 
 
@@ -128,7 +128,7 @@ async def test_worker_delivers_the_legs(store: PostgresStore, data_dir: Path) ->
     worker = Worker(app, store)
     assert await worker.run_once() == 4
     rows = await store.query_raw(
-        "select reaction, outcome, vars from _run where reaction like '%SyncLeg'
+        "select reaction, outcome, vars from _run where reaction like '%SyncLeg'"
         " order by started_at"
     )
     assert len(rows) == 4 and {r["outcome"] for r in rows} == {"ok"}

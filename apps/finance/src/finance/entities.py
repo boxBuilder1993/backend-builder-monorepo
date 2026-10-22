@@ -14,7 +14,7 @@ class DataFile(Entity):
     kind: str
     """``raw`` | ``parquet`` | ``reference``."""
     source: str
-    """raw: nse_cm, nse_full, nse_index, mcx, yahoo, kite_1m; parquet: the table; reference: name."""
+    """raw: nse_cm, nse_full, nse_index, mcx, yahoo, kite_1m; parquet: table; reference: name."""
     day: date | None = None
     status: str = "ok"
     """``ok`` | ``no_data``."""

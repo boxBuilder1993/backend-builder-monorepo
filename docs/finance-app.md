@@ -144,8 +144,7 @@ Triggers:
 
 ```python
 triggers = [
-    OnSchedule("30 14 * * *", NightlySync, timeout=60),
-    OnSchedule("30 16 * * *", NightlySync, timeout=60),
+    OnSchedule("30 14,16 * * *", NightlySync, timeout=60),
     OnSchedule("*/30 * * * *", Publish, timeout=3600),
 ]
 ```
@@ -163,8 +162,8 @@ the end of the leg.
 
 ## What the runtime does not have yet
 
-Three things came up in the design and are worth doing in the runtime rather than around it. None blocks
-the first version.
+Four things came up in the design and the build and are worth doing in the runtime rather than around
+it. None blocks the first version.
 
 1. **Progress visible during a run.** A leg is one serializable transaction, so a `DataFile` row written
    at the start of an hour-long run is invisible until the commit, and the console shows a running
@@ -178,6 +177,9 @@ the first version.
 3. **Per-trigger attempts.** `App.max_attempts` is one policy for every reaction. The legs want one attempt
    and the outbox's backoff; a future HTTP endpoint on this app wants three. `OnSchedule(...,
    max_attempts=1)` and the same on `ctx.trigger(deferred=True)` would let both coexist.
+4. **Several schedules for one reaction.** The `_schedule` table is keyed by reaction name, so two
+   `OnSchedule` entries for the same reaction see each other's cron as a change and reseed every tick.
+   The app uses one cron with two hours; a key of (reaction, cron) would lift the restriction.
 
 ## Order of the move
 
