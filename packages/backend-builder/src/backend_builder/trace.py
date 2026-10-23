@@ -12,6 +12,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from backend_builder.log import get_logger
 
@@ -30,9 +31,37 @@ class Span:
     """False when the span ended by raising."""
 
 
+@dataclass(frozen=True, kw_only=True)
+class Invocation:
+    """What one reaction invocation received and did, captured by ``invoke``
+    from its own context and nothing else. Becomes a run record row."""
+
+    reaction: str
+    """Qualified name."""
+    reaction_id: str
+    parent_reaction_id: str | None
+    root_id: str
+    started_at: datetime
+    duration_ms: float
+    outcome: str
+    """``ok``, ``error`` or ``timeout``."""
+    error: str | None
+    input: dict[str, Any]
+    vars: dict[str, Any]
+    created: list[tuple[str, str]]
+    """``(table, id)`` per row created through this context."""
+    deleted: list[tuple[str, str]]
+    enqueued: list[str]
+    """Outbox row ids deferred through this context."""
+
+
 @dataclass
 class Trace:
     spans: list[Span] = field(default_factory=list[Span])
+    invocations: list[Invocation] = field(default_factory=list[Invocation])
+    """Every invocation of this attempt, in completion order."""
+    attempt: int = 1
+    """Which run attempt this trace belongs to."""
 
     @contextmanager
     def span(self, name: str, reaction_id: str, parent_reaction_id: str | None) -> Generator[None]:

@@ -113,7 +113,7 @@ class CreateOrder(Reaction):
 class CreateOrderApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         body = ctx.input["body"]
-        await ctx.trigger(
+        created = await ctx.trigger(
             CreateOrder,
             {
                 "user_id": body["user_id"],
@@ -121,6 +121,8 @@ class CreateOrderApi(Reaction):
                 "tenant": ctx.input["headers"]["x_tenant_id"],
             },
         )
+        assert created is not None
+        ctx.save("order", created.load("order"))
         ctx.save("include_lines", True)
 
 

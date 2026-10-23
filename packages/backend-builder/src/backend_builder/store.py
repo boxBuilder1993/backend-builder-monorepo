@@ -127,13 +127,14 @@ class Store(ABC):
 
     # --- run records -----------------------------------------------------------------
 
-    async def record_run(self, record: RunRecord) -> None:
-        """Store a run record in a transaction of its own, replacing any record
-        with the same id. Never inside a run."""
+    async def record_run(self, records: Sequence[RunRecord]) -> None:
+        """Store run records in one transaction of their own, replacing any
+        record with the same id. Never inside a run."""
         raise NotSupported(f"{type(self).__name__} keeps no run records")
 
     async def purge_runs(self, before: _datetime) -> int:
-        """Delete run records started before ``before``. Returns how many."""
+        """Delete whole runs whose seed started before ``before``, every
+        invocation's row included. Returns how many runs."""
         raise NotSupported(f"{type(self).__name__} keeps no run records")
 
     async def mark_lost(self, moment: _datetime) -> int:
@@ -172,15 +173,15 @@ class InMemoryStore(Store):
         self.records: list[RunRecord] = []
         """Run records, newest last. Native: a list, inspectable by tests."""
 
-    async def record_run(self, record: RunRecord) -> None:
-        self.records = [r for r in self.records if r.id != record.id]
-        self.records.append(record)
+    async def record_run(self, records: Sequence[RunRecord]) -> None:
+        ids = {r.id for r in records}
+        self.records = [r for r in self.records if r.id not in ids]
+        self.records.extend(records)
 
     async def purge_runs(self, before: _datetime) -> int:
-        keep = [r for r in self.records if r.started_at >= before]
-        purged = len(self.records) - len(keep)
-        self.records = keep
-        return purged
+        roots = {r.id for r in self.records if r.is_root and r.started_at < before}
+        self.records = [r for r in self.records if r.root_id not in roots]
+        return len(roots)
 
     async def mark_lost(self, moment: _datetime) -> int:
         lost = 0
@@ -266,9 +267,6 @@ class Session:
         """Every change written by this session's flushes, for the run record."""
         self.enqueued: list[str] = []
         """Ids of every outbox row this session's flushes wrote."""
-        self.vars: dict[str, Any] = {}
-        """Free-form values kept for the run. Shared by every reaction in the
-        run and readable afterwards. Never flushed to the backing store."""
 
     def _table[E: Entity](self, entity: type[E]) -> dict[str, E]:
         table: dict[str, E] = self._rows.setdefault(entity, {})  # type: ignore[assignment]
@@ -355,17 +353,18 @@ class Session:
         The row stays in the working set and is written back on flush."""
         row.deleted_at = datetime.now(UTC)
 
-    def defer(self, reaction: str, input: dict[str, Any], *, timeout: float | None = None) -> None:
+    def defer(self, reaction: str, input: dict[str, Any], *, timeout: float | None = None) -> str:
         """Record deferred work. Written as an outbox row at flush, so it
         exists only if the run commits. ``input`` must be JSON-encodable;
         anything else raises ``EncodeError`` here, not at flush. ``timeout``
-        is the delivery's budget; None means the app default."""
+        is the delivery's budget; None means the app default. Returns the id
+        the outbox row will have."""
         if self._backing is None:
             raise NotSupported("no backing store")
         encoded: dict[str, Any] = to_jsonable(input, path=f"deferred {reaction} input")
-        self._deferred.append(
-            OutboxEntry(reaction=reaction, input=encoded, timeout_seconds=timeout)
-        )
+        entry = OutboxEntry(reaction=reaction, input=encoded, timeout_seconds=timeout)
+        self._deferred.append(entry)
+        return entry.id
 
     def changes(self, row: Entity) -> dict[str, Any]:
         """Fields of a loaded ``row`` whose value differs from the snapshot

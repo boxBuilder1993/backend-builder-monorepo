@@ -84,7 +84,7 @@ def create_admin_app(app: App, store: Store, *, token: str | None = None) -> Fas
             return render(request, "missing.html", what=f"reaction {name}")
         try:
             stats = await queries.reaction_stats(store, name)
-            recent = await queries.runs(store, reaction=name, limit=50)
+            recent = await queries.runs(store, reaction=name, limit=50, roots_only=False)
         except NotSupported:
             stats, recent = None, []
         return render(request, "reaction.html", info=info, stats=stats, recent=recent)
