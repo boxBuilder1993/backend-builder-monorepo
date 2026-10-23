@@ -38,7 +38,7 @@ class NightlySync(Reaction):
     vars are shared by every reaction in a run, so each child's summary is taken out of them right
     after it returns, before the next child writes its own."""
 
-    LEG_KEYS = ("implemented", "written", "no_data", "error")
+    LEG_KEYS = ("implemented", "written", "no_data", "error", "notes")
     PUBLISH_KEYS = ("files", "commits", "bytes", "error")
 
     async def calculate(self, ctx: Context) -> None:
@@ -47,7 +47,6 @@ class NightlySync(Reaction):
             await ctx.trigger(SyncLeg, {"leg": leg}, timeout=budget)
             legs[leg] = {k: ctx.vars.pop(k, None) for k in self.LEG_KEYS}
             ctx.vars.pop("leg", None)
-            ctx.vars.pop("notes", None)
         ctx.save("legs", legs)
         await ctx.trigger(Publish, {})
         ctx.save("published", {k: ctx.vars.pop(k, None) for k in self.PUBLISH_KEYS})
