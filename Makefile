@@ -16,8 +16,10 @@ units       = $(foreach r,$(roles),bb@$(APP):$(r).service)
 
 .PHONY: help setup lint test pg pg-down db env migrate up down restart status logs deploy apps graph
 
+include backup.mk
+
 help:            ## list targets
-	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-14s %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-14s %s\n", $$1, $$2}'
 
 setup:           ## install every workspace member into one env
 	$(UV) sync --all-packages
