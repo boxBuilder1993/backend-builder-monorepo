@@ -78,8 +78,7 @@ def _days(pattern: str, pos: slice) -> list[date]:
 
 def test_us_listings_latest_day() -> None:
     """Only the newest snapshot: listing files are built once and never rebuilt, so older ones carry
-    the
-    classification rules of the night they were built."""
+    the classification rules of the night they were built."""
     day = _days("raw/us_listings/*/us_listings_*_nasdaqlisted.txt.gz", slice(12, 20))[-1]
     _same(BU.parse_listings(STORE, day), BU.us_listings_rel(day))
 
