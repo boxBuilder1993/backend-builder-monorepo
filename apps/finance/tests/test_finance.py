@@ -41,6 +41,12 @@ async def test_nightly_sync_runs_legs_then_publish_in_one_run(
         raise ConnectionError("nseindia.com: timed out")
 
     monkeypatch.setitem(sources.LEGS, "us", broken)
+    monkeypatch.setitem(
+        sources.LEGS, "kite", lambda root, today, ledger: LegResult.not_implemented()
+    )
+    monkeypatch.setitem(
+        sources.LEGS, "reference", lambda root, today, ledger: LegResult.not_implemented()
+    )
 
     ctx = await run(store, NightlySync, {"scheduled_for": "2026-10-22T14:30:00+00:00"})
     legs = ctx.load("legs")
@@ -58,7 +64,12 @@ async def test_nightly_sync_runs_legs_then_publish_in_one_run(
     ]  # nothing deferred
 
 
-async def test_unimplemented_leg_is_an_outcome(store: PostgresStore, data_dir: Path) -> None:
+async def test_unimplemented_leg_is_an_outcome(
+    store: PostgresStore, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        sources.LEGS, "kite", lambda root, today, ledger: LegResult.not_implemented()
+    )
     ctx = await run(store, SyncLeg, {"leg": "kite"})
     assert ctx.load("implemented") is False
     assert await store.query_raw("select count(*) as n from data_file") == [{"n": 0}]
