@@ -339,6 +339,8 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 
 ## 15. Later
 
+Compute pools, service calls and the Kubernetes deployment are designed in [pools.md](pools.md).
+
 Each of these was designed in the earlier draft and is parked, with what has to exist first.
 
 - **Deferred execution.** Built; see section 16.
