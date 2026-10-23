@@ -27,7 +27,7 @@ manual, every token under `~/.config/ifin/`, both repos private.
 ```
 apps/finance/
   src/finance/
-    __init__.py           app = App(package="finance", triggers=triggers, timeout=..., max_attempts=1)
+    __init__.py           app = App(package="finance", endpoints=endpoints, triggers=triggers, timeout=4 * 3600)
     entities.py           the ledger, below
     reactions.py          the reactions, below
     triggers.py
@@ -138,8 +138,9 @@ The fetchers are synchronous `requests` code. A reaction runs them with `asyncio
 loop, its poll and its metrics endpoint stay responsive.
 
 Budgets: the night, `App.timeout`, is four hours; the legs have 3600 s each and kite 7200 s inside it (the
-backfill is 9,000 requests at 3 a second; a normal night is a minute). `App.max_attempts=1`: a night that
-fails is not retried, it is caught up by the next scheduled run.
+backfill is 9,000 requests at 3 a second; a normal night is a minute). Retries are the runtime's default
+three: the legs catch their own failures as outcomes, so a retry only ever replays an infrastructure
+fault, and a night that still fails is caught up by the next scheduled run.
 
 Triggers:
 
@@ -209,7 +210,7 @@ done: `_schedule` is keyed by (reaction, cron) since #24.
   store are outcomes saved on the run, never exceptions.
 - Missed ticks are not replayed at boot; the next scheduled run catches up.
 - File first, row second, every file write idempotent. The transaction covers the rows, never the files.
-- One attempt a night; the next scheduled run is the retry.
+- Failures of sources are outcomes; the runtime's retries replay infrastructure faults only.
 - The Kite login stays manual and outside the app; a missing token is an outcome.
 - The app is written anew; nothing is imported from the old repo. Its quirks become tests here, and the
   byte-for-byte comparison of Parquet files is the acceptance test for each source.
