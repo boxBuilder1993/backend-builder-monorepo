@@ -1,0 +1,198 @@
+"""The ML reactions on Postgres with a real linear estimator on a tiny mirror, the store faked:
+register, run, fit, upload, close, infer, publish, evaluate; and the outcomes when things fail."""
+
+# ruff: noqa: E501  (test fixtures read better on one line)
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import polars as pl
+import pytest
+from backend_builder import PostgresStore, Worker, run
+from finance import mirror
+from finance.ml import data, modelstore
+from finance.ml.reactions import Evaluate, FitModel, Infer, RegisterFit, RunFit
+
+KEY = ["symbol", "date"]
+DEFINITION: dict[str, Any] = {
+    "name": "toy",
+    "description": "a toy fit on the index table",
+    "query": "select index_name as symbol, date, close, lag_close, fwd from toy where date <= :end_date",
+    "params": {"end_date": "2026-01-20"},
+    "key": KEY,
+    "features": [{"name": "close", "kind": "numeric"}, {"name": "lag_close", "kind": "numeric"}],
+    "target": {"columns": ["fwd"], "task": "regression"},
+    "search": [{"algorithm": "sklearn.linear", "params": {"alpha": [0.1, 10.0]}}],
+}
+
+
+def toy_frame(n_days: int = 40) -> pl.DataFrame:
+    rng = np.random.default_rng(0)
+    rows: list[dict[str, Any]] = []
+    for i in range(n_days):
+        for name in ("A", "B", "C"):
+            close = 100 + i + rng.normal(0, 1)
+            rows.append(
+                {"index_name": name, "date": date(2026, 1, 1 + i % 28) if i < 28 else date(2026, 2, 1 + i - 28),
+                 "close": close, "lag_close": close - 1 + rng.normal(0, 0.1), "fwd": 0.5 * close + rng.normal(0, 0.1)}
+            )  # fmt: skip
+    return pl.DataFrame(rows)
+
+
+@pytest.fixture
+def toy_mirror(data_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A mirror with one table, the store faked as current, the model store faked, the cache in tmp."""
+    (data_dir / "parquet" / "toy").mkdir(parents=True)
+    toy_frame().write_parquet(data_dir / "parquet" / "toy" / "toy.parquet")
+    original = data.install_views
+
+    def with_toy(con: Any, root: Path) -> list[str]:
+        made = original(con, root)
+        con.execute(
+            f"create view toy as select * from read_parquet('{(root / 'parquet/toy/toy.parquet').as_posix()}')"
+        )
+        return made + ["toy"]
+
+    monkeypatch.setattr(data, "install_views", with_toy)
+    monkeypatch.setenv("SECRET_HF_TOKEN", "hf_test_token_000000000000")
+
+    def revision(repo: str, token: str) -> str:
+        return "rev1"
+
+    def no_pull(
+        repo: str, token: str, revision: str, patterns: list[str], root: Path
+    ) -> mirror.Pulled:
+        return mirror.Pulled(0, 0, 0.0)
+
+    monkeypatch.setattr(mirror, "store_revision", revision)
+    monkeypatch.setattr(mirror, "pull", no_pull)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    uploads: list[str] = []
+
+    def fake_upload(repo: str, token: str, model_id: str, directory: Path) -> str:
+        uploads.append(model_id)
+        return f"rev-{model_id[:6]}"
+
+    monkeypatch.setattr(modelstore, "upload", fake_upload)
+
+    def no_publish(*args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr("finance.store.upload", no_publish)
+    monkeypatch.setattr("finance.settings.PUBLISH", True)
+    return data_dir
+
+
+async def test_register_is_idempotent_and_validates(store: PostgresStore, toy_mirror: Path) -> None:
+    ctx = await run(store, RegisterFit, DEFINITION)
+    fit_id, created = ctx.load("fit_id"), ctx.load("created")
+    assert created is True and ctx.load("specs") == 2
+    again = await run(store, RegisterFit, {**DEFINITION, "name": "toy again"})
+    assert again.load("fit_id") == fit_id and again.load("created") is False
+    with pytest.raises(ValueError, match="does not declare"):
+        await run(store, RegisterFit, {**DEFINITION, "params": {}})
+    with pytest.raises(ValueError, match="unknown algorithm"):
+        await run(store, RegisterFit, {**DEFINITION, "search": [{"algorithm": "nope"}]})
+
+
+async def test_the_whole_chain(store: PostgresStore, toy_mirror: Path) -> None:
+    fit_id = (await run(store, RegisterFit, DEFINITION)).load("fit_id")
+
+    ctx = await run(store, RunFit, {"fit_id": fit_id, "params": {"end_date": "2026-01-15"}})
+    run_id, models = ctx.load("fit_run_id"), ctx.load("models")
+    assert len(models) == 2 and ctx.load("rows") == 15 * 3
+    rows = await store.query_raw("select status from model where fit_run_id = :r", r=run_id)
+    assert [r["status"] for r in rows] == ["queued", "queued"]
+    outbox = await store.query_raw("select reaction, input from _outbox order by created_at")
+    assert [o["reaction"].rsplit(".", 1)[1] for o in outbox] == ["FitModel", "FitModel"]
+
+    from finance import app
+
+    worker = Worker(app, store)
+    assert await worker.run_once() == 2  # the two fits
+    assert await worker.run_once() >= 1  # CloseFitRun through OnChange(Model.status)
+    while await worker.run_once():
+        pass
+    rows = await store.query_raw(
+        "select status, revision, device, schema from model where fit_run_id = :r", r=run_id
+    )
+    assert all(
+        r["status"] == "fitted" and r["revision"].startswith("rev-") and r["device"] == "cpu"
+        for r in rows
+    )
+    assert rows[0]["schema"]["features"][0] == {"name": "close", "kind": "numeric", "levels": None}
+    fr = await store.query_raw(
+        "select status, specs, finished_at from fit_run where id = :r", r=run_id
+    )
+    assert fr[0]["status"] == "done" and fr[0]["finished_at"] is not None
+
+    model_id = models[0]
+    ctx = await run(
+        store, Infer,
+        {"model_id": model_id, "label": "validation", "query": DEFINITION["query"], "params": {"end_date": "2026-02-12"}},
+    )  # fmt: skip
+    assert ctx.load("status") == "done" and ctx.load("rows") == 40 * 3
+    table = pl.read_parquet(toy_mirror / ctx.load("path"))
+    assert set(
+        ["symbol", "date", "fwd", "pred_fwd", "model_id", "infer_run_id", "scored_at"]
+    ) <= set(table.columns)
+    assert np.corrcoef(table["fwd"].to_numpy(), table["pred_fwd"].to_numpy())[0, 1] > 0.99
+    df = await store.query_raw(
+        "select kind, source, published_at from data_file where kind = 'inference'"
+    )
+    assert len(df) == 1 and df[0]["published_at"] is not None
+
+    ctx = await run(
+        store, Evaluate, {"infer_run_id": ctx.load("infer_run_id"), "metrics": ["mae", "r2"]}
+    )
+    results = ctx.load("results")
+    assert results["r2.fwd"] > 0.99 and results["mae.fwd"] < 1.0
+
+
+async def test_failures_are_outcomes(
+    store: PostgresStore, toy_mirror: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fit_id = (
+        await run(store, RegisterFit, {**DEFINITION, "search": [{"algorithm": "sklearn.linear"}]})
+    ).load("fit_id")
+    ctx = await run(store, RunFit, {"fit_id": fit_id})
+    model_id = ctx.load("models")[0]
+
+    def broken(repo: str, token: str, model_id: str, directory: Path) -> str:
+        raise ConnectionError("huggingface.co: 503")
+
+    monkeypatch.setattr(modelstore, "upload", broken)
+    ctx = await run(store, FitModel, {"model_id": model_id, "device": "cpu"})
+    assert ctx.load("status") == "uploading" and ctx.load("upload") == "failed"
+    row = (
+        await store.query_raw(
+            "select status, cache_path, error from model where id = :m", m=model_id
+        )
+    )[0]
+    assert row["status"] == "uploading" and row["cache_path"] and "503" in row["error"]
+
+    with pytest.raises(LookupError, match="not a fitted model"):
+        await run(
+            store, Infer, {"model_id": model_id, "label": "x", "query": "select 1", "params": {}}
+        )
+
+    ctx = await run(store, FitModel, {"model_id": model_id, "device": "tpu"})
+    assert ctx.load("status") == "failed" and "tpu" in ctx.load("error")
+
+
+async def test_infer_refuses_a_schema_mismatch(store: PostgresStore, toy_mirror: Path) -> None:
+    fit_id = (
+        await run(store, RegisterFit, {**DEFINITION, "search": [{"algorithm": "sklearn.linear"}]})
+    ).load("fit_id")
+    model_id = (await run(store, RunFit, {"fit_id": fit_id})).load("models")[0]
+    ctx = await run(store, FitModel, {"model_id": model_id, "device": "cpu"})
+    assert ctx.load("status") == "fitted"
+    ctx = await run(
+        store, Infer,
+        {"model_id": model_id, "label": "bad", "query": "select index_name as symbol, date, close from toy", "params": {}},
+    )  # fmt: skip
+    assert ctx.load("status") == "failed" and "lag_close" in ctx.load("error")
