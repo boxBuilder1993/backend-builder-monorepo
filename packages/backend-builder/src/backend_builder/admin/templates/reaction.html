@@ -5,6 +5,16 @@
 <h2>Reached by</h2>
 <ul>{% for e in info.endpoints %}<li><code>{{ e }}</code></li>{% endfor %}{% for t in info.triggers %}<li><code>{{ t }}</code></li>{% endfor %}
 {% if not info.endpoints and not info.triggers %}<li class="muted">explicit triggers from other reactions only</li>{% endif %}</ul>
+<h2>Trigger</h2>
+<form method="post" action="/reactions/{{ info.qualified }}/trigger">
+  <textarea name="input" rows="4" style="width:100%;max-width:640px;font-family:ui-monospace,monospace">{{ input }}</textarea>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <p>
+    <button name="mode" value="run">Run now</button>
+    <button name="mode" value="enqueue">Enqueue for the worker</button>
+    <span class="muted">Input is the reaction's own JSON object. Run now executes in this process, source <code>admin</code>, and opens the run.</span>
+  </p>
+</form>
 {% if stats %}
 <h2>Last {{ stats.since_hours | int }}h</h2>
 <table><tr><th>outcome</th><th>invocations</th><th>p50</th><th>p95</th></tr>

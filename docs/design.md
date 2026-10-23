@@ -441,7 +441,7 @@ Built.
 | --- | --- |
 | Overview | counts of reactions, entities, endpoints and triggers; runs by outcome in the last 24 hours; outbox depth; recent runs |
 | Graph | entities with their tables and fields; reactions with what reaches them, endpoints, triggers, schedules, and their docstrings; endpoints with their budgets |
-| Reaction | one reaction: what reaches it, runs by outcome with p50 and p95 over the last 24 hours, outbox rows waiting for it, recent runs |
+| Reaction | one reaction: what reaches it, runs by outcome with p50 and p95 over the last 24 hours, outbox rows waiting for it, recent runs; a form to trigger it with a JSON input, run now in the console's process with source `admin`, or enqueued for the worker |
 | Runs | filter by reaction, outcome and source prefix |
 | Run | one invocation: outcome, source, timing, attempt, the error; the tree of invocations beneath it, per attempt for a seed, each linking to its own page; its input; its saved vars; what it created or deleted, or for a seed every change the run wrote; the outbox rows the subtree deferred, linked, with their state |
 | Outbox | pending, claimed and dead rows; a row's input, error and budget; requeue and discard |

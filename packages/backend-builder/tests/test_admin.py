@@ -191,3 +191,47 @@ def test_in_memory_store_still_serves_the_graph() -> None:
     client = TestClient(create_admin_app(App(package="fixture_app"), InMemoryStore()))
     assert "keeps no run records" in client.get("/").text
     assert client.get("/graph").status_code == 200
+
+
+async def test_reactions_can_be_triggered_from_the_console(
+    app: App, pg: PostgresStore, console: TestClient
+) -> None:
+    page = console.get(f"/reactions/{qualified_name(Open)}").text
+    assert "Run now" in page and "Enqueue for the worker" in page
+
+    ran = console.post(
+        f"/reactions/{qualified_name(Open)}/trigger",
+        data={"input": '{"owner": "console"}', "mode": "run"},
+        follow_redirects=False,
+    )
+    assert ran.status_code == 303 and ran.headers["location"].startswith("/runs/")
+    run_page = console.get(ran.headers["location"]).text
+    assert "admin" in run_page and '"owner": "console"' in run_page and "ok" in run_page
+    assert await pg.query_raw("select owner from account") == [{"owner": "console"}]
+
+    failed = console.post(
+        f"/reactions/{qualified_name(Boom)}/trigger", data={"input": "{}"}, follow_redirects=False
+    )
+    assert "ValueError: boom" in console.get(failed.headers["location"]).text
+
+    bad = console.post(
+        f"/reactions/{qualified_name(Open)}/trigger", data={"input": "[1, 2]", "mode": "run"}
+    )
+    assert bad.status_code == 200 and "must be a JSON object" in bad.text
+    broken = console.post(
+        f"/reactions/{qualified_name(Open)}/trigger", data={"input": "{nope", "mode": "run"}
+    )
+    assert "not valid JSON" in broken.text
+
+    queued = console.post(
+        f"/reactions/{qualified_name(Audit)}/trigger",
+        data={"input": '{"note": "later"}', "mode": "enqueue"},
+        follow_redirects=False,
+    )
+    assert queued.headers["location"].startswith("/outbox/")
+    row_id = queued.headers["location"].rsplit("/", 1)[-1]
+    rows = await pg.query_raw("select reaction, input from _outbox where id = :id", id=row_id)
+    assert rows == [{"reaction": qualified_name(Audit), "input": {"note": "later"}}]
+    assert "pending" in console.get(queued.headers["location"]).text
+
+    assert "No such reaction" in console.post("/reactions/nowhere.X/trigger", data={}).text

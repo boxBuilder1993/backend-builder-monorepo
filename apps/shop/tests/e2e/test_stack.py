@@ -4,6 +4,7 @@ exercised through the API and observed through the database and the logs."""
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
@@ -349,6 +350,22 @@ async def test_admin_console_shows_the_run_its_spans_and_the_outbox(
 
         schedules = (await admin.get("/schedules")).text
         assert "ExpireUnpaidOrders" in schedules
+
+        # Trigger a reaction from the console: a run with source admin, landing on its page.
+        triggered = await admin.post(
+            "/reactions/shop.reactions.CreateOrder/trigger",
+            data={
+                "input": json.dumps(
+                    {"user_id": "console", "tenant": "acme", "lines": [{"price": 3, "qty": 2}]}
+                ),
+                "mode": "run",
+            },
+        )
+        assert triggered.status_code == 303
+        page = (await admin.get(triggered.headers["location"])).text
+        assert "admin" in page and '"user_id": "console"' in page and "ok" in page
+        orders = await stack.sql("select total from \"order\" where user_id = 'console'")
+        assert len(orders) == 1
 
         missing = await admin.get("/runs/not-a-run")
         assert missing.status_code == 200 and "No such run" in missing.text
