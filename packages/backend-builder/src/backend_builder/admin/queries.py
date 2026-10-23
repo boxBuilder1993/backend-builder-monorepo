@@ -12,7 +12,8 @@ from backend_builder.store import Store
 async def overview(store: Store, since_hours: float = 24) -> dict[str, Any]:
     since = datetime.now(UTC) - timedelta(hours=since_hours)
     outcomes = await store.query_raw(
-        "select outcome, count(*) as n from _run where started_at >= :since group by outcome",
+        "select outcome, count(*) as n from _run "
+        "where id = root_id and started_at >= :since group by outcome",
         since=since,
     )
     stats = await store.outbox_stats()
@@ -32,8 +33,11 @@ async def runs(
     outcome: str | None = None,
     source: str | None = None,
     limit: int = 50,
+    roots_only: bool = True,
 ) -> list[dict[str, Any]]:
-    clauses: list[str] = []
+    """Recent rows, newest first. Runs (seed rows) by default; with
+    ``roots_only`` false, every invocation, children included."""
+    clauses: list[str] = ["id = root_id"] if roots_only else []
     params: dict[str, Any] = {"limit": limit}
     if reaction:
         clauses.append("reaction = :reaction")
@@ -46,7 +50,7 @@ async def runs(
         params["source"] = f"{source}%"
     where = ("where " + " and ".join(clauses)) if clauses else ""
     return await store.query_raw(
-        f"select id, reaction, source, outcome, error, attempts, started_at, duration_ms "
+        f"select id, root_id, reaction, source, outcome, error, attempt, started_at, duration_ms "
         f"from _run {where} order by started_at desc limit :limit",
         **params,
     )
@@ -61,51 +65,75 @@ def _is_uuid(value: str) -> bool:
 
 
 async def run_detail(store: Store, run_id: str) -> dict[str, Any] | None:
+    """One invocation's row plus its subtree: for a seed, every invocation of
+    the run grouped by attempt; for a child, its descendants in its attempt.
+    ``outbox_rows`` are the outbox rows the subtree deferred."""
     if not _is_uuid(run_id):
         return None
     rows = await store.query_raw("select * from _run where id = :id", id=run_id)
     if not rows:
         return None
     record = rows[0]
-    spans = await store.query_raw(
-        "select attempt, name, reaction_id, parent_reaction_id, started_at, duration_ms, ok "
-        "from _span where run_id = :id order by attempt, started_at",
-        id=run_id,
+    family = await store.query_raw(
+        "select id, root_id, parent_reaction_id, reaction, attempt, outcome, error, started_at, "
+        "duration_ms, enqueued from _run where root_id = :root order by attempt, started_at",
+        root=record["root_id"],
     )
-    record["attempts_spans"] = _span_trees(spans)
-    record["outbox_rows"] = await store.query_raw(
-        "select id, reaction, attempts, available_at, claimed_at, dead_at, scheduled_for "
-        "from _outbox where id = any(:ids)",
-        ids=list(record.get("enqueued") or []),
+    subtree = _subtree(family, record)
+    record["attempts_tree"] = _trees(subtree)
+    record["is_root"] = record["id"] == record["root_id"]
+    ids: list[str] = []
+    for r in subtree:
+        enqueued: list[Any] = list(r.get("enqueued") or [])
+        for row_id in enqueued:
+            if str(row_id) not in ids:
+                ids.append(str(row_id))
+    record["enqueued_all"] = ids
+    record["outbox_rows"] = (
+        await store.query_raw(
+            "select id, reaction, attempts, available_at, claimed_at, dead_at, scheduled_for "
+            "from _outbox where id = any(:ids)",
+            ids=ids,
+        )
+        if ids
+        else []
     )
     return record
 
 
-def _span_trees(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group spans by attempt and nest each attempt's reaction spans by
-    parent, with ``flush`` and ``run`` listed beside the tree."""
+def _subtree(family: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
+    """``record`` and its descendants; the whole family for the seed."""
+    if record["id"] == record["root_id"]:
+        return family
+    keep = {record["id"]}
+    changed = True
+    while changed:
+        changed = False
+        for r in family:
+            if r["id"] not in keep and r["parent_reaction_id"] in keep:
+                keep.add(r["id"])
+                changed = True
+    return [r for r in family if r["id"] in keep]
+
+
+def _trees(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group by attempt and order each attempt's rows parent-first, depth
+    annotated, so a template can indent them. Rows are in start order, and
+    children always start after their parent."""
     by_attempt: dict[int, list[dict[str, Any]]] = {}
-    for span in spans:
-        by_attempt.setdefault(int(span["attempt"]), []).append(span)
+    for row in rows:
+        by_attempt.setdefault(int(row["attempt"]), []).append(row)
     trees: list[dict[str, Any]] = []
     for attempt, items in sorted(by_attempt.items()):
-        reactions = [s for s in items if s["name"] not in ("run", "flush")]
-        parents = {s["reaction_id"]: s["parent_reaction_id"] for s in reactions}
-        for s in reactions:
-            s["depth"] = _depth(s, parents)
-        trees.append(
-            {
-                "attempt": attempt,
-                "reactions": reactions,
-                "run": next((s for s in items if s["name"] == "run"), None),
-                "flush": next((s for s in items if s["name"] == "flush"), None),
-            }
-        )
+        parents = {r["id"]: r["parent_reaction_id"] for r in items}
+        for r in items:
+            r["depth"] = _depth(r, parents)
+        trees.append({"attempt": attempt, "rows": items})
     return trees
 
 
-def _depth(span: dict[str, Any], parents: dict[Any, Any]) -> int:
-    d, parent = 0, span["parent_reaction_id"]
+def _depth(row: dict[str, Any], parents: dict[Any, Any]) -> int:
+    d, parent = 0, row["parent_reaction_id"]
     while parent is not None and parent in parents:
         d, parent = d + 1, parents[parent]
     return d

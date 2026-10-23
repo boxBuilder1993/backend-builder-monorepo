@@ -7,11 +7,11 @@
 {% if not info.endpoints and not info.triggers %}<li class="muted">explicit triggers from other reactions only</li>{% endif %}</ul>
 {% if stats %}
 <h2>Last {{ stats.since_hours | int }}h</h2>
-<table><tr><th>outcome</th><th>runs</th><th>p50</th><th>p95</th></tr>
-{% for s in stats.by_outcome %}<tr><td class="{{ s.outcome }}">{{ s.outcome }}</td><td>{{ s.n }}</td><td>{{ s.p50 | ms }}</td><td>{{ s.p95 | ms }}</td></tr>{% else %}<tr><td colspan="4" class="muted">no runs</td></tr>{% endfor %}
+<table><tr><th>outcome</th><th>invocations</th><th>p50</th><th>p95</th></tr>
+{% for s in stats.by_outcome %}<tr><td class="{{ s.outcome }}">{{ s.outcome }}</td><td>{{ s.n }}</td><td>{{ s.p50 | ms }}</td><td>{{ s.p95 | ms }}</td></tr>{% else %}<tr><td colspan="4" class="muted">no invocations</td></tr>{% endfor %}
 </table>
 <p class="muted">{{ stats.pending }} outbox row(s) waiting for this reaction.</p>
-<h2>Recent runs</h2>
+<h2>Recent invocations</h2>
 {% with rows = recent %}{% include "_runs_table.html" %}{% endwith %}
 {% endif %}
 {% endblock %}

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from backend_builder import secrets as _secrets
+from backend_builder.schema import table_name
 from backend_builder.store import Session
 from backend_builder.trace import Trace
 
@@ -18,10 +19,13 @@ if TYPE_CHECKING:
 class Context:
     """An input plus a session, for one reaction invocation.
 
-    Every invocation gets its own ``reaction_id``. A context created by
-    ``trigger`` records the triggering invocation as ``parent_reaction_id``;
-    the seed invocation of a run has none. All invocations in a run share the
-    same session and the same trace.
+    Every invocation gets its own ``reaction_id`` and its own ``vars``. A
+    context created by ``trigger`` records the triggering invocation as
+    ``parent_reaction_id``; the seed invocation of a run has none. All
+    invocations in a run share the same session, the entities, and the same
+    trace; nothing else crosses between them. A parent passes what a child
+    needs in its input and reads what the child saved from the context
+    ``trigger`` returns.
     """
 
     def __init__(
@@ -31,6 +35,7 @@ class Context:
         *,
         reaction_id: str | None = None,
         parent_reaction_id: str | None = None,
+        root_id: str | None = None,
         trace: Trace | None = None,
         secrets: _secrets.Secrets | None = None,
     ) -> None:
@@ -39,7 +44,17 @@ class Context:
         self.input = input
         self.reaction_id = reaction_id or str(uuid4())
         self.parent_reaction_id = parent_reaction_id
+        self.root_id = root_id or self.reaction_id
+        """The run's seed invocation; this id for the seed itself."""
         self.trace = trace if trace is not None else Trace()
+        self.vars: dict[str, Any] = {}
+        """This invocation's saved values, the dict ``save`` and ``load``
+        manage. Not shared with parents or children; recorded on its row."""
+        self.created: list[tuple[str, str]] = []
+        """``(table, id)`` of every row created through this context."""
+        self.deleted: list[tuple[str, str]] = []
+        self.enqueued: list[str] = []
+        """Ids of the outbox rows deferred through this context."""
 
     async def get[E: Entity](
         self,
@@ -65,25 +80,23 @@ class Context:
         return await self._session.query_raw(statement, **params)
 
     def create[E: Entity](self, entity: type[E], **fields: Any) -> E:
-        return self._session.create(entity, **fields)
+        row = self._session.create(entity, **fields)
+        self.created.append((table_name(entity), row.id))
+        return row
 
     def delete(self, row: Entity) -> None:
         """Soft-delete ``row``. It disappears from reads unless asked for."""
         self._session.delete(row)
-
-    @property
-    def vars(self) -> dict[str, Any]:
-        """The run's saved values, the dict ``save`` and ``load`` manage.
-        Handy for ``"name" in ctx.vars``."""
-        return self._session.vars
+        self.deleted.append((table_name(type(row)), row.id))
 
     def save(self, name: str, value: Any) -> None:
-        """Keep ``value`` under ``name`` in the session for the rest of the run."""
-        self._session.vars[name] = value
+        """Keep ``value`` under ``name`` for this invocation. A parent reads
+        it from the context ``trigger`` returns; a builder reads the seed's."""
+        self.vars[name] = value
 
     def load(self, name: str) -> Any:
-        """The value saved under ``name`` by any reaction in this run."""
-        return self._session.vars[name]
+        """The value this invocation saved under ``name``. ``KeyError`` if absent."""
+        return self.vars[name]
 
     def secret(self, name: str) -> str:
         """The secret ``name``, read from the environment as ``SECRET_<NAME>``.
@@ -102,7 +115,9 @@ class Context:
         """Run ``reaction`` with ``input``.
 
         Immediate (the default): runs now, against this session, depth-first,
-        and returns the child context the reaction ran in. ``timeout`` bounds
+        and returns the child context the reaction ran in, so the parent can
+        ``load`` what the child saved. The child sees only ``input`` and the
+        shared entities, never the parent's vars. ``timeout`` bounds
         it, within the run's own deadline; it can only tighten. Expiry aborts
         the whole run, because a cancelled transaction cannot be resumed.
 
@@ -117,12 +132,14 @@ class Context:
         from backend_builder.reaction import invoke, qualified_name
 
         if deferred:
-            self._session.defer(qualified_name(reaction), input, timeout=timeout)
+            row_id = self._session.defer(qualified_name(reaction), input, timeout=timeout)
+            self.enqueued.append(row_id)
             return None
         child = Context(
             self._session,
             input,
             parent_reaction_id=self.reaction_id,
+            root_id=self.root_id,
             trace=self.trace,
             secrets=self._secrets,
         )

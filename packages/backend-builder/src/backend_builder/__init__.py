@@ -8,7 +8,7 @@ from backend_builder.log import configure as configure_logging
 from backend_builder.outbox import OutboxEntry, OutboxRow, OutboxStats
 from backend_builder.postgres import PostgresStore
 from backend_builder.reaction import Reaction
-from backend_builder.records import RunRecord, SpanRecord
+from backend_builder.records import RunRecord
 from backend_builder.scheduler import Scheduler
 from backend_builder.secrets import SecretError, Secrets
 from backend_builder.settings import RuntimeEnv, Settings, SettingsError
@@ -21,7 +21,7 @@ from backend_builder.store import (
     Store,
     TransientError,
 )
-from backend_builder.trace import Span, Trace
+from backend_builder.trace import Invocation, Span, Trace
 from backend_builder.triggers import Change, OnChange, OnCreate, OnDelete, OnSchedule, TriggerError
 from backend_builder.worker import Worker
 
@@ -34,6 +34,7 @@ __all__ = [
     "Endpoint",
     "Entity",
     "InMemoryStore",
+    "Invocation",
     "MissingRowError",
     "NotSupported",
     "OnChange",
@@ -53,7 +54,6 @@ __all__ = [
     "Secrets",
     "Session",
     "Settings",
-    "SpanRecord",
     "SettingsError",
     "Span",
     "Store",

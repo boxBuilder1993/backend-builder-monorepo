@@ -35,8 +35,8 @@ class NightlySync(Reaction):
     one transaction, the night. A leg's failure is an outcome saved under its name, never an
     exception, so the other legs run and the publish happens. Input: {"scheduled_for": ...}.
 
-    vars are shared by every reaction in a run, so each child's summary is taken out of them right
-    after it returns, before the next child writes its own."""
+    Each child's summary is read from the context ``trigger`` returns; vars belong to one
+    invocation and nothing crosses between reactions except through input and that context."""
 
     LEG_KEYS = ("implemented", "written", "no_data", "error")
     PUBLISH_KEYS = ("files", "commits", "bytes", "error")
@@ -44,13 +44,13 @@ class NightlySync(Reaction):
     async def calculate(self, ctx: Context) -> None:
         legs: dict[str, Any] = {}
         for leg, budget in BUDGETS.items():
-            await ctx.trigger(SyncLeg, {"leg": leg}, timeout=budget)
-            legs[leg] = {k: ctx.vars.pop(k, None) for k in self.LEG_KEYS}
-            ctx.vars.pop("leg", None)
-            ctx.vars.pop("notes", None)
+            child = await ctx.trigger(SyncLeg, {"leg": leg}, timeout=budget)
+            assert child is not None
+            legs[leg] = {k: child.vars.get(k) for k in self.LEG_KEYS}
         ctx.save("legs", legs)
-        await ctx.trigger(Publish, {})
-        ctx.save("published", {k: ctx.vars.pop(k, None) for k in self.PUBLISH_KEYS})
+        published = await ctx.trigger(Publish, {})
+        assert published is not None
+        ctx.save("published", {k: published.vars.get(k) for k in self.PUBLISH_KEYS})
 
 
 class SyncLeg(Reaction):

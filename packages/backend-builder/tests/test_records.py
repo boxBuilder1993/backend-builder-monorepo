@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -45,7 +45,9 @@ class OuterMem(Reaction):
 
     async def calculate(self, ctx: Context) -> None:
         created = ctx.create(Account, owner=ctx.input["owner"])
-        await ctx.trigger(Inner, {"id": created.id})
+        inner = await ctx.trigger(Inner, {"id": created.id})
+        assert inner is not None
+        ctx.save("touched", inner.load("touched"))
         ctx.save("note", "done")
         ctx.save("opaque", object())
 
@@ -63,7 +65,8 @@ class FlakyThenOk(Reaction):
 
     async def calculate(self, ctx: Context) -> None:
         FlakyThenOk.calls += 1
-        ctx.create(Account, owner="flaky")
+        created = ctx.create(Account, owner="flaky")
+        await ctx.trigger(Inner, {"id": created.id})
         if FlakyThenOk.calls == 1:
             raise RuntimeError("first attempt")
 
@@ -80,7 +83,7 @@ class Slow(Reaction):
 
 
 class RecordingBroken(InMemoryStore):
-    async def record_run(self, record: RunRecord) -> None:
+    async def record_run(self, records: Sequence[RunRecord]) -> None:
         raise OSError("disk full")
 
 
@@ -108,31 +111,39 @@ async def test_successful_run_is_recorded_in_full() -> None:
     store = InMemoryStore()
     ctx = await run(store, OuterMem, {"owner": "ada"}, source="test")
 
-    (record,) = store.records
-    assert record.id == ctx.reaction_id
+    inner, record = store.records  # one row per invocation, children first
+    assert record.id == ctx.reaction_id and record.is_root and record.root_id == record.id
     assert record.reaction == qualified_name(OuterMem) and record.source == "test"
-    assert record.outcome == "ok" and record.error is None and record.attempts == 1
+    assert record.outcome == "ok" and record.error is None and record.attempt == 1
+    assert record.committed and record.flush_ms is not None
     assert record.started_at.tzinfo is UTC and record.duration_ms >= 0
     assert record.input == {"owner": "ada"}
     assert record.vars is not None
     assert record.vars["note"] == "done"
     assert record.vars["touched"]["owner"] == "ada" and record.vars["touched"]["balance"] == 5
     assert record.vars["opaque"].startswith("<object object")
+    account_id = record.vars["touched"]["id"]
     assert record.changes == [
-        {"entity": "account", "id": record.vars["touched"]["id"], "kind": "created", "changed": []}
+        {"entity": "account", "id": account_id, "kind": "created", "changed": []}
     ]
     assert record.enqueued == []
-    names = [(s.attempt, s.name) for s in record.spans]
-    assert names == [(1, "Inner"), (1, "OuterMem"), (1, "flush"), (1, "run")]
-    assert all(s.ok for s in record.spans)
+
+    assert inner.reaction == qualified_name(Inner) and inner.source == "trigger"
+    assert inner.root_id == record.id and inner.parent_reaction_id == record.id
+    assert inner.attempt == 1 and inner.outcome == "ok" and inner.committed
+    assert inner.input == {"id": account_id}
+    assert inner.vars == {
+        "touched": record.vars["touched"]
+    }  # its own save, nothing of the parent's
+    assert inner.changes == [] and inner.flush_ms is None and inner.deadline_at is None
 
 
 async def test_summary_level_omits_input_and_vars() -> None:
     store = InMemoryStore()
     await run(store, OuterMem, {"owner": "ada"}, records="summary")
-    (record,) = store.records
-    assert record.input is None and record.vars is None
-    assert record.changes and record.spans
+    inner, record = store.records
+    assert record.input is None and record.vars is None and inner.input is None
+    assert record.changes
 
 
 async def test_off_records_nothing() -> None:
@@ -147,23 +158,19 @@ async def test_failed_run_is_recorded_with_its_error_and_no_changes() -> None:
         await run(store, Explode, {}, max_attempts=2)
     (record,) = store.records
     assert record.outcome == "error" and record.error == "ValueError: boom"
-    assert record.attempts == 2 and record.changes == []
-    assert [(s.attempt, s.name, s.ok) for s in record.spans] == [
-        (1, "Explode", False),
-        (1, "run", False),
-        (2, "Explode", False),
-        (2, "run", False),
-    ]
+    assert record.attempt == 2 and record.changes == [] and not record.committed
 
 
-async def test_retried_run_keeps_every_attempts_spans() -> None:
+async def test_retried_run_keeps_every_attempts_invocations() -> None:
     FlakyThenOk.calls = 0
     store = InMemoryStore()
-    await run(store, FlakyThenOk, {}, max_attempts=3)
-    (record,) = store.records
-    assert record.outcome == "ok" and record.attempts == 2
-    assert [s.attempt for s in record.spans] == [1, 1, 2, 2, 2]
-    assert len(record.changes) == 1  # only the committed attempt's write
+    ctx = await run(store, FlakyThenOk, {}, max_attempts=3)
+    root = next(r for r in store.records if r.is_root)
+    assert root.outcome == "ok" and root.attempt == 2 and root.committed
+    assert len(root.changes) == 1  # only the committed attempt's write
+    children = [r for r in store.records if not r.is_root]
+    assert [(c.attempt, c.committed) for c in children] == [(1, False), (2, True)]
+    assert all(c.root_id == ctx.reaction_id and c.outcome == "ok" for c in children)
 
 
 async def test_timed_out_run_is_recorded() -> None:
@@ -186,30 +193,56 @@ async def test_in_memory_purge() -> None:
     store = InMemoryStore()
     await run(store, OuterMem, {"owner": "x"})
     assert await store.purge_runs(datetime.now(UTC) - timedelta(days=1)) == 0
-    assert await store.purge_runs(datetime.now(UTC) + timedelta(seconds=1)) == 1
+    assert (
+        await store.purge_runs(datetime.now(UTC) + timedelta(seconds=1)) == 1
+    )  # one run, two rows
     assert store.records == []
+
+
+async def test_a_child_that_raises_is_recorded_even_when_the_parent_recovers() -> None:
+    class Fragile(Reaction):
+        async def calculate(self, ctx: Context) -> None:
+            raise ValueError("nope")
+
+    class Tolerant(Reaction):
+        async def calculate(self, ctx: Context) -> None:
+            try:
+                await ctx.trigger(Fragile, {"n": 1})
+            except ValueError:
+                ctx.save("recovered", True)
+
+    store = InMemoryStore()
+    await run(store, Tolerant, {})
+    child, root = store.records
+    assert root.outcome == "ok" and root.vars == {"recovered": True}
+    assert child.outcome == "error" and child.error == "ValueError: nope" and child.committed
 
 
 # --- postgres -----------------------------------------------------------------------------
 
 
-async def test_postgres_records_runs_with_spans_and_enqueued_rows(pg: PostgresStore) -> None:
+async def test_postgres_records_every_invocation_and_the_enqueued_rows(pg: PostgresStore) -> None:
     ctx = await run(pg, Outer, {"owner": "ada"}, triggers=[OnCreate(Account, Audit)], source="t")
 
-    (row,) = await pg.query_raw("select * from _run")
+    (row,) = await pg.query_raw("select * from _run where id = root_id")
     assert row["id"] == ctx.reaction_id and row["outcome"] == "ok" and row["source"] == "t"
+    assert row["committed"] is True and row["flush_ms"] is not None and row["attempt"] == 1
     assert row["input"] == {"owner": "ada"} and row["vars"]["note"] == "done"
     assert [c["kind"] for c in row["changes"]] == ["created"]
     assert len(row["enqueued"]) == 2  # the explicit deferred Audit and the OnCreate match
     outbox = await pg.query_raw("select id from _outbox")
     assert {r["id"] for r in outbox} == set(row["enqueued"])
 
-    spans = await pg.query_raw(
-        "select attempt, name, ok from _span where run_id = :id order by started_at",
+    (child,) = await pg.query_raw(
+        "select reaction, source, parent_reaction_id, attempt, outcome, committed, input, vars, "
+        "changes, enqueued from _run where root_id = :id and id <> root_id",
         id=ctx.reaction_id,
     )
-    assert [s["name"] for s in spans] == ["run", "Outer", "Inner", "flush"]
-    assert all(s["ok"] and s["attempt"] == 1 for s in spans)
+    assert child["reaction"] == qualified_name(Inner) and child["source"] == "trigger"
+    assert child["parent_reaction_id"] == ctx.reaction_id and child["attempt"] == 1
+    assert child["outcome"] == "ok" and child["committed"] is True
+    assert child["input"] == {"id": row["changes"][0]["id"]}
+    assert set(child["vars"]) == {"touched"} and child["changes"] == [] and child["enqueued"] == []
 
 
 async def test_postgres_records_failures_outside_the_rolled_back_transaction(
@@ -233,9 +266,9 @@ async def test_scheduler_purges_old_records(pg: PostgresStore) -> None:
     scheduler = Scheduler(app, pg, Settings(run_retention_days=7))
     assert await scheduler.purge_if_due() == 1
     assert await scheduler.purge_if_due() == 0  # not due again for an hour
-    remaining = await pg.query_raw("select input->>'owner' as owner from _run")
+    remaining = await pg.query_raw("select input->>'owner' as owner from _run where id = root_id")
     assert remaining == [{"owner": "new"}]
-    assert await pg.query_raw("select count(*) as n from _span") != [{"n": 0}]
+    assert await pg.query_raw("select count(*) as n from _run where id <> root_id") == [{"n": 1}]
 
 
 # --- running and lost -----------------------------------------------------------------
@@ -260,25 +293,30 @@ async def test_a_running_record_exists_while_the_run_executes_and_is_replaced() 
 
 async def test_running_records_past_their_deadline_are_marked_lost() -> None:
     store = InMemoryStore()
+    stale_id, fresh_id = str(uuid4()), str(uuid4())
     stale = RunRecord(
-        id=str(uuid4()),
+        id=stale_id,
+        root_id=stale_id,
+        parent_reaction_id=None,
         reaction="x.Dead",
         source="test",
+        attempt=0,
         outcome="running",
         error=None,
-        attempts=0,
+        committed=False,
         started_at=datetime.now(UTC) - timedelta(minutes=5),
         duration_ms=0,
+        flush_ms=None,
         input=None,
         vars=None,
         changes=[],
         enqueued=[],
-        spans=[],
         deadline_at=datetime.now(UTC) - timedelta(minutes=4),
     )
-    fresh = replace(stale, id=str(uuid4()), deadline_at=datetime.now(UTC) + timedelta(minutes=1))
-    await store.record_run(stale)
-    await store.record_run(fresh)
+    fresh = replace(
+        stale, id=fresh_id, root_id=fresh_id, deadline_at=datetime.now(UTC) + timedelta(minutes=1)
+    )
+    await store.record_run([stale, fresh])
     app = App(package="fixture_app", include=[Account, OuterMem, Inner])
     assert await Scheduler(app, store, Settings()).sweep_lost() == 1
     by_id = {r.id: r for r in store.records}

@@ -123,7 +123,7 @@ class UpdateLine(Reaction):
 
 **Input** is `ctx.input`, a `dict[str, Any]`. The reaction defines its own shape and documents it in its docstring. Inputs that arrive through the outbox must be JSON-encodable; inputs built in-process may hold anything.
 
-**Output** is whatever the reaction wrote to the store, plus anything it `ctx.save`d for its caller to `ctx.load` afterwards. A reaction has no return value.
+**Output** is whatever the reaction wrote to the store, plus anything it `ctx.save`d. A reaction has no return value; its caller reads what it saved from the context `trigger` returns, and the response builder reads the root's.
 
 **Errors.** Any exception aborts the run. There is no special error class to raise, and nothing catches exceptions for you. An outcome the run *understands* (the order doesn't exist, the card was declined) is not an error: record it with `ctx.save` and return normally, so the run commits and the caller decides what to do. See [§8](#8-http-endpoints) for how that becomes a 404.
 
@@ -133,7 +133,14 @@ class UpdateLine(Reaction):
 child = await ctx.trigger(OrderTotal, {"order_id": order.id})
 ```
 
-The child sees everything the parent has created or changed so far, and the parent sees the child's writes when `trigger` returns. The returned context is the child's, so `child.load("something")` works, though `ctx.vars` is shared across the whole run anyway. `deferred=True` is a different thing: see [§7](#7-triggers-and-deferred-work).
+The child sees everything the parent has created or changed so far, and the parent sees the child's writes when `trigger` returns. Entities are shared; nothing else is. The child's `vars` are its own, so what it saved is read from the returned context, and anything it needs from the parent arrives in its input:
+
+```python
+created = await ctx.trigger(CreateOrder, {"user_id": ..., "lines": ...})
+ctx.save("order", created.load("order"))   # lift what the child saved, if the caller needs it
+```
+
+Passing information between reactions is your job, in both directions, through input and the returned context. That is what lets every invocation be recorded on its own. `deferred=True` is a different thing: see [§7](#7-triggers-and-deferred-work).
 
 **Contracts to keep in mind.**
 
@@ -160,9 +167,9 @@ await ctx.query_raw(sql, **params) -> list[dict]                                
 ctx.create(Entity, **fields) -> E      # inserted at flush
 ctx.delete(row)                        # soft delete: sets deleted_at
 
-ctx.save(name, value)                  # held for the run; read by builders and parents
+ctx.save(name, value)                  # this invocation's; a parent reads it from the returned context
 ctx.load(name) -> Any                  # KeyError if absent
-ctx.vars                               # the dict behind save and load
+ctx.vars                               # the dict behind save and load, own to this invocation
 
 ctx.secret(name) -> str                # SECRET_<NAME> from the environment
 
@@ -170,7 +177,7 @@ await ctx.trigger(Reaction, input, timeout=None) -> Context       # now, same se
 await ctx.trigger(Reaction, input, deferred=True, timeout=None)   # after commit, by a worker
 ```
 
-`vars` is shared by every reaction in the run and is not persisted; it is where a run leaves things for the response builder, and it is stored in the run record so the console can show it. Keep it small and JSON-friendly where you can; anything else is stored as its `repr`.
+`vars` belong to one invocation and are not persisted as data; they are where a reaction leaves things for its caller or, on the root, for the response builder, and they are stored on the invocation's run record so the console can show them. Keep it small and JSON-friendly where you can; anything else is stored as its `repr`.
 
 ## 6. Reading and writing
 
@@ -355,7 +362,7 @@ uv run backend-builder migrate myshop --check                       # fail if en
 
 Read every generated file before committing it. A new non-nullable column on a populated table needs a `server_default` added by hand; a renamed field generates a drop and an add, which loses data, and should be rewritten as a rename. Migrations are reviewed in the pull request like any other code. Keep `migrations.check(app, migrated_database_url)` as a test ([§13](#13-testing)): it applies the chain to a fresh database and fails if the entities have drifted from it, so CI catches a forgotten migration.
 
-The runtime's own tables (`_outbox`, `_schedule`, `_run`, `_span`) are part of your app's chain, generated the same way when the runtime adds them. When a library upgrade adds a system table, `makemigration` picks it up.
+The runtime's own tables (`_outbox`, `_schedule`, `_run`) are part of your app's chain, generated the same way when the runtime adds them. When a library upgrade adds a system table, `makemigration` picks it up.
 
 ## 13. Testing
 
@@ -438,7 +445,7 @@ Locally, `compose.yaml` runs all of it for the shop under the `shop` profile; co
 
 ## 15. Observing it
 
-**Run records.** Every run leaves a row in `_run`, written as `running` when it starts and replaced when it ends, so the console shows what is executing right now. A `running` row whose deadline has passed is marked `lost` by the scheduler: the process died mid-run, and Postgres rolled its transaction back. A finished row holds the reaction, where it came from, outcome, attempts, duration, the input, the saved vars, every row it changed, every reaction it deferred, and in `_span` the span tree of every attempt. Written after the run in its own transaction, so a failed run is recorded too. The retention window is purged by the scheduler.
+**Run records.** Every reaction invocation, the seed of a run or a child triggered from another reaction, leaves its own row in `_run`: the reaction, its input, what it saved, what it created or deleted, what it deferred, its duration and outcome, and its parent, so the tree of a run is a query on `root_id`. The seed's row adds what only exists at commit: the attempt count, the flush time, every field change the run wrote, and whether it committed; a child's row says whether the run it belonged to did. The seed's row is written as `running` when the run starts and replaced, with every child's row, when it ends, so the console shows what is executing right now. A `running` row whose deadline has passed is marked `lost` by the scheduler: the process died mid-run, and Postgres rolled its transaction back. The retention window is purged by the scheduler, whole runs at a time.
 
 **The admin console** (`backend-builder admin myshop`, port 9200) reads those tables: an overview of recent runs and outbox depth, the app's graph, a page per reaction with its stats and recent runs, a page per run with its span tree, inputs, vars and changes, the outbox with requeue and discard for dead rows, and the schedules. Set `BACKEND_BUILDER_ADMIN_TOKEN` anywhere it isn't on a private network.
 
@@ -452,6 +459,7 @@ Before opening a pull request that adds or changes an app:
 
 - Entities are data. Indexes, constraints and defaults are in a migration you read before committing.
 - Domain reactions never read `ctx.input["body"]`; API reactions never touch entities beyond handing off.
+- Nothing crosses between reactions except input down and the returned context up. No reaction relies on a value another one saved.
 - Anything that talks to the outside world is a deferred reaction, and is safe to run twice.
 - Triggered reactions load current state and recompute; they don't trust the change record beyond the id.
 - Outcomes are saved and replied; only failures raise.

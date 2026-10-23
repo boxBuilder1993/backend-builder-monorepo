@@ -18,7 +18,9 @@ class WidgetOut(BaseModel):
 
 class MakeWidgetApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        await ctx.trigger(MakeWidget, {"name": ctx.input["body"]["name"]})
+        made = await ctx.trigger(MakeWidget, {"name": ctx.input["body"]["name"]})
+        assert made is not None
+        ctx.save("widget", made.load("widget"))
 
 
 async def widget_response(ctx: Context) -> WidgetOut:

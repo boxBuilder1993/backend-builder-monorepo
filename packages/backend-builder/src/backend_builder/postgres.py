@@ -13,7 +13,7 @@ import asyncio
 import random
 import typing
 import uuid
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta
@@ -36,7 +36,7 @@ from backend_builder.outbox import (
     OutboxStats,
     now,
 )
-from backend_builder.records import LOST_ERROR, RUN_TABLE, SPAN_TABLE, RunRecord
+from backend_builder.records import LOST_ERROR, RUN_TABLE, RunRecord
 from backend_builder.schema import build_metadata, persisted_fields, table_name
 from backend_builder.store import DuplicateKeyError, MissingRowError, Store, TransientError
 
@@ -382,47 +382,39 @@ class PostgresStore(Store):
 
     # --- run records ---------------------------------------------------------------------
 
-    async def record_run(self, record: RunRecord) -> None:
+    async def record_run(self, records: Sequence[RunRecord]) -> None:
+        if not records:
+            return
         runs = self.metadata.tables[RUN_TABLE]
-        spans = self.metadata.tables[SPAN_TABLE]
-        values: dict[str, Any] = {
-            "reaction": record.reaction,
-            "source": record.source,
-            "outcome": record.outcome,
-            "error": record.error,
-            "attempts": record.attempts,
-            "started_at": record.started_at,
-            "duration_ms": record.duration_ms,
-            "input": record.input,
-            "vars": record.vars,
-            "changes": record.changes,
-            "enqueued": record.enqueued,
-            "deadline_at": record.deadline_at,
-        }
+        rows = [
+            {
+                "id": r.id,
+                "root_id": r.root_id,
+                "parent_reaction_id": r.parent_reaction_id,
+                "reaction": r.reaction,
+                "source": r.source,
+                "attempt": r.attempt,
+                "outcome": r.outcome,
+                "error": r.error,
+                "committed": r.committed,
+                "started_at": r.started_at,
+                "duration_ms": r.duration_ms,
+                "flush_ms": r.flush_ms,
+                "input": r.input,
+                "vars": r.vars,
+                "changes": r.changes,
+                "enqueued": r.enqueued,
+                "deadline_at": r.deadline_at,
+            }
+            for r in records
+        ]
+        statement = pg.insert(runs)
+        statement = statement.on_conflict_do_update(
+            index_elements=["id"],
+            set_={c: statement.excluded[c] for c in rows[0] if c != "id"},
+        )
         async with self.engine.begin() as connection:
-            await connection.execute(
-                pg.insert(runs)
-                .values(id=record.id, **values)
-                .on_conflict_do_update(index_elements=["id"], set_=values)
-            )
-            if record.spans:
-                await connection.execute(
-                    sa.insert(spans),
-                    [
-                        {
-                            "id": s.id,
-                            "run_id": record.id,
-                            "attempt": s.attempt,
-                            "name": s.name,
-                            "reaction_id": s.reaction_id,
-                            "parent_reaction_id": s.parent_reaction_id,
-                            "started_at": s.started_at,
-                            "duration_ms": s.duration_ms,
-                            "ok": s.ok,
-                        }
-                        for s in record.spans
-                    ],
-                )
+            await connection.execute(statement, rows)
 
     async def mark_lost(self, moment: datetime) -> int:
         runs = self.metadata.tables[RUN_TABLE]
@@ -435,13 +427,17 @@ class PostgresStore(Store):
         return int(result.rowcount)
 
     async def purge_runs(self, before: datetime) -> int:
+        """Delete whole runs, every invocation's row, whose seed started before
+        ``before``. Returns how many runs."""
         runs = self.metadata.tables[RUN_TABLE]
-        spans = self.metadata.tables[SPAN_TABLE]
         async with self.engine.begin() as connection:
-            old = sa.select(runs.c.id).where(runs.c.started_at < before)
-            await connection.execute(sa.delete(spans).where(spans.c.run_id.in_(old)))
-            result = await connection.execute(sa.delete(runs).where(runs.c.started_at < before))
-        return int(result.rowcount)
+            old = sa.select(runs.c.id).where(
+                runs.c.id == runs.c.root_id, runs.c.started_at < before
+            )
+            roots = {str(r[0]) for r in (await connection.execute(old)).all()}
+            if roots:
+                await connection.execute(sa.delete(runs).where(runs.c.root_id.in_(roots)))
+        return len(roots)
 
     async def update(self, entity: type[Entity], row_id: str, changes: dict[str, Any]) -> None:
         if not changes:

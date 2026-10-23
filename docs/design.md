@@ -111,7 +111,7 @@ class OrderTotal(Reaction):
 **Contracts the developer must know.**
 
 - Triggers are synchronous and depth-first. Triggering inside a loop over a thousand instances runs the sub-reaction a thousand times. Collect, then trigger once.
-- A sub-reaction shares the session. Everything it mutates or creates is visible to the caller when `trigger` returns.
+- A sub-reaction shares the session and nothing else. Everything it mutates or creates is visible to the caller when `trigger` returns; what it saved is read from the context `trigger` returns. Information passes between reactions only through input, downward, and that returned context, upward. That is the developer's responsibility, and it is what lets every invocation be recorded on its own.
 - Rows are by reference. Mutating a loaded instance is the write. There is no save call.
 - Reads that are native to one store are not available on another. `get` with a lambda is in-memory only; `query` with SQL is Postgres only. `get_by_id`, `create`, `delete` work everywhere.
 
@@ -132,7 +132,7 @@ await ctx.query_raw(statement, **params) -> list[dict[str, Any]]                
 ctx.create(Entity, **fields) -> E           # registered in the session, inserted at flush
 ctx.delete(row)                             # deleted_at = now()
 
-ctx.save(name, value)                       # free-form, held by the session for the run
+ctx.save(name, value)                       # free-form, this invocation's own; a parent reads it via the returned context
 ctx.load(name) -> Any                       # KeyError if absent
 ctx.vars                                    # the dict behind save and load, for `name in ctx.vars`
 
@@ -405,11 +405,11 @@ Built.
 
 Built.
 
-Every run leaves a record: what it was, where it came from, what came in, what the reactions saved, what was written, what was deferred, how it ended, and every attempt's spans. Two system tables hold them, `_run` and `_span`. A `running` record is written before the first attempt and replaced, by id, after the run finishes, each in a short transaction of its own, never the run's, so a failed or timed-out run is recorded with its error, a committed run with its changes, and a run in progress is visible while it runs. A `running` record whose deadline has passed means the process died before it could report; the scheduler marks it `lost` on every tick, after a short grace period. Recording never fails a run: an error while writing a record is logged and swallowed, and a store without records, the in-memory one keeps a plain list, is simply skipped.
+Every reaction invocation leaves a record, however it was triggered: the seed of a run, a child triggered from another reaction, a deferred or scheduled run. One system table, `_run`, holds one row per invocation. A row describes its own context and nothing of its parent's: the reaction, its `reaction_id` as key, `parent_reaction_id`, `root_id` (the run's seed, equal to the id for the seed itself), `source` (`endpoint POST /orders`, `generic`, `cli`, `outbox`, `schedule`, `direct` for a seed, `trigger` for a child), the attempt it ran in, `outcome` (`running`, `ok`, `error`, `timeout`, `lost`), the error, start time, duration, `input`, `vars` (what it saved), `changes` (what it created or deleted through its context) and `enqueued` (what it deferred). The seed's row additionally carries the facts that exist only at commit: `attempt` is the attempt count, `flush_ms` the committing flush, `changes` every row the run's flush wrote with field changes included, since mutations are detected at flush and not attributable to one invocation, `enqueued` every outbox row the flush wrote, including data-change trigger matches, `committed`, and `deadline_at`. A child's `committed` says whether the run it belonged to committed; a child of a failed attempt never did, even if it ended `ok` itself, and a child that raised is recorded `error` even when its parent caught the exception and the run went on.
 
-A `_run` row: the run's reaction id as key, the reaction, `source` (`endpoint POST /orders`, `generic`, `cli`, `outbox`, `schedule`, `direct`), `outcome` (`running`, `ok`, `error`, `timeout`, `lost`), the error, attempt count, start time, duration, `input`, `vars`, `changes` (entity, id, kind, changed fields per row written) and `enqueued` (the outbox rows produced). A `_span` row per span of every attempt, tagged with the attempt number, so a retried run shows why its first attempt failed. Vars are encoded like `jsonb`; a value the codec rejects is stored as its `repr`.
+Capture happens in `invoke`, the one path every invocation takes, from the invocation's own context, and is buffered on the run's trace. The seed's row is written as `running` before the first attempt and replaced, with every attempt's child rows, after the run finishes, each write a short transaction of its own, never the run's, so a failed or timed-out run is recorded with its error, a committed run with its changes, and a run in progress is visible while it runs. A `running` row whose deadline has passed means the process died before it could report; the scheduler marks it `lost` on every tick, after a short grace period. Recording never fails a run: an error while writing a record is logged and swallowed, and a store without records, the in-memory one keeps a plain list, is simply skipped.
 
-`BACKEND_BUILDER_RUN_RECORDS` is `full` (default), `summary` (no input or vars) or `off`. `BACKEND_BUILDER_RUN_RETENTION_DAYS` (default 7) bounds the tables; the scheduler purges older records once an hour. These tables are what the admin console reads; they are never returned by the API.
+`BACKEND_BUILDER_RUN_RECORDS` is `full` (default), `summary` (no inputs or vars) or `off`. `BACKEND_BUILDER_RUN_RETENTION_DAYS` (default 7) bounds the table; the scheduler purges runs older than that once an hour, every invocation's row with its seed. This table is what the admin console reads; it is never returned by the API.
 
 ## 19. Metrics
 
@@ -443,7 +443,7 @@ Built.
 | Graph | entities with their tables and fields; reactions with what reaches them, endpoints, triggers, schedules, and their docstrings; endpoints with their budgets |
 | Reaction | one reaction: what reaches it, runs by outcome with p50 and p95 over the last 24 hours, outbox rows waiting for it, recent runs |
 | Runs | filter by reaction, outcome and source prefix |
-| Run | outcome, source, timing, attempts, the error; the span tree per attempt with sub-triggers nested; the input; the saved vars; the changes written; the deferred rows and their state |
+| Run | one invocation: outcome, source, timing, attempt, the error; the tree of invocations beneath it, per attempt for a seed, each linking to its own page; its input; its saved vars; what it created or deleted, or for a seed every change the run wrote; the outbox rows the subtree deferred, linked, with their state |
 | Outbox | pending, claimed and dead rows; a row's input, error and budget; requeue and discard |
 | Schedules | each schedule's cron, last seeded occurrence and next due; declared schedules not yet seeded |
 
@@ -490,3 +490,4 @@ Settled in discussion, listed so they are not reopened by accident.
 - Migrations are written by developers and reviewed in pull requests. The pipeline verifies, tests, applies and deploys; it never generates.
 - Secrets are environment variables under `SECRET_`, read on access. The library redacts what it has read from records and logs; it stores nothing.
 - No application metrics API. Anything worth recording is an entity; anything worth measuring is a reaction. Prometheus carries the runtime's metrics only.
+- A context belongs to one invocation. Entities are shared by the run; vars are not. Information passes between reactions only through input and the returned child context, by the developer's hand, and every invocation is recorded on its own.

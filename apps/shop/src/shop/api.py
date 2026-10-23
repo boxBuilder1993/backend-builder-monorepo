@@ -1,7 +1,9 @@
 """HTTP surface: request and response models, API reactions, builders, endpoints.
 
-API reactions translate the structured request into domain inputs. Builders
-read the root context after the run and shape the response.
+API reactions translate the structured request into domain inputs and lift
+what the domain reaction saved into their own context, since vars belong to
+one invocation. Builders read the root context after the run and shape the
+response.
 """
 
 from backend_builder import Context, Endpoint, Reaction, Reply
@@ -85,7 +87,7 @@ class ErrorOut(BaseModel):
 class CreateOrderApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         body = ctx.input["body"]
-        await ctx.trigger(
+        created = await ctx.trigger(
             CreateOrder,
             {
                 "user_id": body["user_id"],
@@ -93,6 +95,8 @@ class CreateOrderApi(Reaction):
                 "tenant": ctx.input["headers"]["x_tenant_id"],
             },
         )
+        assert created is not None
+        ctx.save("order", created.load("order"))  # what the child saved is the child's; lift it
         ctx.save("include_lines", True)
 
 
@@ -112,15 +116,21 @@ class UpdateLineApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         path = ctx.input["path"]
         body = {k: v for k, v in ctx.input["body"].items() if v is not None}
-        await ctx.trigger(
+        updated = await ctx.trigger(
             UpdateLine, {"order_id": path["order_id"], "line_id": path["line_id"], **body}
         )
+        assert updated is not None
+        ctx.save("line", updated.load("line"))
 
 
 class DeleteLineApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
         path = ctx.input["path"]
-        await ctx.trigger(DeleteLine, {"order_id": path["order_id"], "line_id": path["line_id"]})
+        deleted = await ctx.trigger(
+            DeleteLine, {"order_id": path["order_id"], "line_id": path["line_id"]}
+        )
+        assert deleted is not None
+        ctx.save("line", deleted.load("line"))
 
 
 # --- builders -----------------------------------------------------------------

@@ -103,14 +103,18 @@ class ErrorOut(BaseModel):
 
 class RegisterFitApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        await ctx.trigger(RegisterFit, dict(ctx.input["body"]))
+        child = await ctx.trigger(RegisterFit, dict(ctx.input["body"]))
+        assert child is not None
+        ctx.vars.update(child.vars)  # the domain outcome is the response's; lift it whole
 
 
 class RunFitApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        await ctx.trigger(
+        child = await ctx.trigger(
             RunFit, {"fit_id": ctx.input["path"]["fit_id"], "params": ctx.input["body"]["params"]}
         )
+        assert child is not None
+        ctx.vars.update(child.vars)  # the domain outcome is the response's; lift it whole
 
 
 class GetRunApi(Reaction):
@@ -128,14 +132,20 @@ class GetRunApi(Reaction):
 
 class InferApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        await ctx.trigger(Infer, {"model_id": ctx.input["path"]["model_id"], **ctx.input["body"]})
+        child = await ctx.trigger(
+            Infer, {"model_id": ctx.input["path"]["model_id"], **ctx.input["body"]}
+        )
+        assert child is not None
+        ctx.vars.update(child.vars)  # the domain outcome is the response's; lift it whole
 
 
 class EvaluateApi(Reaction):
     async def calculate(self, ctx: Context) -> None:
-        await ctx.trigger(
+        child = await ctx.trigger(
             Evaluate, {"infer_run_id": ctx.input["path"]["infer_run_id"], **ctx.input["body"]}
         )
+        assert child is not None
+        ctx.vars.update(child.vars)  # the domain outcome is the response's; lift it whole
 
 
 async def fit_out(ctx: Context) -> FitOut:

@@ -99,9 +99,11 @@ async def test_run_records_and_logs_mask_the_value(
     with pytest.raises(RuntimeError, match=r"provider rejected sk_live"):
         await run(store, Boom, {}, max_attempts=1)
 
-    ok, failed = store.records
+    by_reaction = {r.reaction.rsplit(".", 1)[-1]: r for r in store.records}
+    ok, child, failed = by_reaction["UseKey"], by_reaction["Child"], by_reaction["Boom"]
     assert ok.vars == {"header": "Bearer [secret:payments_api_key]"}
     assert ok.input == {"token": "[secret:payments_api_key]"}
+    assert child.input == {"token": "[secret:payments_api_key]"}  # children are redacted too
     assert failed.error == "RuntimeError: provider rejected [secret:payments_api_key]"
 
     # The configured stream handler redacts; the raw records caplog sees do not.

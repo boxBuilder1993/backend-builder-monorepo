@@ -14,7 +14,7 @@ from backend_builder import metrics, secrets
 from backend_builder.context import Context
 from backend_builder.log import get_logger
 from backend_builder.reaction import Reaction, invoke, qualified_name
-from backend_builder.records import Outcome, RecordLevel, RunRecord, SpanRecord, safe_jsonable
+from backend_builder.records import TRIGGER_SOURCE, Outcome, RecordLevel, RunRecord, safe_jsonable
 from backend_builder.schema import table_name
 from backend_builder.store import NotSupported, Session, Store
 from backend_builder.trace import Trace
@@ -62,11 +62,11 @@ async def run(
     the row's removal commit together. ``triggers`` are the app's data-change
     triggers, matched at flush.
 
-    A ``running`` record is written to the store before the first attempt and
-    replaced after the run, whatever its outcome, each in a transaction of
-    its own, at ``records`` level: what came in, what was saved, what was
-    written, what was deferred, and every attempt's spans. ``source`` names
-    where the run came from. Recording never fails the run.
+    A ``running`` record for the seed is written to the store before the
+    first attempt and replaced after the run, whatever its outcome, together
+    with one record per invocation the run made, every attempt included,
+    each write in a transaction of its own, at ``records`` level. ``source``
+    names where the run came from. Recording never fails the run.
     """
     attempts = max(1, max_attempts)
     reaction_id = reaction_id or str(uuid4())  # one id for the run, whatever the attempt count
@@ -127,6 +127,7 @@ class _RunState:
         self.attempts = 0
         self.traces: list[Trace] = []
         self.session: Session | None = None
+        self.root: Context | None = None
         self.deadline_at: datetime | None = None
 
 
@@ -144,9 +145,11 @@ async def _attempts(
     for attempt in range(1, attempts + 1):
         session = Session(store, triggers=triggers, default_timeout=timeout)
         ctx = Context(session, input, reaction_id=reaction_id)
+        ctx.trace.attempt = attempt
         state.attempts = attempt
         state.traces.append(ctx.trace)
         state.session = session
+        state.root = ctx
         try:
             async with store.run_scope():
                 with ctx.trace.span("run", ctx.reaction_id, None):
@@ -196,22 +199,56 @@ async def _record(
     outcome: Outcome,
     error: str | None,
 ) -> None:
+    """One row per invocation, every attempt included, plus the seed's row
+    with the commit-level facts. Inputs and vars at ``full`` level only."""
     session = state.session
     redact = secrets.default.redact_jsonable
-    spans = [
-        SpanRecord(
-            attempt=number,
-            name=s.name,
-            reaction_id=s.reaction_id,
-            parent_reaction_id=s.parent_reaction_id,
-            started_at=s.started_at,
-            duration_ms=s.duration_ms,
-            ok=s.ok,
-        )
-        for number, trace in enumerate(state.traces, start=1)
-        for s in trace.spans
-    ]
+    full = level == "full"
+
+    def payload(value: Any) -> dict[str, Any] | None:
+        return redact(safe_jsonable(value)) if full else None
+
     committed = session is not None and outcome == "ok"
+    rows: list[RunRecord] = []
+    for trace in state.traces:
+        last = trace is state.traces[-1]
+        for inv in trace.invocations:
+            if inv.reaction_id == reaction_id:
+                continue  # the seed's row is built below from the run's outcome
+            rows.append(
+                RunRecord(
+                    id=inv.reaction_id,
+                    root_id=reaction_id,
+                    parent_reaction_id=inv.parent_reaction_id,
+                    reaction=inv.reaction,
+                    source=TRIGGER_SOURCE,
+                    attempt=trace.attempt,
+                    outcome="timeout" if inv.outcome == "timeout" else inv.outcome,  # type: ignore[arg-type]
+                    error=secrets.default.redact(inv.error) if inv.error else None,
+                    committed=committed and last,
+                    started_at=inv.started_at,
+                    duration_ms=inv.duration_ms,
+                    flush_ms=None,
+                    input=payload(inv.input),
+                    vars=payload(inv.vars),
+                    changes=_own_changes(inv.created, inv.deleted),
+                    enqueued=list(inv.enqueued) if committed and last else [],
+                )
+            )
+    root = state.root
+    seed = (
+        next(
+            (i for i in reversed(state.traces[-1].invocations) if i.reaction_id == reaction_id),
+            None,
+        )
+        if state.traces
+        else None
+    )
+    flush = (
+        next((sp for sp in state.traces[-1].spans if sp.name == "flush"), None)
+        if state.traces
+        else None
+    )
     changes = (
         [
             {"entity": table_name(c.entity), "id": c.id, "kind": c.kind, "changed": list(c.changed)}
@@ -220,29 +257,42 @@ async def _record(
         if committed and session is not None
         else []
     )
-    record = RunRecord(
-        id=reaction_id,
-        reaction=qualified_name(reaction),
-        source=source,
-        outcome=outcome,
-        error=secrets.default.redact(error) if error is not None else None,
-        attempts=state.attempts,
-        started_at=state.started_at,
-        duration_ms=(time.perf_counter() - state.clock) * 1000,
-        input=redact(safe_jsonable(input)) if level == "full" else None,
-        vars=redact(safe_jsonable(session.vars))
-        if level == "full" and session is not None
-        else None,
-        changes=changes,
-        enqueued=list(session.enqueued) if committed and session is not None else [],
-        spans=spans,
-        deadline_at=state.deadline_at,
+    rows.append(
+        RunRecord(
+            id=reaction_id,
+            root_id=reaction_id,
+            parent_reaction_id=None,
+            reaction=qualified_name(reaction),
+            source=source,
+            attempt=state.attempts,
+            outcome=outcome,
+            error=secrets.default.redact(error) if error is not None else None,
+            committed=committed,
+            started_at=state.started_at,
+            duration_ms=(time.perf_counter() - state.clock) * 1000,
+            flush_ms=flush.duration_ms if flush is not None and committed else None,
+            input=payload(input),
+            vars=payload(seed.vars if seed is not None else (root.vars if root else {})),
+            changes=changes,
+            enqueued=list(session.enqueued) if committed and session is not None else [],
+            deadline_at=state.deadline_at,
+        )
     )
     try:
-        await store.record_run(record)
+        await store.record_run(rows)
     except NotSupported:
         pass
     except Exception as exc:  # recording must never fail the run
         logger.error(
             "run record failed reaction_id=%s error=%s: %s", reaction_id, type(exc).__name__, exc
         )
+
+
+def _own_changes(
+    created: list[tuple[str, str]], deleted: list[tuple[str, str]]
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for kind, pairs in (("created", created), ("deleted", deleted)):
+        for table, row_id in pairs:
+            rows.append({"entity": table, "id": row_id, "kind": kind, "changed": []})
+    return rows

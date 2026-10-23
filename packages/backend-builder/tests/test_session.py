@@ -36,7 +36,8 @@ class CreateAccount(Reaction):
 class OpenAccount(Reaction):
     async def calculate(self, ctx: Context) -> None:
         child = await ctx.trigger(CreateAccount, {"balance": 7})
-        assert child is not None and child.load("account") is ctx.load("account")
+        assert child is not None and "account" not in ctx.vars  # the child's save is the child's
+        ctx.save("account", child.load("account"))
         ctx.save("opened", True)
 
 
@@ -140,19 +141,20 @@ async def test_run_discards_everything_on_error(store: InMemoryStore) -> None:
     assert [a.balance for a in await store.get(Account)] == [10]
 
 
-async def test_saved_values_are_shared_across_the_run_and_visible_after(
+async def test_saved_values_belong_to_one_invocation_and_are_visible_after(
     store: InMemoryStore,
 ) -> None:
     ctx = await run(store, OpenAccount, {})
     assert ctx.load("opened") is True
-    assert ctx.load("account").balance == 7
+    assert ctx.load("account").balance == 7  # lifted from the child by the parent
     with pytest.raises(KeyError):
         ctx.load("missing")
 
 
 async def test_saved_values_are_not_flushed(store: InMemoryStore) -> None:
     session = Session(store)
-    session.vars["note"] = object()
+    ctx = Context(session, {})
+    ctx.save("note", object())
     await session.flush()
     assert await store.get(Account) == []
 
