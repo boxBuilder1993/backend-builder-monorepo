@@ -207,7 +207,8 @@ whose models never arrive is visible as `running` with `specs` larger than its t
 row can be requeued from the console.
 
 **Budgets.** `PullStore` an hour for a first pull, `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
-the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`.
+the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`. Retries are the runtime's default: every failure a reaction understands is an outcome, so a
+retry replays only infrastructure faults, such as two `CloseFitRun` runs for one sweep colliding.
 
 ## Data
 

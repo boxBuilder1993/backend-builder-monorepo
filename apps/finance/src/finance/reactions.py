@@ -38,7 +38,7 @@ class NightlySync(Reaction):
     Each child's summary is read from the context ``trigger`` returns; vars belong to one
     invocation and nothing crosses between reactions except through input and that context."""
 
-    LEG_KEYS = ("implemented", "written", "no_data", "error")
+    LEG_KEYS = ("implemented", "written", "no_data", "error", "notes")
     PUBLISH_KEYS = ("files", "commits", "bytes", "error")
 
     async def calculate(self, ctx: Context) -> None:

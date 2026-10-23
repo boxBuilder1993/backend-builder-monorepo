@@ -67,7 +67,9 @@ async def test_nightly_sync_runs_legs_then_publish_in_one_run(
     ctx = await run(store, NightlySync, {"scheduled_for": "2026-10-22T14:30:00+00:00"})
     legs = ctx.load("legs")
     assert list(legs) == ["reference", "nse", "us", "kite"]
-    assert legs["nse"] == {"implemented": True, "written": 1, "no_data": 1, "error": None}
+    assert legs["nse"] == {
+        "implemented": True, "written": 1, "no_data": 1, "error": None, "notes": {"requests": 2}
+    }  # fmt: skip
     assert legs["us"]["error"] == "ConnectionError: nseindia.com: timed out"
     assert legs["kite"]["implemented"] is False
     assert ctx.load("published")["files"] == 1 and uploaded == [
