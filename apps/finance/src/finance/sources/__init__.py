@@ -72,9 +72,16 @@ LEGS: dict[str, Leg] = {
 The leg modules import the types above, so they are registered at the bottom of this file."""
 
 SOURCES: dict[str, tuple[str, ...]] = {
-    "reference": ("corp_actions", "holidays", "symbol_changes", "equity_master", "securities"),
+    "reference": (
+        "nse_meta",
+        "corp_actions",
+        "holidays",
+        "symbol_changes",
+        "equity_master",
+        "securities",
+    ),
     "nse": ("nse_cm", "nse_full", "nse_index", "mcx", "equity", "index", "commodity"),
-    "us": ("yahoo", "us_listings", "us_equity"),
+    "us": ("nasdaq", "yahoo", "us_listings", "us_equity", "us_symbols"),
     "kite": ("kite_1m", "equity_1m", "kite_instruments"),
 }
 """The DataFile sources each leg owns; the ledger handed to a leg covers these."""
@@ -84,9 +91,12 @@ BUDGETS: dict[str, float] = {"reference": 3600, "nse": 3600, "us": 3600, "kite":
 
 
 def _register() -> None:
-    from finance.sources import nse
+    from finance.sources import kite, nse, reference, us
 
+    LEGS["reference"] = reference.leg
     LEGS["nse"] = nse.leg
+    LEGS["us"] = us.leg
+    LEGS["kite"] = kite.leg
 
 
 _register()

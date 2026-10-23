@@ -18,19 +18,19 @@ import polars as pl
 from finance.build.xlsx import to_csv_if_xlsx
 
 
-def _f(col: str, alias: str) -> pl.Expr:
+def as_float(col: str, alias: str) -> pl.Expr:
     return pl.col(col).str.strip_chars().cast(pl.Float64, strict=False).alias(alias)
 
 
-def _i(col: str, alias: str) -> pl.Expr:
+def as_int(col: str, alias: str) -> pl.Expr:
     return pl.col(col).str.strip_chars().cast(pl.Float64, strict=False).cast(pl.Int64).alias(alias)
 
 
-def _s(col: str, alias: str) -> pl.Expr:
+def as_str(col: str, alias: str) -> pl.Expr:
     return pl.col(col).str.strip_chars().alias(alias)
 
 
-def _d(col: str, alias: str, fmt: str) -> pl.Expr:
+def as_date(col: str, alias: str, fmt: str) -> pl.Expr:
     return (
         pl.col(col)
         .str.strip_chars()
@@ -93,37 +93,37 @@ def parse_cm(blob: bytes) -> pl.DataFrame:
     df = csv_frame(cm_text(blob).encode())
     if "TradDt" in df.columns:
         return df.select(
-            _d("TradDt", "date", "%Y-%m-%d"),
-            _s("ISIN", "isin"),
-            _s("TckrSymb", "symbol"),
-            _s("SctySrs", "series"),
-            _s("FinInstrmTp", "instrument"),
-            _f("OpnPric", "open"),
-            _f("HghPric", "high"),
-            _f("LwPric", "low"),
-            _f("ClsPric", "close"),
-            _f("LastPric", "last"),
-            _f("PrvsClsgPric", "prev_close"),
-            _i("TtlTradgVol", "volume"),
-            _f("TtlTrfVal", "turnover"),
-            _i("TtlNbOfTxsExctd", "trades"),
+            as_date("TradDt", "date", "%Y-%m-%d"),
+            as_str("ISIN", "isin"),
+            as_str("TckrSymb", "symbol"),
+            as_str("SctySrs", "series"),
+            as_str("FinInstrmTp", "instrument"),
+            as_float("OpnPric", "open"),
+            as_float("HghPric", "high"),
+            as_float("LwPric", "low"),
+            as_float("ClsPric", "close"),
+            as_float("LastPric", "last"),
+            as_float("PrvsClsgPric", "prev_close"),
+            as_int("TtlTradgVol", "volume"),
+            as_float("TtlTrfVal", "turnover"),
+            as_int("TtlNbOfTxsExctd", "trades"),
             pl.lit("udiff").alias("fmt"),
         )
     return df.select(
-        _d("TIMESTAMP", "date", "%d-%b-%Y"),
-        _s("ISIN", "isin"),
-        _s("SYMBOL", "symbol"),
-        _s("SERIES", "series"),
+        as_date("TIMESTAMP", "date", "%d-%b-%Y"),
+        as_str("ISIN", "isin"),
+        as_str("SYMBOL", "symbol"),
+        as_str("SERIES", "series"),
         pl.lit(None, dtype=pl.String).alias("instrument"),
-        _f("OPEN", "open"),
-        _f("HIGH", "high"),
-        _f("LOW", "low"),
-        _f("CLOSE", "close"),
-        _f("LAST", "last"),
-        _f("PREVCLOSE", "prev_close"),
-        _i("TOTTRDQTY", "volume"),
-        _f("TOTTRDVAL", "turnover"),
-        _i("TOTALTRADES", "trades"),
+        as_float("OPEN", "open"),
+        as_float("HIGH", "high"),
+        as_float("LOW", "low"),
+        as_float("CLOSE", "close"),
+        as_float("LAST", "last"),
+        as_float("PREVCLOSE", "prev_close"),
+        as_int("TOTTRDQTY", "volume"),
+        as_float("TOTTRDVAL", "turnover"),
+        as_int("TOTALTRADES", "trades"),
         pl.lit("old").alias("fmt"),
     )
 
@@ -139,12 +139,12 @@ def parse_full(blob: bytes) -> pl.DataFrame:
     """sec_bhavdata_full: date symbol series avg_price deliv_qty deliv_pct ('-' becomes null)."""
     df = csv_frame(to_csv_if_xlsx(blob))
     return df.select(
-        _d("DATE1", "date", "%d-%b-%Y"),
-        _s("SYMBOL", "symbol"),
-        _s("SERIES", "series"),
-        _f("AVG_PRICE", "avg_price"),
-        _i("DELIV_QTY", "deliv_qty"),
-        _f("DELIV_PER", "deliv_pct"),
+        as_date("DATE1", "date", "%d-%b-%Y"),
+        as_str("SYMBOL", "symbol"),
+        as_str("SERIES", "series"),
+        as_float("AVG_PRICE", "avg_price"),
+        as_int("DELIV_QTY", "deliv_qty"),
+        as_float("DELIV_PER", "deliv_pct"),
     )
 
 
@@ -178,19 +178,19 @@ def index_date(blob: bytes) -> date:
 def parse_index(blob: bytes) -> pl.DataFrame:
     df = csv_frame(blob)
     return df.select(
-        _d("Index Date", "date", "%d-%m-%Y"),
-        _s("Index Name", "index_name"),
-        _f("Open Index Value", "open"),
-        _f("High Index Value", "high"),
-        _f("Low Index Value", "low"),
-        _f("Closing Index Value", "close"),
-        _f("Points Change", "points_change"),
-        _f("Change(%)", "change_pct"),
-        _i("Volume", "volume"),
-        _f("Turnover (Rs. Cr.)", "turnover_cr"),
-        _f("P/E", "pe"),
-        _f("P/B", "pb"),
-        _f("Div Yield", "div_yield"),
+        as_date("Index Date", "date", "%d-%m-%Y"),
+        as_str("Index Name", "index_name"),
+        as_float("Open Index Value", "open"),
+        as_float("High Index Value", "high"),
+        as_float("Low Index Value", "low"),
+        as_float("Closing Index Value", "close"),
+        as_float("Points Change", "points_change"),
+        as_float("Change(%)", "change_pct"),
+        as_int("Volume", "volume"),
+        as_float("Turnover (Rs. Cr.)", "turnover_cr"),
+        as_float("P/E", "pe"),
+        as_float("P/B", "pb"),
+        as_float("Div Yield", "div_yield"),
     ).sort("index_name")
 
 
