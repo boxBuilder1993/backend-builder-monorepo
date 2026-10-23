@@ -88,10 +88,9 @@ class LoadRows(Reaction):
     Saves rows_path, rows and data_hash. Frames never travel through vars or the outbox."""
 
     async def calculate(self, ctx: Context) -> None:
-        await ctx.trigger(PullStore, {})
-        pulled = {
-            k: ctx.vars.pop(k, None) for k in ("status", "revision", "files", "bytes", "error")
-        }
+        pull = await ctx.trigger(PullStore, {})
+        assert pull is not None
+        pulled = {k: pull.vars.get(k) for k in ("status", "revision", "files", "bytes", "error")}
         ctx.save("store", pulled)
         if pulled["status"] == "failed":
             raise RuntimeError(f"store unavailable: {pulled['error']}")
@@ -136,11 +135,11 @@ class RunFit(Reaction):
             status="running",
             started_at=_now(),
         )
-        await ctx.trigger(LoadRows, {"query": fit.query, "params": params, "key": fit.key})
-        run.rows = int(ctx.vars.pop("rows", 0))
-        run.data_hash = ctx.vars.pop("data_hash", None)
-        rows_path = ctx.vars.pop("rows_path", None)
-        ctx.vars.pop("store", None)
+        loaded = await ctx.trigger(LoadRows, {"query": fit.query, "params": params, "key": fit.key})
+        assert loaded is not None
+        run.rows = int(loaded.vars.get("rows", 0))
+        run.data_hash = loaded.vars.get("data_hash")
+        rows_path = loaded.vars.get("rows_path")
         models: list[str] = []
         for spec in specs:
             m = ctx.create(
@@ -211,7 +210,11 @@ class FitModel(Reaction):
         model.sha256, model.bytes = done.sha256, done.bytes
         model.cache_path = job.out_dir
         model.status = "uploading"
-        await ctx.trigger(UploadModel, {"model_id": model.id})
+        uploaded = await ctx.trigger(UploadModel, {"model_id": model.id})
+        assert uploaded is not None
+        for key in ("upload", "revision", "error"):  # the upload's outcome, lifted for the caller
+            if key in uploaded.vars:
+                ctx.save(key, uploaded.vars[key])
         ctx.save("status", model.status)
 
     @staticmethod
@@ -220,11 +223,12 @@ class FitModel(Reaction):
             frame = await asyncio.to_thread(pl.read_parquet, hint)
             if data.frame_hash(frame, tuple(fit.key)) == run.data_hash:
                 return hint
-        await ctx.trigger(LoadRows, {"query": fit.query, "params": run.params, "key": fit.key})
-        path = str(ctx.vars.pop("rows_path"))
-        h = ctx.vars.pop("data_hash", None)
-        ctx.vars.pop("rows", None)
-        ctx.vars.pop("store", None)
+        loaded = await ctx.trigger(
+            LoadRows, {"query": fit.query, "params": run.params, "key": fit.key}
+        )
+        assert loaded is not None
+        path = str(loaded.load("rows_path"))
+        h = loaded.vars.get("data_hash")
         if run.data_hash and h != run.data_hash:
             raise RuntimeError("the data changed since the run started; start a new FitRun")
         return path
@@ -304,12 +308,11 @@ class Infer(Reaction):
         ctx.save("infer_run_id", run.id)
         try:
             directory = await asyncio.to_thread(self._model_dir, ctx.secret, model)
-            await ctx.trigger(
+            loaded = await ctx.trigger(
                 LoadRows, {"query": run.query, "params": params, "key": list(schema.key)}
             )
-            rows_path = str(ctx.vars.pop("rows_path"))
-            for k in ("rows", "data_hash", "store"):
-                ctx.vars.pop(k, None)
+            assert loaded is not None
+            rows_path = str(loaded.load("rows_path"))
             rel = f"parquet/inference/{run.id}.parquet"
             n, unknown = await asyncio.to_thread(
                 _score, directory, schema, rows_path, poller.data_root() / rel, model.id, run.id
