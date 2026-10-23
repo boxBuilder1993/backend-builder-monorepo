@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -12,8 +14,11 @@ from fastapi.templating import Jinja2Templates
 
 from backend_builder.admin import queries
 from backend_builder.app import App
+from backend_builder.engine import run
 from backend_builder.entity import qualified_name as entity_name
+from backend_builder.outbox import OutboxEntry
 from backend_builder.reaction import qualified_name as reaction_name
+from backend_builder.records import RecordLevel
 from backend_builder.schema import persisted_fields, table_name
 from backend_builder.store import NotSupported, Store
 from backend_builder.triggers import OnSchedule
@@ -22,9 +27,12 @@ TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 COOKIE = "backend_builder_admin"
 
 
-def create_admin_app(app: App, store: Store, *, token: str | None = None) -> FastAPI:
+def create_admin_app(
+    app: App, store: Store, *, token: str | None = None, records: RecordLevel = "full"
+) -> FastAPI:
     """The console over ``app`` and ``store``. With ``token`` set, every page
-    needs it, entered once on the login page and kept in a cookie."""
+    needs it, entered once on the login page and kept in a cookie. ``records``
+    is the level runs triggered from the console are recorded at."""
     console = FastAPI(title=f"{app.name} admin", docs_url=None, redoc_url=None, openapi_url=None)
     filters: dict[str, Any] = TEMPLATES.env.filters  # type: ignore[assignment]
     filters["reaction_short"] = _short
@@ -87,7 +95,68 @@ def create_admin_app(app: App, store: Store, *, token: str | None = None) -> Fas
             recent = await queries.runs(store, reaction=name, limit=50, roots_only=False)
         except NotSupported:
             stats, recent = None, []
-        return render(request, "reaction.html", info=info, stats=stats, recent=recent)
+        return render(
+            request, "reaction.html", info=info, stats=stats, recent=recent, input="{}", error=None
+        )
+
+    @console.post("/reactions/{name}/trigger")
+    async def trigger(
+        request: Request, name: str, input: str = Form("{}"), mode: str = Form("run")
+    ) -> Response:
+        """Run ``name`` with the JSON ``input`` now, source ``admin``, and land on
+        its run page; or, with ``mode=enqueue``, write an outbox row for the
+        worker and land on that row."""
+        info = next((r for r in _reactions(app) if r["qualified"] == name), None)
+        if info is None:
+            return render(request, "missing.html", what=f"reaction {name}")
+        try:
+            payload = _parse_input(input)
+        except ValueError as exc:
+            return await _reaction_page(request, info, name, input=input, error=str(exc))
+        reaction = app.resolve(name)
+        if mode == "enqueue":
+            entry = OutboxEntry(reaction=name, input=payload, timeout_seconds=None)
+            try:
+                await store.enqueue([entry])
+            except NotSupported:
+                return await _reaction_page(
+                    request, info, name, input=input, error="this store has no outbox"
+                )
+            return RedirectResponse(f"/outbox/{entry.id}", status_code=303)
+        reaction_id = str(uuid4())
+        try:
+            await run(
+                store,
+                reaction,
+                payload,
+                reaction_id=reaction_id,
+                max_attempts=app.max_attempts,
+                timeout=app.timeout,
+                triggers=app.triggers,
+                source="admin",
+                records=records,
+            )
+        except Exception:  # noqa: BLE001 - the run's record carries the outcome
+            pass
+        return RedirectResponse(f"/runs/{reaction_id}", status_code=303)
+
+    async def _reaction_page(
+        request: Request, info: dict[str, Any], name: str, *, input: str, error: str | None
+    ) -> HTMLResponse:
+        try:
+            stats = await queries.reaction_stats(store, name)
+            recent = await queries.runs(store, reaction=name, limit=50, roots_only=False)
+        except NotSupported:
+            stats, recent = None, []
+        return render(
+            request,
+            "reaction.html",
+            info=info,
+            stats=stats,
+            recent=recent,
+            input=input,
+            error=error,
+        )
 
     @console.get("/runs", response_class=HTMLResponse)
     async def runs(
@@ -165,6 +234,17 @@ def _short(name: object) -> str:
 
 def _ms(value: object) -> str:
     return f"{float(str(value)):.1f} ms"
+
+
+def _parse_input(text: str) -> dict[str, Any]:
+    """A JSON object, or ``ValueError`` saying why not."""
+    try:
+        parsed: Any = json.loads(text or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"input is not valid JSON: {exc.msg} at position {exc.pos}") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("input must be a JSON object")
+    return {str(k): v for k, v in parsed.items()}  # type: ignore[union-attr]
 
 
 def _reactions(app: App) -> list[dict[str, Any]]:

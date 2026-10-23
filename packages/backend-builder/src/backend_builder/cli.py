@@ -238,7 +238,7 @@ def admin(
     configure((log_level or current.log_level).upper())
     app = load_app(package)
     store = app.check_store(app.create_store())
-    console = create_admin_app(app, store, token=current.admin_token)
+    console = create_admin_app(app, store, token=current.admin_token, records=current.run_records)
     logger.info(
         "admin console app=%s host=%s port=%d token=%s",
         app.name,
