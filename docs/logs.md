@@ -31,7 +31,7 @@ Processes write to stdout and nothing else. The container runtime captures the s
 Where it runs:
 
 - **Compose.** `loki`, `alloy` and `grafana` services behind a `logs` profile. Alloy reads Docker's log files for the compose project. `docker compose --profile shop --profile logs up` gives the whole picture; without the profile, logs stay in `docker compose logs` and the console's panel says so.
-- **Host under systemd.** Alloy reads the journal with the unit's `app` and `process` from the unit name. Same labels, same Loki.
+- **Host under systemd.** The `alloy-journal` compose service (same `logs` profile) tails `/var/log/journal` and takes `app` and `process` from the unit name `bb@<app>:<process>.service`. Same labels, same Loki. The env file of an app on the host sets `BACKEND_BUILDER_LOGS_URL=http://127.0.0.1:3100` (and the Grafana URL) so its console shows the panel.
 - **Kubernetes.** Alloy as a DaemonSet reading `/var/log/pods`, with the labels from the pod's `app` and `pool` labels, which the manifests already set. Loki as a single-binary Deployment with a persistent volume for one cluster; object storage when there is more than one.
 
 ## 3. Retention: one day

@@ -1,0 +1,38 @@
+// Alloy for a host: tail the systemd journal of the app units (bb@<app>:<process>.service, user
+// units run by bin/bb-run) and push to Loki with the labels app and process taken from the unit
+// name (docs/logs.md §2, "Host under systemd"). Ids stay inside the JSON line; never labels.
+
+loki.source.journal "units" {
+  path          = "/var/log/journal"
+  max_age       = "24h"
+  relabel_rules = loki.relabel.units.rules
+  labels        = { source = "journal" }
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.relabel "units" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_user_unit"]
+    regex         = "bb@([^:]+):([^.]+)\\.service"
+    target_label  = "app"
+    replacement   = "$1"
+  }
+  rule {
+    source_labels = ["__journal__systemd_user_unit"]
+    regex         = "bb@([^:]+):([^.]+)\\.service"
+    target_label  = "process"
+    replacement   = "$2"
+  }
+  rule {
+    source_labels = ["app"]
+    regex         = ""
+    action        = "drop"
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
