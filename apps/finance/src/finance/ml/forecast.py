@@ -891,20 +891,30 @@ EVALUATION_METRICS = [
     "r2",
     "net_return_raw",
     "trades_raw",
+    "net_return_topk",
+    "trades_topk",
+    "spread_topk",
 ]
 
 
 def evaluation_params(
-    threshold: float, cost_bps: float = 10.0, by: str | None = "month"
+    threshold: float,
+    cost_bps: float = 10.0,
+    by: str | None = "month",
+    top_k: int = 5,
+    rescale: float = 1.0,
 ) -> dict[str, Any]:
-    """Params for an Evaluation of a forecast InferRun: IC within ts, raw net return where the
-    predicted raw move (pred_y × scale) clears the threshold, grouped by month."""
+    """Params for an Evaluation of a forecast InferRun: IC within ts; raw net return where the
+    predicted raw move (pred_y × scale × rescale) clears the threshold; the top-k rows per decision
+    point; grouped by month. ``rescale`` is the calibration slope of an earlier validation."""
     out: dict[str, Any] = {
         "group": "ts",
         "threshold": threshold,
         "cost_bps": cost_bps,
         "return_column": "r",
         "scale_column": "scale",
+        "top_k": top_k,
+        "rescale": rescale,
     }
     if by:
         out["by"] = by

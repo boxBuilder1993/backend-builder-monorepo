@@ -159,8 +159,9 @@ def calibration_monotone(table: pl.DataFrame, col: str, params: dict[str, Any]) 
 
 def _raw(table: pl.DataFrame, col: str, params: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     """The raw return and the predicted raw move: pred_<col> times the scale column (params:
-    return_column, default r; scale_column, default scale). For a target that is already a raw
-    return, set scale_column to null."""
+    return_column, default r; scale_column, default scale), times ``rescale`` (default 1; the
+    calibration slope of a validation, so a tree model's exaggerated magnitudes are brought to size
+    before any threshold). For a target that is already a raw return, set scale_column to null."""
     rc = str(params.get("return_column", "r"))
     sc = params.get("scale_column", "scale")
     need = [rc, f"pred_{col}"] + ([str(sc)] if sc else [])
@@ -172,7 +173,7 @@ def _raw(table: pl.DataFrame, col: str, params: dict[str, Any]) -> tuple[np.ndar
     p = sub[f"pred_{col}"].to_numpy().astype("float64")
     if sc:
         p = p * sub[str(sc)].to_numpy().astype("float64")
-    return r, p
+    return r, p * float(params.get("rescale", 1.0))
 
 
 @table_metric("net_return_raw")
@@ -190,6 +191,61 @@ def net_return_raw(table: pl.DataFrame, col: str, params: dict[str, Any]) -> flo
 def trades_raw(table: pl.DataFrame, col: str, params: dict[str, Any]) -> float:
     _, p = _raw(table, col, params)
     return float(np.sum(p > float(params.get("threshold", 0.001))))
+
+
+def _topk(table: pl.DataFrame, col: str, params: dict[str, Any]) -> pl.DataFrame:
+    """The rows a cross-sectional consumer would take: the ``top_k`` (default 5) highest predictions
+    within each decision point (``group``, default ts), among the points with at least
+    ``min_cross_section`` rows. Independent of calibration: a ranking, not a threshold."""
+    group = str(params.get("group", "ts"))
+    k = int(params.get("top_k", 5))
+    least = int(params.get("min_cross_section", 20))
+    rc = str(params.get("return_column", "r"))
+    need = [group, rc, f"pred_{col}"]
+    missing = [c for c in need if c not in table.columns]
+    if missing:
+        raise ValueError(f"top-k metrics need the columns {missing} in the table")
+    return (
+        table.select(need)
+        .drop_nulls()
+        .with_columns(
+            pl.col(f"pred_{col}").rank(method="ordinal", descending=True).over(group).alias("_rk"),
+            pl.len().over(group).alias("_n"),
+        )
+        .filter((pl.col("_n") >= least) & (pl.col("_rk") <= k))
+    )
+
+
+@table_metric("net_return_topk")
+def net_return_topk(table: pl.DataFrame, col: str, params: dict[str, Any]) -> float:
+    """Mean raw return of the top-k rows per decision point, minus cost_bps (default 10)."""
+    picked = _topk(table, col, params)
+    if picked.is_empty():
+        return 0.0
+    rc = str(params.get("return_column", "r"))
+    return (
+        float(picked[rc].to_numpy().astype("float64").mean())
+        - float(params.get("cost_bps", 10.0)) / 1e4
+    )
+
+
+@table_metric("trades_topk")
+def trades_topk(table: pl.DataFrame, col: str, params: dict[str, Any]) -> float:
+    return float(_topk(table, col, params).height)
+
+
+@table_metric("spread_topk")
+def spread_topk(table: pl.DataFrame, col: str, params: dict[str, Any]) -> float:
+    """Top-k mean raw return minus bottom-k mean raw return per decision point, averaged: the gross
+    long-short edge of the ranking before costs."""
+    rc = str(params.get("return_column", "r"))
+    top = _topk(table, col, params)
+    bottom = _topk(table.with_columns((-pl.col(f"pred_{col}")).alias(f"pred_{col}")), col, params)
+    if top.is_empty() or bottom.is_empty():
+        return 0.0
+    return float(
+        top[rc].to_numpy().astype("float64").mean() - bottom[rc].to_numpy().astype("float64").mean()
+    )
 
 
 def _groups(table: pl.DataFrame, by: str) -> list[tuple[str, pl.DataFrame]]:
