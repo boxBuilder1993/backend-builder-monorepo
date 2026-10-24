@@ -55,6 +55,14 @@ services:
     volumes:
       - postgres:/var/lib/postgresql/data
       - ./compose/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    # Memory: a floor, not a ceiling. Postgres is small here (tens of MB); the apps' fits and row
+    # builds are what fill the box, and under pressure the kernel must kill one of those, not a
+    # Postgres backend (a lost backend restarts the whole server and drops every connection).
+    # mem_reservation is a soft guarantee; oom_score_adj makes it the last candidate for the killer;
+    # shm_size lifts Docker's 64 MB /dev/shm, which parallel queries on big tables outgrow.
+    mem_reservation: 1g
+    oom_score_adj: -900
+    shm_size: 1g
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U backend_builder"]
       interval: 2s
