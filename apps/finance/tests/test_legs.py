@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from finance.build import kite as BK
 from finance.build import reference as R
 from finance.build import us as BU
 from finance.files import marker_rel, raw_rel
+from finance.settings import KITE_EXTRA
 from finance.sources import Ledger
 from finance.sources import kite as K
 from finance.sources import us as US
@@ -365,7 +367,11 @@ def test_index_snapshots_are_written_on_change_only_and_build_one_table(
     monkeypatch.setattr(
         REF, "INDEX_FILES", {"NIFTY 500": "ind_nifty500list", "NIFTY BANK": "ind_niftybanklist"}
     )
-    monkeypatch.setattr(REF, "retry", lambda fn, what: fn())
+
+    def _no_retry(fn: Callable[[], bytes], what: str) -> bytes:
+        return fn()
+
+    monkeypatch.setattr(REF, "retry", _no_retry)
     day1, day2, day3 = date(2026, 10, 24), date(2026, 10, 25), date(2026, 10, 26)
     w1 = REF.fetch_indices(tmp_path, day1, _Archives())  # type: ignore[arg-type]
     assert sorted(w.path for w in w1) == [
@@ -396,8 +402,6 @@ def test_index_snapshots_are_written_on_change_only_and_build_one_table(
 
 
 def test_kite_universe_is_liquid_or_index_or_recent(tmp_path: Path) -> None:
-    import duckdb  # noqa: F401 - the universe queries the daily parquet
-
     days = [date(2026, 1, 1) + timedelta(days=i) for i in range(130)]
     rows = []
     for d in days:
@@ -465,8 +469,8 @@ def test_kite_universe_is_liquid_or_index_or_recent(tmp_path: Path) -> None:
     assert (
         "THIN" not in got and "OLDMEMBER" not in got
     )  # thin and not a member; member of an old snapshot only
-    assert counts == {"liquid": 1, "index": 1, "recent": 1, "universe": 3 + len(K.KITE_EXTRA)}
-    assert set(missing) >= set(K.KITE_EXTRA)  # the ETFs have no token in this fixture
+    assert counts == {"liquid": 1, "index": 1, "recent": 1, "universe": 3 + len(KITE_EXTRA)}
+    assert set(missing) >= set(KITE_EXTRA)  # the ETFs have no token in this fixture
 
 
 def test_kite_fetch_stops_cleanly_at_the_deadline(
