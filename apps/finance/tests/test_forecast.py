@@ -765,7 +765,10 @@ def test_window_study_grid_pairs_and_tables(tmp_path: Path) -> None:
     synthetic_mirror(tmp_path)
     con = data.connect(tmp_path)
     params = {**windows.DEFAULTS, "start": "2025-01-01", "min_turnover": 1.0, "min_sessions": 1}
-    rows = data.run_query(con, windows.study_sql(), params)
+    rows = pl.concat(
+        data.run_query(con, windows.study_sql(), {**params, "buckets": 3, "bucket": b})
+        for b in range(3)
+    )
     a = rows.filter(pl.col("symbol") == "AAA")
     # 300 same-day pairs per year, 625 into the next session; the fixture's two days are Monday
     # and Tuesday, so every cross-session window is a plain night, none spans a break
