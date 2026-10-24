@@ -17,7 +17,7 @@ import pytest
 from finance.build import kite as BK
 from finance.build import reference as R
 from finance.build import us as BU
-from finance.files import marker_rel, raw_rel
+from finance.files import marker_rel, parquet_rel, raw_rel, reference_rel
 from finance.settings import KITE_EXTRA
 from finance.sources import Ledger
 from finance.sources import kite as K
@@ -527,7 +527,7 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
     # the day's file and Parquet exist for RELIANCE only
     K.fetch(tmp_path, date(2026, 10, 22), Ledger(), object(), old, fetcher=day_fetcher)
     K.build(tmp_path)
-    assert pl.read_parquet(tmp_path / K.parquet_rel(K.TABLE, date(2026, 10, 21)))[
+    assert pl.read_parquet(tmp_path / parquet_rel(K.TABLE, date(2026, 10, 21)))[
         "symbol"
     ].to_list() == ["RELIANCE"]
 
@@ -546,7 +546,7 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
     supp = [w for w in written if w.kind == "raw"]
     assert len(supp) == 1 and "_s" in supp[0].path and supp[0].day == date(2026, 10, 21)
     assert counts == {"backfill_requests": 1, "backfill_symbols": 1}
-    hist = pl.read_parquet(tmp_path / K.reference_rel(K.HISTORY))
+    hist = pl.read_parquet(tmp_path / reference_rel(K.HISTORY))
     assert sorted(hist["symbol"].to_list()) == [
         "RELIANCE",
         "TCS",
