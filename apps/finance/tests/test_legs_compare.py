@@ -84,6 +84,9 @@ def test_us_listings_latest_day() -> None:
 
 
 def test_equity_1m_days() -> None:
-    for day in _days("raw/kite_1m/*/kite_1m_*.jsonl.gz", slice(8, 16)):
-        raw = STORE / raw_rel("kite_1m", day, "jsonl.gz")
-        _same(BK.parse(raw.read_bytes(), day), parquet_rel("equity_1m", day))
+    """A day's Parquet is its raw file plus every supplement (instruments backfilled later), deduped."""
+    for day in sorted(set(_days("raw/kite_1m/*/kite_1m_????????*.jsonl.gz", slice(8, 16)))):
+        files = sorted((STORE / "raw/kite_1m").glob(f"*/kite_1m_{day:%Y%m%d}*.jsonl.gz"))
+        frames = [BK.parse(f.read_bytes(), day) for f in files]
+        df = pl.concat(frames).unique(subset=["symbol", "ts"], keep="last").sort(["symbol", "ts"])
+        _same(df, parquet_rel("equity_1m", day))

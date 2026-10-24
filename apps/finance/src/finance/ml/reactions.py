@@ -428,7 +428,7 @@ class Evaluate(Reaction):
 
 
 class Screen(Reaction):
-    """The per-feature IC screen of the forecast rows, as a run. Input: {"grain": "minute" | "daily",
+    """The per-feature IC screen of the forecast rows, as a run. Input: {"grain": minute | daily,
     "market": "nse" | "us" (daily only), "horizon": minutes or sessions, "params"?: query overrides,
     "rows_path"?: an existing rows file to screen instead of building one}. Rows come through
     LoadRows (PullStore, then the query in quarter chunks); the IC per feature per year is written
@@ -521,7 +521,8 @@ class Validate(Reaction):
         for m in models:
             prior = await ctx.query(
                 InferRun,
-                "select * from infer_run where model_id = :m and label = :label and status = 'done' "
+                "select * from infer_run where model_id = :m and label = :label "
+                "and status = 'done' "
                 "order by created_at desc limit 1",
                 m=m.id,
                 label=label,
