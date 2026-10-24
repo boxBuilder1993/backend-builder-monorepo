@@ -250,7 +250,8 @@ class RetryModels(Reaction):
     fixed (a GPU out of memory, a killed worker) without a new FitRun."""
 
     async def calculate(self, ctx: Context) -> None:
-        ids = [str(i) for i in ctx.input.get("model_ids") or []]
+        raw: list[Any] = list(ctx.input.get("model_ids") or [])
+        ids = [str(i) for i in raw]
         if run_id := ctx.input.get("fit_run_id"):
             found = await ctx.query(
                 Model,
