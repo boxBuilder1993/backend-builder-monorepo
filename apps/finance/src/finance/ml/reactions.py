@@ -106,11 +106,7 @@ def _load(root: Path, q: str, params: dict[str, Any], out: Path) -> tuple[int, s
     """DuckDB writes the Parquet and hashes it; no frame of the rows exists in this process."""
     con = data.connect(root)
     try:
-        tmp = data.work_dir() / "duckdb_tmp"
-        tmp.mkdir(parents=True, exist_ok=True)
-        con.execute(
-            f"set temp_directory='{tmp.as_posix()}'; set memory_limit='{data.DUCKDB_MEMORY}'"
-        )
+        data.tune(con)
         n = data.write_rows(con, q, params, out)
     finally:
         con.close()

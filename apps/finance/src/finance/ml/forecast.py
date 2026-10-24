@@ -383,7 +383,8 @@ r1 as (
            a.tick / nullif(d.d_close, 0) * 1e4 as tick_bps,
            {_SECTOR_CASE} as sector_idx,
            dy.prev_day
-    from b3 b
+    from (select * exclude (open, high, low, volume, turnover, ret1, cumvol, clv_bar, or_high, or_low,
+                            vol5, vol15, turn5, turn30) from b3) b
     left join idx i using (ts)
     asof left join d1 d on b.symbol = d.symbol and b.day > d.date
     asof left join i1 ii on b.day > ii.date
@@ -393,6 +394,7 @@ r1 as (
     left join attr a on a.symbol = b.symbol and a.day = b.day
     left join days dy on dy.day = b.day
     where b.m between 0 and {SESSION_MINUTES - 1}  -- the regular session only: Muhurat evening bars run past it
+      and b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover  -- the decision points, before the wide joins
 ),
 r2 as (  -- peers at the same minute, breadth at the same minute
     select r.*,
@@ -429,7 +431,6 @@ rows_ as (
            greatest(0, {_EXPIRY_DAY} - day) as dte,
            (day - prev_day > case when isodow(day) = 1 then 3 else 1 end)::int as after_holiday
     from r2
-    where m % :step_minutes = 0 and turn_liq >= :min_turnover
 )
 select *,
        sig1 * sqrt(least(:horizon_minutes, m_left - 1)) as scale,
@@ -942,9 +943,7 @@ def materialise(
 ) -> int:
     """Run the rows query once and write the frame to Parquet; the screen reads three columns at a
     time from it."""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    data.relation(con, sql, params).write_parquet(out.as_posix(), compression="zstd")
-    return int(con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0])
+    return data.write_rows(con, sql, params, out)
 
 
 def screen(
@@ -1078,11 +1077,7 @@ def main(argv: list[str] | None = None) -> None:
         tag = f"h{a.horizon}_s{a.step}_v{a.vol}_l{a.liq}_t{int(a.min_turnover)}_{a.start}_{a.end}"
     out = a.out or data.work_dir() / "forecast" / f"{tag}.parquet"
     con = data.connect(a.root)
-    tmp = data.work_dir() / "duckdb_tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    con.execute(
-        f"set threads={a.threads}; set memory_limit='{a.memory}'; set temp_directory='{tmp.as_posix()}'"
-    )
+    data.tune(con, threads=a.threads, memory=a.memory)
     import time
 
     t0 = time.time()

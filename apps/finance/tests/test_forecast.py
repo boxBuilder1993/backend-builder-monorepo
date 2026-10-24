@@ -628,3 +628,36 @@ def test_topk_and_rescale_metrics() -> None:
     )  # the exaggerated magnitudes clear the threshold more often
     with pytest.raises(ValueError, match="top-k metrics need"):
         metrics.evaluate(table.drop("r"), ["y"], ["net_return_topk"], {})
+
+
+def test_write_rows_in_chunks_matches_one_shot_and_drops_the_warm_up(tmp_path: Path) -> None:
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(
+        "create table t as select make_timestamp(2025, 1, 1, 10, 0, 0) + interval (i) day as ts, "
+        "i as x from range(300) r(i)"
+    )
+    sql = (
+        "select ts, x, sum(x) over (order by ts rows between 2 preceding and current row) as s3 "
+        "from t where ts::date between :start and :end"
+    )
+    params = {"start": "2025-02-01", "end": "2025-09-30"}
+    one = tmp_path / "one.parquet"
+    chunked = tmp_path / "chunked.parquet"
+    n1 = data.write_rows(con, sql, params, one, chunk_months=0)
+    n2 = data.write_rows(con, sql, params, chunked, chunk_months=3, warmup_days=10)
+    a = pl.read_parquet(one).sort("ts")
+    b = pl.read_parquet(chunked).sort("ts")
+    assert n1 == n2 == a.height == b.height == 242  # Feb 1 to Sep 30
+    assert a["ts"].to_list() == b["ts"].to_list() and a["x"].to_list() == b["x"].to_list()
+    # the window needs two prior rows: the one-shot build lacks them at its start, the chunked one
+    # has them from the warm-up at every chunk boundary, the first included
+    assert a["s3"][0] == a["x"][0] and b["s3"][0] == b["x"][0] + b["x"][0] - 1 + b["x"][0] - 2
+    i = b["ts"].to_list().index(datetime(2025, 5, 1, 10, 0))
+    assert b["s3"][i] == b["x"][i] + b["x"][i - 1] + b["x"][i - 2]
+    assert not (tmp_path / "chunked.parts").exists()
+    assert data.chunks(date(2025, 11, 15), date(2026, 2, 10), 3) == [
+        (date(2025, 11, 15), date(2026, 1, 31)),
+        (date(2026, 2, 1), date(2026, 2, 10)),
+    ]
