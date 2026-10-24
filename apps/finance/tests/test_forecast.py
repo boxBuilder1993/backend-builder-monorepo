@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -667,7 +668,7 @@ def test_write_rows_in_chunks_matches_one_shot_and_drops_the_warm_up(tmp_path: P
 
 def test_features_from_screen_keeps_stable_signal_and_every_context_feature(tmp_path: Path) -> None:
     years = [2023, 2024, 2025, 2026]
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
     for y in years:
         rows += [
             {"feature": "r5", "year": y, "ic": -0.05, "se": 0.001, "points": 100},  # stable, strong
