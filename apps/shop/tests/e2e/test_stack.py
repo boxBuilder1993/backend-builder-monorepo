@@ -120,7 +120,9 @@ async def test_secret_reaches_the_reaction_and_never_the_record_or_logs(
             "and input ->> 'id' = :id",
             id=order["id"],
         ),
-        lambda rows: len(rows) == 1,
+        lambda rows: (
+            len(rows) == 1 and rows[0]["outcome"] != "running"
+        ),  # the row exists while it runs
     )
     assert records[0]["outcome"] == "ok"
     assert records[0]["vars"] == {
