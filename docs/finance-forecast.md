@@ -552,3 +552,17 @@ choose what to hold, rather than to time 15-minute trades, are the two direction
 - `Fit.name` is unique: a corrected definition is a new name (`forecast 15m v2`).
 - Scoring 6 million rows is 9 minutes, almost all of it the rows build; the prediction itself is
   seconds. Evaluations are 4 seconds each.
+
+## Second round, in progress (2026-10-24)
+
+Agreed: all the features discussed (attributes, peers and sectors, breadth and regime, overseas,
+participation, opening range, calendar), horizons 15/30/45/60 minutes on minute rows and 1 and 21
+sessions on daily rows, two splits (fit through 2025 and test on 2026; fit on 2026 H1 and test on
+2026 H2, both judged on July to October), top-k evaluation with the calibration rescale, and the same
+daily-grain features for the US market to compare how well it predicts against the NSE.
+
+Built: `ROWS_SQL` with 99 features; `daily_sql(market)` for NSE and US from one template
+(`DAILY_MARKETS`), 64 and 53 features; the Kite universe widened to the Nifty 500 with sector labels
+from NSE's constituent files and a per-symbol history backfill; the US screener snapshot and
+`us_sectors`; the sector indices (Kite) and sector ETFs (Yahoo) as context. The screens and fits
+follow once the backfills have landed.

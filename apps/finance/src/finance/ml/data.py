@@ -78,6 +78,7 @@ def install_views(con: duckdb.DuckDBPyConnection, root: Path) -> list[str]:
         "securities",
         "index_constituents",
         "kite_instruments",
+        "us_sectors",
     ):
         if _has_ref(root, ref):
             view(ref, f"select * from read_parquet('{_ref(root, ref)}')")

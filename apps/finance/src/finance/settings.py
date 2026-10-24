@@ -53,7 +53,33 @@ LINK_MAX_GAP_DAYS = 15
 # US equities (Nasdaq Trader listings, Yahoo prices)
 NASDAQ_TRADER = "https://www.nasdaqtrader.com/dynamic/SymDir/{f}"
 LISTING_FILES = ("nasdaqlisted.txt", "otherlisted.txt")
-US_BENCHMARKS = ("SPY", "QQQ", "IWM")
+US_BENCHMARKS = (
+    "SPY",
+    "QQQ",
+    "IWM",
+    "XLK",
+    "XLF",
+    "XLV",
+    "XLY",
+    "XLP",
+    "XLE",
+    "XLI",
+    "XLB",
+    "XLU",
+    "XLRE",
+    "XLC",  # SPDR sectors
+    "GLD",
+    "SLV",
+    "USO",  # gold, silver, crude, as the US side's commodity read
+)
+"""Listed ETFs fetched beside the stocks: the market, size and sector context of the US rows."""
+US_INDICES = {"^VIX": "CBOE Volatility Index"}
+"""Yahoo index symbols that are not in the listings, fetched like the benchmarks."""
+NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
+"""Every US-listed stock with sector, industry, country, IPO year and market cap, in one answer: the
+sector labels and size buckets of the US rows; only the stable columns are kept, on change."""
+US_CAP_BUCKETS = ((100e9, "mega"), (10e9, "large"), (2e9, "mid"), (300e6, "small"), (0, "micro"))
+"""Market-cap floors, in dollars, for the size bucket of a US stock."""
 US_DORMANT_AFTER = 3
 """Consecutive empty Yahoo answers before a symbol is parked."""
 US_BATCH = 25

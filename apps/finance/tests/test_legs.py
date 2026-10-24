@@ -589,3 +589,83 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
         deadline=_t.monotonic(),
     )
     assert asked == [] and counts["backfill_left"] == 1
+
+
+SCREENER = (
+    b'{"data": {"rows": ['
+    b'{"symbol": "AAPL", "name": "Apple Inc. Common Stock", "lastsale": "$1.00", "marketCap": "3000000000000.00",'
+    b' "country": "United States", "ipoyear": "1980", "industry": "Computer Manufacturing", "sector": "Technology"},'
+    b'{"symbol": "TINY", "name": "Tiny Corp", "lastsale": "$2.00", "marketCap": "50000000.00",'
+    b' "country": "", "ipoyear": "", "industry": "", "sector": ""}'
+    b"]}}"
+)
+
+
+def test_us_screener_snapshot_is_stable_columns_only_and_builds_us_sectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finance.sources import us as USL
+
+    snap = BU.screener_snapshot(SCREENER)
+    assert (
+        snap.decode().splitlines()[0] == "symbol,name,sector,industry,country,ipo_year,cap_bucket"
+    )
+    assert (
+        "AAPL,Apple Inc. Common Stock,Technology,Computer Manufacturing,United States,1980,mega"
+        in snap.decode()
+    )
+    assert "TINY,Tiny Corp,,,,,micro" in snap.decode()  # the price columns are not in the snapshot
+    assert (
+        BU.cap_bucket(5e9) == "mid" and BU.cap_bucket(None) is None and BU.cap_bucket(0.0) is None
+    )
+
+    class _S:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def get(self, url: str, timeout: int = 0) -> Any:
+            class R:
+                status_code = 200
+                content = SCREENER
+
+            return R()
+
+    import requests as _requests
+
+    def _no_retry(fn: Callable[[], bytes], what: str) -> bytes:
+        return fn()
+
+    monkeypatch.setattr(_requests, "Session", _S)
+    monkeypatch.setattr(USL, "retry", _no_retry)
+    w1 = USL.fetch_screener(tmp_path, date(2026, 10, 24))
+    w2 = USL.fetch_screener(tmp_path, date(2026, 10, 25))  # same bytes: no new snapshot
+    assert (
+        [w.path for w in w1]
+        == [w.path for w in w2]
+        == ["raw/nasdaq_screener/2026/nasdaq_screener_20261024.csv.gz"]
+    )
+    assert w1[0].source == "nasdaq_screener" and w1[0].day == date(2026, 10, 24)
+    table = BU.parse_screener([tmp_path / w1[0].path])
+    aapl = table.filter(pl.col("symbol") == "AAPL").row(0, named=True)
+    assert (
+        aapl["sector"] == "Technology" and aapl["cap_bucket"] == "mega" and aapl["ipo_year"] == 1980
+    )
+    tiny = table.filter(pl.col("symbol") == "TINY").row(0, named=True)
+    assert (
+        tiny["sector"] is None and tiny["ipo_year"] is None and tiny["as_of"] == date(2026, 10, 24)
+    )
+    uni = USL.with_indices(
+        pl.DataFrame(
+            {
+                "symbol": ["AAPL"],
+                "yahoo": ["AAPL"],
+                "name": ["a"],
+                "exchange": ["Q"],
+                "kind": ["stock"],
+            }
+        )
+    )
+    assert uni["symbol"].to_list() == ["AAPL", "^VIX"] and uni["kind"].to_list() == [
+        "stock",
+        "index",
+    ]

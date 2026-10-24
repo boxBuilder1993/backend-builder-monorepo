@@ -473,9 +473,9 @@ D_PRICE = [
     "clv_d",
 ]
 D_SHAPE = ["rv_day", "vwap_dev_close", "r_first60", "r_last60", "relvol_day"]
-"""The session's own shape from its minute bars where held (2023-10 on, liquid names; null before):
-realised volatility, the close against the day's VWAP, the first and last hour's returns, the day's
-volume against the stock's 20-session norm."""
+"""The session's own shape from its minute bars where held (NSE, 2023-10 on, liquid names; null
+before and for the US): realised volatility, the close against the day's VWAP, the first and last
+hour's returns, the day's volume against the stock's 20-session norm."""
 D_ATTRIBUTES = [
     "industry",
     "sector_idx",
@@ -487,40 +487,233 @@ D_ATTRIBUTES = [
     "tick_bps",
     "log_turn20",
 ]
+"""For the US the four membership flags are size buckets from the screener's market cap: mega
+(100 B+), mega or large (10 B+), mid (2 to 10 B), small (300 M to 2 B)."""
 D_PEERS = ["p_ret_1d", "p_ret_5d", "p_ret_20d", "pw_ret_20d", "sp_5d", "sp_20d", "sp_60d"]
+D_SECTOR = ["s_ret_1d", "s_ret_5d", "s_ret_20d", "xs_ret_20d"]
+"""The stock's sector index (NSE: the Nifty sector index in index_daily; US: the SPDR sector ETF)."""
 D_BREADTH = ["breadth_d", "disp_d"]
 D_REGIME = ["mkt_ret_1d", "mkt_ret60", "mkt_vol20", "mkt_vol60", "vix"]
-D_OVERSEAS = [
-    "spy_oc",
-    "spy_cc",
-    "qqq_oc",
-    "qqq_cc",
-    "spy_5d",
-    "spy_range",
-    "gold_cc",
-    "silver_cc",
-    "crude_cc",
-]
+D_OVERSEAS = {
+    "nse": [
+        "spy_oc",
+        "spy_cc",
+        "qqq_oc",
+        "qqq_cc",
+        "spy_5d",
+        "spy_range",
+        "gold_cc",
+        "silver_cc",
+        "crude_cc",
+    ],
+    "us": ["nifty_cc", "nifty_5d", "qqq_cc", "iwm_cc", "gld_cc", "slv_cc", "uso_cc"],
+}
+"""What closed before the entry, elsewhere: for NSE rows the US session dated t and the MCX session
+dated t; for US rows the Nifty session dated the entry day (it closes at 06:00 ET, before the 09:30
+open), and the previous session of the size and commodity ETFs."""
 D_CLOCK = ["dow", "dom", "moy", "dte", "after_holiday"]
-DAILY_FEATURES: list[str] = (
-    D_PRICE
-    + D_SHAPE
-    + PARTICIPATION
-    + D_ATTRIBUTES
-    + D_PEERS
-    + D_BREADTH
-    + D_REGIME
-    + D_OVERSEAS
-    + D_CLOCK
-)
-DAILY_CONTEXT = {*D_BREADTH, *D_REGIME, *D_OVERSEAS, *D_CLOCK}
 
-DAILY_SQL = f"""
+
+def daily_features(market: str = "nse") -> list[str]:
+    """The daily rows' features for a market; the US has no trades count, delivery or minute bars."""
+    price = D_PRICE if market == "nse" else [f for f in D_PRICE if f != "deliv_pct"]
+    shape = D_SHAPE if market == "nse" else []
+    participation = PARTICIPATION if market == "nse" else []
+    return (
+        price
+        + shape
+        + participation
+        + D_ATTRIBUTES
+        + D_PEERS
+        + D_SECTOR
+        + D_BREADTH
+        + D_REGIME
+        + D_OVERSEAS[market]
+        + D_CLOCK
+    )
+
+
+def daily_context(market: str = "nse") -> set[str]:
+    return {*D_BREADTH, *D_REGIME, *D_OVERSEAS[market], *D_CLOCK}
+
+
+DAILY_FEATURES: list[str] = daily_features("nse")
+DAILY_CONTEXT = daily_context("nse")
+
+NSE_SECTOR_DAILY: dict[str, str] = {
+    "Financial Services": "Nifty Financial Services",
+    "Information Technology": "Nifty IT",
+    "Automobile and Auto Components": "Nifty Auto",
+    "Healthcare": "Nifty Healthcare Index",
+    "Fast Moving Consumer Goods": "Nifty FMCG",
+    "Metals & Mining": "Nifty Metal",
+    "Realty": "Nifty Realty",
+    "Oil Gas & Consumable Fuels": "Nifty Oil & Gas",
+    "Power": "Nifty Energy",
+    "Consumer Durables": "Nifty Consumer Durables",
+    "Consumer Services": "Nifty India Consumption",
+    "Capital Goods": "Nifty Infrastructure",
+    "Construction": "Nifty Infrastructure",
+    "Construction Materials": "Nifty Infrastructure",
+    "Media Entertainment & Publication": "Nifty Media",
+    "Chemicals": "Nifty Chemicals",
+}
+"""NSE industry to the sector index in index_daily (the names NSE's index files use)."""
+US_SECTOR_ETF: dict[str, str] = {
+    "Technology": "XLK",
+    "Finance": "XLF",
+    "Health Care": "XLV",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Industrials": "XLI",
+    "Basic Materials": "XLB",
+    "Utilities": "XLU",
+    "Real Estate": "XLRE",
+    "Telecommunications": "XLC",
+}
+"""Nasdaq screener sector to the SPDR sector ETF whose daily bars stand for the sector."""
+
+
+def _case(col: str, mapping: dict[str, str], fallback: str) -> str:
+    return (
+        f"case {col} "
+        + " ".join(f"when '{k}' then '{v}'" for k, v in mapping.items())
+        + f" else '{fallback}' end"
+    )
+
+
+def _third_friday(col: str) -> str:
+    """US monthly options expire on the third Friday."""
+    first = f"date_trunc('month', {col})::date"
+    return f"({first} + ((5 - isodow({first}) + 7) % 7 + 14)::int)"
+
+
+def _nse_expiry(col: str) -> str:
+    return (
+        f"(last_day({col}) - (((isodow(last_day({col})) - (case when {col} < date "
+        f"'{EXPIRY_WEEKDAY_CHANGE.isoformat()}' then 4 else 2 end) + 7) % 7)::int))"
+    )
+
+
+_SHAPE_NONE = """shape2 as (
+    select null::varchar as symbol, null::date as day, null::double as rv_day, null::double as vwap_dev_close,
+           null::double as r_first60, null::double as r_last60, null::double as relvol_day where false
+)"""
+
+_SHAPE_NSE = f"""shape as (  -- the session's shape from its minute bars, where held
+    select symbol, day,
+           stddev_samp(ret1) as rv_day,
+           max(close) filter (where rn_desc = 1) / nullif(sum(close * volume) / nullif(sum(volume), 0), 0) - 1 as vwap_dev_close,
+           ln(max(close) filter (where m = 59) / nullif(max(open) filter (where m = 0), 0)) as r_first60,
+           ln(max(close) filter (where rn_desc = 1) / nullif(max(close) filter (where m = 314), 0)) as r_last60,
+           sum(volume) as vol_day
+    from (select symbol, ts::date as day, close, open, volume,
+                 datediff('minute', ts::date::timestamp + interval 9 hour + interval 15 minute, ts) as m,
+                 ln(close / lag(close) over (partition by symbol, ts::date order by ts)) as ret1,
+                 row_number() over (partition by symbol, ts::date order by ts desc) as rn_desc
+          from (select distinct symbol, ts, open, close, volume from equity_1m
+                where symbol not like 'NIFTY%' and symbol <> 'INDIA VIX' and ts::date between :start and :end))
+    where m between 0 and {SESSION_MINUTES - 1}
+    group by symbol, day
+),
+shape2 as (
+    select *, vol_day / nullif(avg(vol_day) over (partition by symbol order by day rows between 20 preceding and 1 preceding), 0) as relvol_day
+    from shape
+)"""
+
+DAILY_MARKETS: dict[str, dict[str, str]] = {
+    "nse": {
+        "equity": """select symbol, date, open, high, low, close, turnover, trades, deliv_pct
+    from equity where date between :start::date - interval 400 day and :end::date + interval 60 day
+    qualify row_number() over (partition by symbol, date order by series) = 1""",
+        "shape": _SHAPE_NSE,
+        "index": f"select date, close from index_daily where index_name = '{INDEX_DAILY}'",
+        "vix": "select date, close as vix from index_daily where index_name = 'India VIX'",
+        "cons": """select symbol, as_of, any_value(industry) as industry,
+           max(case when index = 'NIFTY 50' then 1 else 0 end) as in_n50,
+           max(case when index = 'NIFTY 500' then 1 else 0 end) as in_n500,
+           max(case when index = 'NIFTY MIDCAP 100' then 1 else 0 end) as in_mid100,
+           max(case when index = 'NIFTY SMALLCAP 250' then 1 else 0 end) as in_small250
+    from index_constituents group by symbol, as_of""",
+        "ticks": "select tradingsymbol as symbol, any_value(tick_size) as tick from kite_instruments where segment = 'NSE' group by 1",
+        "sector_src": "select date, index_name as name, close from index_daily",
+        "sector_case": _case("r.industry", NSE_SECTOR_DAILY, INDEX_DAILY),
+        "overseas_ctes": """us as (
+    select date,
+           max(case when symbol = 'SPY' then ln(close / open) end) as spy_oc,
+           max(case when symbol = 'SPY' then ln(close / lag_close) end) as spy_cc,
+           max(case when symbol = 'QQQ' then ln(close / open) end) as qqq_oc,
+           max(case when symbol = 'QQQ' then ln(close / lag_close) end) as qqq_cc,
+           max(case when symbol = 'SPY' then ln(close / lag_close5) end) as spy_5d,
+           max(case when symbol = 'SPY' then (high - low) / nullif(close, 0) end) as spy_range
+    from (select symbol, date, open, high, low, close,
+                 lag(close) over (partition by symbol order by date) as lag_close,
+                 lag(close, 5) over (partition by symbol order by date) as lag_close5
+          from us_equity where symbol in ('SPY', 'QQQ'))
+    group by date
+),
+mcx as (
+    select date,
+           max(case when symbol = 'GOLD' then ln(close / lag_close) end) as gold_cc,
+           max(case when symbol = 'SILVER' then ln(close / lag_close) end) as silver_cc,
+           max(case when symbol = 'CRUDEOIL' then ln(close / lag_close) end) as crude_cc
+    from (select symbol, date, close, lag(close) over (partition by symbol order by date) as lag_close
+          from commodity_continuous where symbol in ('GOLD', 'SILVER', 'CRUDEOIL'))
+    group by date
+)""",
+        "overseas_join": """    asof left join us u on d.date >= u.date       -- the US session dated t closes before the entry at t+1's open
+    asof left join mcx x on d.date >= x.date""",
+        "overseas_cols": "u.spy_oc, u.spy_cc, u.qqq_oc, u.qqq_cc, u.spy_5d, u.spy_range, x.gold_cc, x.silver_cc, x.crude_cc",
+        "overseas_out": "spy_oc, spy_cc, qqq_oc, qqq_cc, spy_5d, spy_range, gold_cc, silver_cc, crude_cc",
+        "expiry": _nse_expiry("entry_date"),
+    },
+    "us": {
+        "equity": """select symbol, date, open, high, low, close, close * volume as turnover, null::bigint as trades, null::double as deliv_pct
+    from us_equity
+    where symbol not like '^%' and symbol not in ('SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'USO', 'XLK', 'XLF', 'XLV', 'XLY', 'XLP', 'XLE', 'XLI', 'XLB', 'XLU', 'XLRE', 'XLC')
+      and date between :start::date - interval 400 day and :end::date + interval 60 day
+      and open > 0 and close > 0""",
+        "shape": _SHAPE_NONE,
+        "index": "select date, close from us_equity where symbol = 'SPY'",
+        "vix": "select date, close as vix from us_equity where symbol = '^VIX'",
+        "cons": """select symbol, as_of, any_value(sector) as industry,
+           max(case when cap_bucket = 'mega' then 1 else 0 end) as in_n50,
+           max(case when cap_bucket in ('mega', 'large') then 1 else 0 end) as in_n500,
+           max(case when cap_bucket = 'mid' then 1 else 0 end) as in_mid100,
+           max(case when cap_bucket = 'small' then 1 else 0 end) as in_small250
+    from us_sectors group by symbol, as_of""",
+        "ticks": "select distinct symbol, 0.01 as tick from us_equity",
+        "sector_src": "select date, symbol as name, close from us_equity where symbol like 'XL%' or symbol = 'SPY'",
+        "sector_case": _case("r.industry", US_SECTOR_ETF, "SPY"),
+        "overseas_ctes": """nifty as (
+    select date, ln(close / lag(close) over (order by date)) as nifty_cc,
+           ln(close / lag(close, 5) over (order by date)) as nifty_5d
+    from index_daily where index_name = 'Nifty 50'
+),
+etfs as (
+    select date,
+           max(case when symbol = 'QQQ' then ln(close / lag_close) end) as qqq_cc,
+           max(case when symbol = 'IWM' then ln(close / lag_close) end) as iwm_cc,
+           max(case when symbol = 'GLD' then ln(close / lag_close) end) as gld_cc,
+           max(case when symbol = 'SLV' then ln(close / lag_close) end) as slv_cc,
+           max(case when symbol = 'USO' then ln(close / lag_close) end) as uso_cc
+    from (select symbol, date, close, lag(close) over (partition by symbol order by date) as lag_close
+          from us_equity where symbol in ('QQQ', 'IWM', 'GLD', 'SLV', 'USO'))
+    group by date
+)""",
+        "overseas_join": """    asof left join nifty n on d.entry_date >= n.date  -- the Nifty session of the entry day closes at 06:00 ET
+    asof left join etfs x on d.date >= x.date""",
+        "overseas_cols": "n.nifty_cc, n.nifty_5d, x.qqq_cc, x.iwm_cc, x.gld_cc, x.slv_cc, x.uso_cc",
+        "overseas_out": "nifty_cc, nifty_5d, qqq_cc, iwm_cc, gld_cc, slv_cc, uso_cc",
+        "expiry": _third_friday("entry_date"),
+    },
+}
+
+_DAILY_TEMPLATE = """
 with
 e as (
-    select symbol, date, open, high, low, close, prev_close, turnover, trades, deliv_pct
-    from equity where date between :start::date - interval 400 day and :end::date + interval 60 day
-    qualify row_number() over (partition by symbol, date order by series) = 1
+    __EQUITY__
 ),
 d1 as (
     select *,
@@ -551,27 +744,8 @@ d2 as (
            trades / nullif(quantile_cont(trades, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as trades_rel
     from d1
 ),
-shape as (  -- the session's shape from its minute bars, where held
-    select symbol, day,
-           stddev_samp(ret1) as rv_day,
-           max(close) filter (where rn_desc = 1) / nullif(sum(close * volume) / nullif(sum(volume), 0), 0) - 1 as vwap_dev_close,
-           ln(max(close) filter (where m = 59) / nullif(max(open) filter (where m = 0), 0)) as r_first60,
-           ln(max(close) filter (where rn_desc = 1) / nullif(max(close) filter (where m = 314), 0)) as r_last60,
-           sum(volume) as vol_day
-    from (select symbol, ts::date as day, close, open, volume,
-                 datediff('minute', ts::date::timestamp + interval 9 hour + interval 15 minute, ts) as m,
-                 ln(close / lag(close) over (partition by symbol, ts::date order by ts)) as ret1,
-                 row_number() over (partition by symbol, ts::date order by ts desc) as rn_desc
-          from (select distinct symbol, ts, open, close, volume from equity_1m
-                where symbol not like 'NIFTY%' and symbol <> 'INDIA VIX' and ts::date between :start and :end))
-    where m between 0 and {SESSION_MINUTES - 1}
-    group by symbol, day
-),
-shape2 as (
-    select *, vol_day / nullif(avg(vol_day) over (partition by symbol order by day rows between 20 preceding and 1 preceding), 0) as relvol_day
-    from shape
-),
-i0 as (select date, close, ln(close / lag(close) over (order by date)) as iret from index_daily where index_name = '{INDEX_DAILY}'),
+__SHAPE__,
+i0 as (select date, close, ln(close / lag(close) over (order by date)) as iret from (__INDEX__)),
 i1 as (
     select date, iret as mkt_ret_1d,
            ln(close / lag(close, 20) over (order by date)) as i_ret_20d,
@@ -580,40 +754,20 @@ i1 as (
            stddev_samp(iret) over (order by date rows between 59 preceding and current row) as mkt_vol60
     from i0
 ),
-vix as (select date, close as vix from index_daily where index_name = 'India VIX'),
-us as (
-    select date,
-           max(case when symbol = 'SPY' then ln(close / open) end) as spy_oc,
-           max(case when symbol = 'SPY' then ln(close / lag_close) end) as spy_cc,
-           max(case when symbol = 'QQQ' then ln(close / open) end) as qqq_oc,
-           max(case when symbol = 'QQQ' then ln(close / lag_close) end) as qqq_cc,
-           max(case when symbol = 'SPY' then ln(close / lag_close5) end) as spy_5d,
-           max(case when symbol = 'SPY' then (high - low) / nullif(close, 0) end) as spy_range
-    from (select symbol, date, open, high, low, close,
-                 lag(close) over (partition by symbol order by date) as lag_close,
-                 lag(close, 5) over (partition by symbol order by date) as lag_close5
-          from us_equity where symbol in ('SPY', 'QQQ'))
-    group by date
+vix as (__VIX__),
+sec as (
+    select date, name,
+           ln(close / lag(close) over w) as s_ret_1d,
+           ln(close / lag(close, 5) over w) as s_ret_5d,
+           ln(close / lag(close, 20) over w) as s_ret_20d
+    from (__SECTOR_SRC__) window w as (partition by name order by date)
 ),
-mcx as (
-    select date,
-           max(case when symbol = 'GOLD' then ln(close / lag_close) end) as gold_cc,
-           max(case when symbol = 'SILVER' then ln(close / lag_close) end) as silver_cc,
-           max(case when symbol = 'CRUDEOIL' then ln(close / lag_close) end) as crude_cc
-    from (select symbol, date, close, lag(close) over (partition by symbol order by date) as lag_close
-          from commodity_continuous where symbol in ('GOLD', 'SILVER', 'CRUDEOIL'))
-    group by date
-),
+__OVERSEAS_CTES__,
 cons as (
-    select symbol, as_of, any_value(industry) as industry,
-           max(case when index = 'NIFTY 50' then 1 else 0 end) as in_n50,
-           max(case when index = 'NIFTY 500' then 1 else 0 end) as in_n500,
-           max(case when index = 'NIFTY MIDCAP 100' then 1 else 0 end) as in_mid100,
-           max(case when index = 'NIFTY SMALLCAP 250' then 1 else 0 end) as in_small250
-    from index_constituents group by symbol, as_of
+    __CONS__
 ),
 cons_first as (select * from cons qualify row_number() over (partition by symbol order by as_of) = 1),
-ticks as (select tradingsymbol as symbol, any_value(tick_size) as tick from kite_instruments where segment = 'NSE' group by 1),
+ticks as (__TICKS__),
 sessions as (select date, lag(date) over (order by date) as prev_date from (select distinct date from e)),
 r1 as (
     select d.*,
@@ -624,7 +778,7 @@ r1 as (
            ln(nullif(d.turn20, 0)) as log_turn20,
            s.rv_day, s.vwap_dev_close, s.r_first60, s.r_last60, s.relvol_day,
            ii.mkt_ret_1d, ii.i_ret_20d, ii.mkt_ret60, ii.mkt_vol20, ii.mkt_vol60, v.vix,
-           u.spy_oc, u.spy_cc, u.qqq_oc, u.qqq_cc, u.spy_5d, u.spy_range, x.gold_cc, x.silver_cc, x.crude_cc,
+           __OVERSEAS_COLS__,
            ss.prev_date
     from d2 d
     asof left join cons c on d.symbol = c.symbol and d.date >= c.as_of
@@ -633,14 +787,13 @@ r1 as (
     left join shape2 s on s.symbol = d.symbol and s.day = d.date
     left join i1 ii on ii.date = d.date
     left join vix v on v.date = d.date
-    asof left join us u on d.date >= u.date       -- the US session dated t closes before the entry at t+1's open
-    asof left join mcx x on d.date >= x.date
+__OVERSEAS_JOIN__
     left join sessions ss on ss.date = d.date
     where d.date between :start and :end and d.turn20 >= :min_turnover_day
 ),
 r2 as (
     select r.*,
-           {_SECTOR_CASE.replace("a.industry", "r.industry")} as sector_idx,
+           __SECTOR_CASE__ as sector_idx,
            avg(ret_1d) over wp as p_ret_1d, avg(ret_5d) over wp as p_ret_5d, avg(ret_20d) over wp as p_ret_20d,
            sum(ret_20d * turn20) over wp / nullif(sum(turn20) over wp, 0) as pw_ret_20d,
            ret_5d - avg(ret_5d) over wp as sp_5d, ret_20d - avg(ret_20d) over wp as sp_20d, ret_60d - avg(ret_60d) over wp as sp_60d,
@@ -648,6 +801,10 @@ r2 as (
            stddev_samp(ret_1d) over wt as disp_d
     from r1 r
     window wp as (partition by coalesce(r.industry, 'none'), r.date), wt as (partition by r.date)
+),
+r3 as (
+    select r.*, sx.s_ret_1d, sx.s_ret_5d, sx.s_ret_20d, r.ret_20d - sx.s_ret_20d as xs_ret_20d
+    from r2 r left join sec sx on sx.name = r.sector_idx and sx.date = r.date
 )
 select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, date as day, close, entry, entry_date, exit_, sig_d,
        ret_1d, ret_5d, ret_20d, ret_60d, vol_20d, vol_60d, dist_hi, dist_lo, turn_rel, deliv_pct,
@@ -656,36 +813,54 @@ select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, da
        log_trades, avg_trade, trades_rel,
        industry, sector_idx, in_n50, in_n500, in_mid100, in_small250, log_px, tick_bps, log_turn20,
        p_ret_1d, p_ret_5d, p_ret_20d, pw_ret_20d, sp_5d, sp_20d, sp_60d,
+       s_ret_1d, s_ret_5d, s_ret_20d, xs_ret_20d,
        breadth_d, disp_d,
        mkt_ret_1d, mkt_ret60, mkt_vol20, mkt_vol60, vix,
-       spy_oc, spy_cc, qqq_oc, qqq_cc, spy_5d, spy_range, gold_cc, silver_cc, crude_cc,
+       __OVERSEAS_OUT__,
        isodow(entry_date) as dow, dayofmonth(entry_date) as dom, month(entry_date) as moy,
-       greatest(0, {_EXPIRY_DAY.replace("(day)", "(entry_date)").replace(" day <", " entry_date <")} - entry_date) as dte,
+       greatest(0, __EXPIRY__ - entry_date) as dte,
        (entry_date - date > case when isodow(entry_date) = 1 then 3 else 1 end)::int as after_holiday,
        sig_d * sqrt(:horizon_sessions) as scale,
        ln(exit_ / entry) as r,
        ln(exit_ / entry) / (sig_d * sqrt(:horizon_sessions)) as y
-from r2
+from r3
 where entry is not null and exit_ is not null and sig_d > 0 and entry > 0 and exit_ > 0
 order by date, symbol
 """
 
 
-def daily_fit_definition(horizon_sessions: int, **overrides: Any) -> dict[str, Any]:
-    """The Fit body for a daily-grain horizon: DAILY_SQL, its params, the daily features, the target."""
+def daily_sql(market: str = "nse") -> str:
+    """The daily rows query for a market, from one template and the market's sources."""
+    cfg = DAILY_MARKETS[market]
+    out = _DAILY_TEMPLATE
+    for key, text in cfg.items():
+        out = out.replace(f"__{key.upper()}__", text)
+    return out
+
+
+DAILY_SQL = daily_sql("nse")
+US_DAILY_SQL = daily_sql("us")
+
+
+def daily_fit_definition(
+    horizon_sessions: int, market: str = "nse", **overrides: Any
+) -> dict[str, Any]:
+    """The Fit body for a daily-grain horizon of a market: its query, params, features, the target."""
     params = {**DAILY_PARAMS, "horizon_sessions": horizon_sessions, **overrides}
+    if market == "us" and "start" not in overrides:
+        params["start"] = "2015-01-01"
     return {
-        "name": f"forecast {horizon_sessions}d",
+        "name": f"forecast {horizon_sessions}d {market}",
         "description": (
-            f"Expected volatility-scaled log return over {horizon_sessions} session(s), decided at the "
-            "close, entered at the next open; docs/finance-forecast.md"
+            f"{market.upper()}: expected volatility-scaled log return over {horizon_sessions} "
+            "session(s), decided at the close, entered at the next open; docs/finance-forecast.md"
         ),
-        "query": DAILY_SQL,
+        "query": daily_sql(market),
         "params": params,
         "key": KEY,
         "features": [
             {"name": f, "kind": "categorical" if f in CATEGORICAL else "numeric"}
-            for f in DAILY_FEATURES
+            for f in daily_features(market)
         ],
         "target": {"columns": ["y"], "task": "regression"},
     }
@@ -834,6 +1009,7 @@ def main(argv: list[str] | None = None) -> None:
 
     ap = argparse.ArgumentParser(description="materialise the forecast rows and run the IC screen")
     ap.add_argument("--grain", choices=["minute", "daily"], default="minute")
+    ap.add_argument("--market", choices=["nse", "us"], default="nse", help="daily grain only")
     ap.add_argument(
         "--horizon",
         type=int,
@@ -864,7 +1040,11 @@ def main(argv: list[str] | None = None) -> None:
 
         a.root = mirror.mirror_dir(settings.HF_REPO)
     if a.grain == "daily":
-        sql, all_features, context = DAILY_SQL, DAILY_FEATURES, DAILY_CONTEXT
+        sql, all_features, context = (
+            daily_sql(a.market),
+            daily_features(a.market),
+            daily_context(a.market),
+        )
         start = a.start if a.start != PARAMS["start"] else DAILY_PARAMS["start"]
         params: dict[str, Any] = {
             "horizon_sessions": a.horizon,
@@ -873,7 +1053,7 @@ def main(argv: list[str] | None = None) -> None:
             "start": start,
             "end": a.end,
         }
-        tag = f"daily_h{a.horizon}_t{int(a.min_turnover_day)}_{start}_{a.end}"
+        tag = f"daily_{a.market}_h{a.horizon}_t{int(a.min_turnover_day)}_{start}_{a.end}"
     else:
         sql, all_features, context = ROWS_SQL, FEATURES, CONTEXT
         params = {
