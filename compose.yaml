@@ -218,6 +218,20 @@ services:
       loki:
         condition: service_healthy
 
+  alloy-journal:
+    # The host's app units (systemd, bin/bb-run) log to the journal, not to Docker: this tailer
+    # ships them with the same labels, so the console's Logs panel works for them too.
+    image: grafana/alloy:v1.8.1
+    profiles: [logs]
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
+    volumes:
+      - ./compose/alloy-journal.alloy:/etc/alloy/config.alloy:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+
   grafana:
     image: grafana/grafana:11.6.0
     profiles: [logs]
