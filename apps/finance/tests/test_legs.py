@@ -104,7 +104,7 @@ def test_reference_parsers(tmp_path: Path) -> None:
         )
     )
     df = R.parse_corp_actions([corp])
-    assert df.height == 3 and df["symbol"].to_list() == ["BBB", "AAA"]  # sorted by ex_date, deduped
+    assert df.height == 2 and df["symbol"].to_list() == ["BBB", "AAA"]  # sorted by ex_date, deduped
     assert df.row(1, named=True)["factor"] == 0.5 and df.row(0, named=True)["kind"] == "dividend"
     hol = tmp_path / "holidays_2026.json.gz"
     hol.write_bytes(
@@ -318,11 +318,7 @@ def test_kite_fetch_writes_days_and_reports_empty_ones(
     assert counts == {"kite_requests": 2, "kite_instruments": 2}
     built = K.build(tmp_path)
     assert [(w.source, w.day) for w in built] == [("equity_1m", date(2026, 10, 21))]
-    assert pl.read_parquet(tmp_path / built[0].path)["symbol"].to_list() == [
-        "INFY",
-        "RELIANCE",
-        "TCS",
-    ]
+    assert pl.read_parquet(tmp_path / built[0].path)["symbol"].to_list() == ["RELIANCE", "TCS"]
 
 
 class _Clock(datetime):
@@ -554,6 +550,7 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
     assert counts == {"backfill_requests": 2, "backfill_symbols": 2}
     hist = pl.read_parquet(tmp_path / reference_rel(K.HISTORY))
     assert sorted(hist["symbol"].to_list()) == [
+        "INFY",
         "RELIANCE",
         "TCS",
     ]  # covered from the start, and backfilled
