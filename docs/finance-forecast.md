@@ -21,7 +21,18 @@ any grain.
 
 One per (symbol, decision minute t), for t every `:step_minutes` (default 5) inside the session, over
 the Kite universe: `equity_1m`, 463 symbols including the indices, 756 sessions from 2023-10-03 to
-2026-10-08 as of writing, 120 million minute bars. At 5-minute spacing that is about 20 million rows.
+2026-10-08 as of writing, 120 million minute bars. At 5-minute spacing that is about 20 million rows
+before the liquidity filter.
+
+**Liquidity filter.** A row is kept only if the stock's rupee turnover (volume × price, summed) over the
+trailing `:liq_minutes` (default 60) up to t is at least `:min_turnover`. A thin window gives a stale
+last price and a bar open nobody could trade at size, so its target is partly fiction, and a model
+trained on it learns the stale print catching up rather than anything about the stock. The floor is a
+Fit parameter so it is recorded and applied identically at fit and inference; a stock below it at some
+minute gets no prediction there, which the consumer reads as "do nothing". The Kite universe already
+needs 25 crore a session, about 7 lakh a minute on average, so 20 lakh over 60 minutes is a loose floor
+and 1 crore a strict one; the IC screen reports rows and IC at both and the better one is kept. The
+minute bars carry volume in shares, not trade counts, so turnover is the liquidity measure available.
 
 ### Target
 
@@ -57,7 +68,7 @@ that no stock dominates and the model learns relative moves. Nothing from after 
 
 | layer | features |
 |---|---|
-| intraday, bars up to t | returns over the last 1, 5, 15, 30, 60 min and since open; position within today's range; deviation from today's VWAP; realised volatility over the last 30 min and since open; volume in the last 5 and 15 min relative to the same clock time over the past 20 sessions; NIFTY 50's returns over the same spans; the stock's return minus the index's over 15 and 60 min |
+| intraday, bars up to t | returns over the last 1, 5, 15, 30, 60 min and since open; position within today's range; deviation from today's VWAP; realised volatility over the last 30 min and since open; volume in the last 5 and 15 min relative to the same clock time over the past 20 sessions; rupee turnover over the trailing `:liq_minutes`, as a level across stocks (how much can be traded here, beyond passing the floor); NIFTY 50's returns over the same spans; the stock's return minus the index's over 15 and 60 min |
 | daily, frozen at yesterday's close | yesterday's return; today's gap at open; 5- and 20-day return; 20-day volatility; distance from the trailing 52-week high and low; turnover relative to its 20-day median; deliverable percentage where NSE reports it; relative strength against NIFTY 50 over 20 days |
 | clock | minutes since open; minutes to close; day of week; expiry day; day after a holiday |
 
@@ -119,7 +130,8 @@ between years is flagged. This runs before any GPU time and decides the feature 
 
 ## Order of work
 
-1. The feature view and the query with `:horizon_minutes`, `:step_minutes` and `:vol_minutes`, checked for leakage by
+1. The feature view and the query with `:horizon_minutes`, `:step_minutes`, `:vol_minutes`,
+   `:liq_minutes` and `:min_turnover`, checked for leakage by
    construction: every window ends at or before t, every daily join is on the previous session.
 2. The IC screen at 15, 60 and 375 minutes. Its table goes in this document.
 3. The streaming loader and the two metrics.
@@ -131,11 +143,11 @@ between years is flagged. This runs before any GPU time and decides the feature 
 
 ## Settled and open
 
-Settled: return not price, scaled by trailing volatility; Δ and the volatility window as parameters; features computable at any decision point from data
+Settled: return not price, scaled by trailing volatility; Δ, the volatility window and the liquidity floor as parameters; features computable at any decision point from data
 before it; within-decision-point normalisation; the IC screen before fitting; evaluation on 2026 by
 IC, calibration and net return after costs, per month; baseline linear, then xgboost.
 
-Open: step spacing (5 minutes, or every minute with subsampling); whether to include the indices as
+Open: the liquidity floor's value (decided by the screen); step spacing (5 minutes, or every minute with subsampling); whether to include the indices as
 rows or only as features (default: features only, they are not tradable in cash); whether rows in the
 first and last 15 minutes of the session are kept (default: kept, with the clock features carrying
 the information).
