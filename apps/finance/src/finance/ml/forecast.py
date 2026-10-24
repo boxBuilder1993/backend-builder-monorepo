@@ -197,7 +197,7 @@ days as (
 ),
 rows_ as (
     select b.symbol, b.ts, b.day, b.close, b.entry, b.sig1,
-           case when :horizon_minutes >= {SESSION_MINUTES} then b.day_close else b.exit_h end as exit_,
+           case when :horizon_minutes >= {SESSION_MINUTES} then b.day_close else b.exit_h end as exit_,  -- a session horizon is the close
            b.r1, b.r5, b.r15, b.r30, b.r60, b.r_open, b.range_pos, b.vwap_dev, b.rv30, b.rv_open,
            b.relvol5, b.relvol15, b.turn_liq,
            i.i_r5, i.i_r15, i.i_r30, i.i_r60, i.i_r_open,
@@ -217,8 +217,9 @@ rows_ as (
     where b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover
 )
 select *,
+       sig1 * sqrt(least(:horizon_minutes, m_left - 1)) as scale,
        ln(exit_ / entry) as r,
-       ln(exit_ / entry) / (sig1 * sqrt(:horizon_minutes)) as y
+       ln(exit_ / entry) / (sig1 * sqrt(least(:horizon_minutes, m_left - 1))) as y
 from rows_
 where entry is not null and exit_ is not null and sig1 > 0
 order by ts, symbol
@@ -239,6 +240,35 @@ def fit_definition(horizon_minutes: int, **overrides: Any) -> dict[str, Any]:
         ],
         "target": {"columns": ["y"], "task": "regression"},
     }
+
+
+EVALUATION_METRICS = [
+    "ic",
+    "ic_se",
+    "ic_points",
+    "calibration_slope",
+    "calibration_monotone",
+    "r2",
+    "net_return_raw",
+    "trades_raw",
+]
+
+
+def evaluation_params(
+    threshold: float, cost_bps: float = 10.0, by: str | None = "month"
+) -> dict[str, Any]:
+    """Params for an Evaluation of a forecast InferRun: IC within ts, raw net return where the
+    predicted raw move (pred_y × scale) clears the threshold, grouped by month."""
+    out: dict[str, Any] = {
+        "group": "ts",
+        "threshold": threshold,
+        "cost_bps": cost_bps,
+        "return_column": "r",
+        "scale_column": "scale",
+    }
+    if by:
+        out["by"] = by
+    return out
 
 
 # ---- the IC screen ---------------------------------------------------------------------------------

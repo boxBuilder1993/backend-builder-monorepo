@@ -94,25 +94,25 @@ class LoadRows(Reaction):
         ctx.save("store", pulled)
         if pulled["status"] == "failed":
             raise RuntimeError(f"store unavailable: {pulled['error']}")
-        q, params, key = ctx.input["query"], dict(ctx.input["params"]), tuple(ctx.input["key"])
-        frame, h = await asyncio.to_thread(_load, poller.data_root(), q, params, key)
+        q, params = ctx.input["query"], dict(ctx.input["params"])
         path = data.work_dir() / "rows" / f"{uuid.uuid4().hex}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        frame.write_parquet(path)
+        n, h = await asyncio.to_thread(_load, poller.data_root(), q, params, path)
         ctx.save("rows_path", str(path))
-        ctx.save("rows", frame.height)
+        ctx.save("rows", n)
         ctx.save("data_hash", h)
 
 
-def _load(
-    root: Path, q: str, params: dict[str, Any], key: tuple[str, ...]
-) -> tuple[pl.DataFrame, str]:
+def _load(root: Path, q: str, params: dict[str, Any], out: Path) -> tuple[int, str]:
+    """DuckDB writes the Parquet and hashes it; no frame of the rows exists in this process."""
     con = data.connect(root)
     try:
-        frame = data.run_query(con, q, params)
+        tmp = data.work_dir() / "duckdb_tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        con.execute(f"set temp_directory='{tmp.as_posix()}'")
+        n = data.write_rows(con, q, params, out)
     finally:
         con.close()
-    return frame, data.frame_hash(frame, key)
+    return n, data.file_hash(out)
 
 
 class RunFit(Reaction):
@@ -220,8 +220,7 @@ class FitModel(Reaction):
     @staticmethod
     async def _rows(ctx: Context, fit: Fit, run: FitRun, hint: str | None) -> str:
         if hint and Path(hint).exists():
-            frame = await asyncio.to_thread(pl.read_parquet, hint)
-            if data.frame_hash(frame, tuple(fit.key)) == run.data_hash:
+            if await asyncio.to_thread(data.file_hash, Path(hint)) == run.data_hash:
                 return hint
         loaded = await ctx.trigger(
             LoadRows, {"query": fit.query, "params": run.params, "key": fit.key}
@@ -347,12 +346,15 @@ def _score(
     directory: Path, schema: S.Schema, rows_path: str, out: Path, model_id: str, run_id: str
 ) -> tuple[int, dict[str, int]]:
     fitted, _, _ = artifacts.load(directory)
-    frame = pl.read_parquet(rows_path)
+    frame = data.read_rows(Path(rows_path), schema, fitting=False)
     prepared = data.prepare(frame, schema, fitting=False)
+    del frame
     preds = fitted.predict(prepared.X)
     table = prepared.keys
     if prepared.truth is not None:
         table = table.hstack(prepared.truth)
+    if prepared.extra is not None:
+        table = table.hstack(prepared.extra)
     for name in E.output_columns(schema):
         table = table.with_columns(pl.Series(name, preds[name]))
     table = table.with_columns(

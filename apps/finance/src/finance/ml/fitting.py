@@ -11,8 +11,6 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
-import polars as pl
-
 from finance.ml import artifacts, data
 from finance.ml import estimators as E
 from finance.ml.schema import Schema
@@ -43,8 +41,10 @@ class FitDone:
 def fit_job(job: FitJob) -> FitDone:
     """Runs in the child."""
     t0 = time.time()
-    frame = pl.read_parquet(job.rows_path)
-    prepared = data.prepare(frame, Schema.from_dict(job.schema), fitting=True)
+    schema = Schema.from_dict(job.schema)
+    frame = data.read_rows(Path(job.rows_path), schema, fitting=True)
+    prepared = data.prepare(frame, schema, fitting=True)
+    del frame  # the fit holds X and Y as float32; the frame is not needed again
     adapter = E.REGISTRY[job.algorithm]
     device = E.pick_device(adapter, job.device)
     assert prepared.Y is not None

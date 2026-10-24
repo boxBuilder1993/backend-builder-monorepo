@@ -207,3 +207,94 @@ def test_fit_definition_and_screen_shapes(tmp_path: Path) -> None:
     assert ics == []  # three symbols: below MIN_CROSS_SECTION, no decision point counts
     table = forecast.screen_table(ics)
     assert "| dow |" in table and "context" in table and "| r5 |" in table
+
+
+def test_rows_file_hash_read_rows_and_extras(tmp_path: Path) -> None:
+    _mirror(tmp_path)
+    con = data.connect(tmp_path)
+    params = {
+        **forecast.PARAMS,
+        "start": DAYS[0].isoformat(),
+        "end": DAYS[-1].isoformat(),
+        "min_turnover": 1.0,
+    }
+    out = tmp_path / "rows.parquet"
+    n = data.write_rows(con, forecast.ROWS_SQL, params, out)
+    assert n == pl.read_parquet(out).height > 0
+    h1 = data.file_hash(out)
+    assert h1 == data.file_hash(out) and len(h1) == 64
+    pl.read_parquet(out).reverse().write_parquet(tmp_path / "rev.parquet")
+    assert data.file_hash(tmp_path / "rev.parquet") == h1  # order-independent
+    pl.read_parquet(out).head(n - 1).write_parquet(tmp_path / "less.parquet")
+    assert data.file_hash(tmp_path / "less.parquet") != h1
+    from finance.ml import schema as S
+
+    body = forecast.fit_definition(15)
+    declared = S.declare(body["key"], body["features"], body["target"])
+    frame = data.read_rows(out, declared, fitting=True)
+    assert frame["r5"].dtype == pl.Float32 and frame["y"].dtype == pl.Float32
+    assert frame["dow"].dtype != pl.Float32 and frame["ts"].dtype == pl.Datetime("us")
+    prepared = data.prepare(frame, declared, fitting=True)
+    assert prepared.X.dtype == "float32" and prepared.X.shape == (n, len(forecast.FEATURES))
+    assert prepared.extra is not None
+    assert {"r", "scale", "entry", "exit_", "sig1", "day", "close"} <= set(prepared.extra.columns)
+    assert not ({*forecast.FEATURES, "y", "symbol", "ts"} & set(prepared.extra.columns))
+
+
+def test_table_metrics_ic_calibration_and_raw_net_return() -> None:
+    from datetime import datetime
+
+    from finance.ml import metrics
+
+    rng = np.random.default_rng(0)
+    points = [datetime(2026, 1, 5, 9, 30) + timedelta(days=d) for d in range(40)]
+    rows: list[dict[str, object]] = []
+    for ts in points:
+        y = rng.normal(size=30)
+        for i in range(30):
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": f"S{i}",
+                    "y": y[i],
+                    "pred_y": y[i] + rng.normal(scale=2.0),
+                    "r": y[i] * 0.002,
+                    "scale": 0.002,
+                }
+            )
+    table = pl.DataFrame(rows)
+    got = metrics.evaluate(
+        table,
+        ["y"],
+        [
+            "ic",
+            "ic_se",
+            "ic_points",
+            "calibration_slope",
+            "calibration_monotone",
+            "net_return_raw",
+            "trades_raw",
+        ],
+        forecast.evaluation_params(threshold=0.002, cost_bps=5.0, by="month"),
+    )
+    assert 0.2 < got["ic.y"] < 0.7 and got["ic_se.y"] > 0 and got["ic_points.y"] == 40
+    assert (
+        0.1 < got["calibration_slope.y"] < 0.4
+    )  # noisy predictions: truth moves less than they say
+    assert got["calibration_monotone.y"] >= 0.7
+    picked = table.filter(pl.col("pred_y") * pl.col("scale") > 0.002)
+    assert got["trades_raw.y"] == picked.height
+    assert got["net_return_raw.y"] == pytest.approx(float(picked["r"].to_numpy().mean()) - 5e-4)
+    assert "ic.y@2026-01" in got and "ic.y@2026-02" in got
+    perfect = table.with_columns(pl.col("y").alias("pred_y"))
+    p = metrics.evaluate(
+        perfect, ["y"], ["ic", "calibration_slope", "calibration_monotone"], {"group": "ts"}
+    )
+    assert p["ic.y"] == pytest.approx(1.0) and p["calibration_slope.y"] == pytest.approx(1.0)
+    assert p["calibration_monotone.y"] == 1.0
+    with pytest.raises(ValueError, match="needs the column"):
+        metrics.evaluate(table.drop("ts"), ["y"], ["ic"], {})
+    with pytest.raises(ValueError, match="raw metrics need"):
+        metrics.evaluate(table.drop("scale"), ["y"], ["net_return_raw"], {})
+    with pytest.raises(ValueError, match="not a column"):
+        metrics.evaluate(table, ["y"], ["ic"], {"by": "sector"})
