@@ -288,3 +288,12 @@ about the runtime and are tested on frames and temp directories; the reactions w
 Cross-validation folds (several Fits for now), Optuna or other sequential search, per-row
 weights, model promotion or aliases, a feature store. Each has a place in the entities above when it is
 needed.
+
+## Screen and Validate (2026-10-24)
+
+Every job is a reaction, so it shows on the console with a run record. `Screen` (input: grain,
+market, horizon, params, optional rows_path) builds the forecast rows through LoadRows or screens an
+existing rows file, writes the per-feature IC table as `parquet/screens/<id>.parquet` (published) and
+saves the markdown table. `Validate` (input: fit_run_id, label, params, thresholds, cost_bps, top_k,
+rescale) scores every fitted model of a run on the validation range and evaluates each, skipping
+models already scored under the label. Both are triggered by hand with `backend-builder trigger`.

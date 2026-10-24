@@ -43,7 +43,9 @@ def _bars(day: date, symbol: str, seed: int, thin: bool = False) -> pl.DataFrame
     ).with_columns(pl.col("ts").cast(pl.Datetime("us")), pl.col("volume").cast(pl.Int64))
 
 
-def _mirror(root: Path, *, perturb_after: datetime | None = None, muhurat: bool = False) -> None:
+def synthetic_mirror(
+    root: Path, *, perturb_after: datetime | None = None, muhurat: bool = False
+) -> None:
     for day in DAYS:
         frames = [_bars(day, s, i + 1, thin=(s == "CCC")) for i, s in enumerate(SYMBOLS)]
         frames.append(
@@ -240,7 +242,7 @@ def _rows(root: Path, **over: object) -> pl.DataFrame:
 
 
 def test_target_is_next_open_to_close_h_later_scaled_by_trailing_vol(tmp_path: Path) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     rows = _rows(tmp_path, horizon_minutes=15, step_minutes=1, vol_minutes=60)
     bars = pl.read_parquet(
         tmp_path / "parquet/equity_1m/year=2025/equity_1m_20250602.parquet"
@@ -269,10 +271,10 @@ def test_target_is_next_open_to_close_h_later_scaled_by_trailing_vol(tmp_path: P
 
 
 def test_nothing_at_t_sees_a_bar_after_t(tmp_path: Path) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     cut = datetime(2025, 6, 2, 12, 0)
     before = _rows(tmp_path, step_minutes=1).filter(pl.col("ts") <= cut).sort(["symbol", "ts"])
-    _mirror(tmp_path, perturb_after=cut)
+    synthetic_mirror(tmp_path, perturb_after=cut)
     after = _rows(tmp_path, step_minutes=1).filter(pl.col("ts") <= cut).sort(["symbol", "ts"])
     slow = (
         set(forecast.DAILY)
@@ -293,7 +295,7 @@ def test_nothing_at_t_sees_a_bar_after_t(tmp_path: Path) -> None:
 
 
 def test_daily_layer_is_the_previous_session_and_filters_hold(tmp_path: Path) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     rows = _rows(tmp_path, step_minutes=5)
     day2 = rows.filter((pl.col("symbol") == "AAA") & (pl.col("day") == DAYS[1])).row(0, named=True)
     # the daily rows close at 100 + i; the previous session of DAYS[1] is DAYS[0], i = 40
@@ -319,7 +321,7 @@ def test_fit_definition_and_screen_shapes(tmp_path: Path) -> None:
     assert set(data.param_names(body["query"])) == set(body["params"])
     assert {f["name"] for f in body["features"]} == set(forecast.FEATURES)
     assert next(f for f in body["features"] if f["name"] == "dow")["kind"] == "categorical"
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     con = data.connect(tmp_path)
     out = tmp_path / "rows.parquet"
     n = forecast.materialise(
@@ -340,7 +342,7 @@ def test_fit_definition_and_screen_shapes(tmp_path: Path) -> None:
 
 
 def test_rows_file_hash_read_rows_and_extras(tmp_path: Path) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     con = data.connect(tmp_path)
     params = {
         **forecast.PARAMS,
@@ -431,7 +433,7 @@ def test_table_metrics_ic_calibration_and_raw_net_return() -> None:
 
 
 def test_an_evening_session_yields_no_rows_and_no_nan_targets(tmp_path: Path) -> None:
-    _mirror(tmp_path, muhurat=True)
+    synthetic_mirror(tmp_path, muhurat=True)
     rows = _rows(tmp_path, step_minutes=1)
     assert set(rows["day"].to_list()) == {DAYS[1]}  # the evening session is not a decision point
     assert rows["y"].is_finite().all()
@@ -440,7 +442,7 @@ def test_an_evening_session_yields_no_rows_and_no_nan_targets(tmp_path: Path) ->
 
 
 def test_new_layers_resolve_from_the_reference_and_context_tables(tmp_path: Path) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     rows = _rows(tmp_path, step_minutes=5)
     a = rows.filter(
         (pl.col("symbol") == "AAA") & (pl.col("day") == DAYS[1]) & (pl.col("m") == 100)
@@ -498,7 +500,7 @@ def test_new_layers_resolve_from_the_reference_and_context_tables(tmp_path: Path
 
 
 def test_daily_rows_decide_at_the_close_and_enter_at_the_next_open(tmp_path: Path) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     con = data.connect(tmp_path)
     params = {
         **forecast.DAILY_PARAMS,
@@ -547,7 +549,7 @@ def test_daily_rows_decide_at_the_close_and_enter_at_the_next_open(tmp_path: Pat
 def test_us_daily_rows_use_the_screener_sectors_etfs_and_the_nifty_of_the_entry_day(
     tmp_path: Path,
 ) -> None:
-    _mirror(tmp_path)
+    synthetic_mirror(tmp_path)
     con = data.connect(tmp_path)
     params = {
         **forecast.DAILY_PARAMS,
