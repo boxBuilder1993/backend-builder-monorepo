@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -196,3 +197,80 @@ def test_query_params_bind_by_name_and_the_views_install(tmp_path: Path) -> None
         data.resolve_params({"end": "x"}, {"start": "y"})
     h1 = data.frame_hash(df, ("index_name",))
     assert h1 == data.frame_hash(df.reverse(), ("index_name",)) and len(h1) == 64
+
+
+def test_batched_fit_matches_in_memory(tmp_path: Path) -> None:
+    """The streaming path: the schema completed from the file equals the one a whole-frame prepare
+    learns; the chunks cover every row; the ridge from chunks equals scikit-learn's Ridge on the
+    whole imputed matrix; xgboost from many chunks agrees with xgboost from one."""
+    from sklearn.linear_model import Ridge  # pyright: ignore[reportMissingTypeStubs]
+
+    f = frame(n=500).with_columns(
+        pl.when(pl.col("ret_5d") > 0.03).then(None).otherwise(pl.col("ret_5d")).alias("ret_5d")
+    )
+    path = tmp_path / "rows.parquet"
+    f.write_parquet(path, row_group_size=64)
+    declared = S.declare(KEY, FEATURES, {"columns": ["fwd"], "task": "regression"})
+    whole = data.prepare(data.read_rows(path, declared, fitting=True), declared, fitting=True)
+    completed = data.complete_schema(path, declared)
+    assert completed == whole.schema and completed.features[1].levels == ("bank", "it", "pharma")
+    chunks = list(data.iter_batches(path, completed, batch_rows=37))
+    assert len(chunks) > 5 and sum(len(x) for x, _ in chunks) == 500
+    assert all(x.dtype == np.float32 and y.dtype == np.float32 for x, y in chunks)
+    assert data.count_rows(path) == 500
+
+    def batches() -> object:
+        return data.iter_batches(path, completed, batch_rows=37)
+
+    lin = E.REGISTRY["sklearn.linear"]
+    params = E.resolve_params("sklearn.linear", {"alpha": 0.5})
+    streamed = lin.fit_batches(batches, completed, params, "cpu", 1)  # type: ignore[arg-type]
+    whole_x = whole.X.astype("float64")
+    med = np.nanmedian(whole_x, axis=0)
+    filled = np.where(np.isnan(whole_x), med, whole_x)
+    assert whole.Y is not None
+    ref: Any = Ridge(alpha=0.5).fit(filled, whole.Y[:, 0])  # pyright: ignore[reportUnknownMemberType]
+    expected: np.ndarray = np.asarray(ref.predict(filled), dtype="float64")
+    np.testing.assert_allclose(
+        streamed.predict(whole.X)["pred_fwd"], expected, rtol=1e-5, atol=1e-7
+    )
+    one = lin.fit(whole.X, whole.Y, completed, params, "cpu", 1)
+    np.testing.assert_allclose(
+        one.predict(whole.X)["pred_fwd"], streamed.predict(whole.X)["pred_fwd"], rtol=1e-6
+    )
+
+    xg = E.REGISTRY["xgboost"]
+    xparams = E.resolve_params("xgboost", {"n_estimators": 40, "max_depth": 3})
+    many = xg.fit_batches(batches, completed, xparams, "cpu", 7)  # type: ignore[arg-type]
+    single = xg.fit(whole.X, whole.Y, completed, xparams, "cpu", 7)
+    a, b = many.predict(whole.X)["pred_fwd"], single.predict(whole.X)["pred_fwd"]
+    assert np.corrcoef(a, b)[0, 1] > 0.98 and np.corrcoef(a, whole.Y[:, 0])[0, 1] > 0.8
+    d = tmp_path / "xgb"
+    d.mkdir()
+    artifacts.save(d, many, completed, {"algorithm": "xgboost"})
+    np.testing.assert_allclose(artifacts.load(d)[0].predict(whole.X)["pred_fwd"], a, rtol=1e-6)
+
+
+def test_fit_job_streams_the_file(tmp_path: Path) -> None:
+    from finance.ml import fitting
+
+    path = tmp_path / "rows.parquet"
+    frame(n=300).write_parquet(path, row_group_size=50)
+    declared = S.declare(KEY, FEATURES, {"columns": ["fwd"], "task": "regression"})
+    job = fitting.FitJob(
+        rows_path=str(path),
+        schema=declared.to_dict(),
+        algorithm="sklearn.linear",
+        params=E.resolve_params("sklearn.linear", {}),
+        device="cpu",
+        seed=1,
+        out_dir=str(tmp_path / "model"),
+        info={"fit_name": "t"},
+        batch_rows=50,
+    )
+    done = fitting.fit_job(job)
+    assert done.rows == 300 and done.device == "cpu" and len(done.sha256) == 64
+    fitted, schema, info = artifacts.load(tmp_path / "model")
+    assert schema.features[1].levels == ("bank", "it", "pharma")
+    assert info["rows"] == 300 and info["batch_rows"] == 50
+    assert list(fitted.predict(np.zeros((2, 2), dtype="float32"))) == ["pred_fwd"]

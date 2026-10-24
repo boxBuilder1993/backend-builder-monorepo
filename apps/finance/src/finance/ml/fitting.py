@@ -1,6 +1,8 @@
 """Fitting in a subprocess: a CUDA fault or an out-of-memory kills the child, not the worker. The
-parent passes paths and plain data; the child loads the frame, fits, saves the directory, and
-returns what the Model row needs."""
+parent passes paths and plain data; the child completes the schema from the file, streams it in
+chunks of ``batch_rows`` to the adapter, saves the directory, and returns what the Model row needs.
+The whole matrix is never in memory: a 20-million-row fit is a chunk plus the estimator's own
+state (xgboost's quantised copy, the ridge's Gram matrix)."""
 
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ class FitJob:
     seed: int
     out_dir: str
     info: dict[str, Any]
+    batch_rows: int = data.FIT_BATCH_ROWS
 
 
 @dataclass(frozen=True)
@@ -41,21 +44,29 @@ class FitDone:
 def fit_job(job: FitJob) -> FitDone:
     """Runs in the child."""
     t0 = time.time()
-    schema = Schema.from_dict(job.schema)
-    frame = data.read_rows(Path(job.rows_path), schema, fitting=True)
-    prepared = data.prepare(frame, schema, fitting=True)
-    del frame  # the fit holds X and Y as float32; the frame is not needed again
+    path = Path(job.rows_path)
+    schema = data.complete_schema(path, Schema.from_dict(job.schema))
+    rows = data.count_rows(path)
     adapter = E.REGISTRY[job.algorithm]
     device = E.pick_device(adapter, job.device)
-    assert prepared.Y is not None
-    fitted = adapter.fit(prepared.X, prepared.Y, prepared.schema, job.params, device, job.seed)
+
+    def batches() -> Any:
+        return data.iter_batches(path, schema, job.batch_rows)
+
+    fitted = adapter.fit_batches(batches, schema, job.params, device, job.seed)
     out = Path(job.out_dir)
-    info = dict(job.info, algorithm=job.algorithm, params=job.params, device=device, seed=job.seed)
-    artifacts.save(out, fitted, prepared.schema, info)
-    sha, size = artifacts.archive_hash(out)
-    return FitDone(
-        prepared.schema.to_dict(), device, time.time() - t0, prepared.X.shape[0], sha, size
+    info = dict(
+        job.info,
+        algorithm=job.algorithm,
+        params=job.params,
+        device=device,
+        seed=job.seed,
+        rows=rows,
+        batch_rows=job.batch_rows,
     )
+    artifacts.save(out, fitted, schema, info)
+    sha, size = artifacts.archive_hash(out)
+    return FitDone(schema.to_dict(), device, time.time() - t0, rows, sha, size)
 
 
 def fit_in_subprocess(job: FitJob) -> FitDone:

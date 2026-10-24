@@ -12,6 +12,10 @@ ExecStart=@REPO@/bin/bb-run %i
 Restart=always
 RestartSec=5
 Environment=RUNTIME_ENV=prod
+# A process of this unit that outgrows the box is killed by the kernel inside the unit's own
+# cgroup, so the editor, Postgres and the other roles are never candidates. A fit child that
+# crosses it dies alone; the worker records the model failed. 24G of a 31G host.
+MemoryMax=24G
 
 [Install]
 WantedBy=default.target

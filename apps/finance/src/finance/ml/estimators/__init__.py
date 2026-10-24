@@ -8,6 +8,7 @@ only the algorithm."""
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
@@ -23,6 +24,12 @@ class Fitted(Protocol):
         ...
 
     def save(self, directory: Path) -> None: ...
+
+
+Batches = Callable[[], Iterator[tuple[np.ndarray, np.ndarray]]]
+"""A fit's data as a factory of (X, Y) chunks, float32, re-iterable: an adapter that needs two
+passes (xgboost's quantile sketch, the ridge's medians then its Gram matrix) calls it twice. The
+whole matrix never has to exist, so a fit's memory is one chunk plus what the estimator keeps."""
 
 
 class Adapter(Protocol):
@@ -42,6 +49,18 @@ class Adapter(Protocol):
         device: str,
         seed: int,
     ) -> Fitted: ...
+
+    @classmethod
+    def fit_batches(
+        cls,
+        batches: Batches,
+        schema: Schema,
+        params: dict[str, Any],
+        device: str,
+        seed: int,
+    ) -> Fitted:
+        """The same fit from chunks. Adapters without a streaming form concatenate (``concat``)."""
+        ...
 
     @classmethod
     def load(cls, directory: Path, schema: Schema) -> Fitted: ...
@@ -73,6 +92,27 @@ def resolve_params(algorithm: str, point: dict[str, Any]) -> dict[str, Any]:
         if want in ("str", str) and not isinstance(value, str):
             raise TypeError(f"{name} must be a string, not {value!r}")
     return dataclasses.asdict(cls(**point))
+
+
+def single(X: np.ndarray, Y: np.ndarray) -> Batches:
+    """One in-memory matrix as a Batches factory."""
+
+    def gen() -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        yield X, Y
+
+    return gen
+
+
+def concat(batches: Batches) -> tuple[np.ndarray, np.ndarray]:
+    """Every chunk stacked: the fallback for an adapter that fits in memory only."""
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+    for X, Y in batches():
+        xs.append(X)
+        ys.append(Y)
+    if not xs:
+        raise ValueError("no rows to fit")
+    return np.vstack(xs), np.vstack(ys)
 
 
 def output_columns(schema: Schema) -> list[str]:
