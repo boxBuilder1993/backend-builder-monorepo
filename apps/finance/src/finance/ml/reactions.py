@@ -108,7 +108,9 @@ def _load(root: Path, q: str, params: dict[str, Any], out: Path) -> tuple[int, s
     try:
         tmp = data.work_dir() / "duckdb_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
-        con.execute(f"set temp_directory='{tmp.as_posix()}'")
+        con.execute(
+            f"set temp_directory='{tmp.as_posix()}'; set memory_limit='{data.DUCKDB_MEMORY}'"
+        )
         n = data.write_rows(con, q, params, out)
     finally:
         con.close()

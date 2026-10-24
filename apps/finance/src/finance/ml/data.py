@@ -26,6 +26,9 @@ import polars as pl
 from finance.ml.schema import Feature, Schema, Target
 
 DEFAULT_SERIES = ("EQ", "BE")
+DUCKDB_MEMORY = os.environ.get("FINANCE_DUCKDB_MEMORY", "12GB")
+"""DuckDB's cap for a rows build; beyond it the build spills to the work dir. DuckDB's own default is
+80% of the box, which leaves Postgres and the worker nothing while twenty million rows are built."""
 ROLL_DAYS = 5
 
 
