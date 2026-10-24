@@ -177,12 +177,56 @@ def resolve_params(declared: dict[str, Any], given: dict[str, Any] | None) -> di
     return {**declared, **(given or {})}
 
 
-def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> pl.DataFrame:
-    """Run SQL with :name params bound by name. Every param the query uses must be given."""
+def relation(
+    con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]
+) -> duckdb.DuckDBPyRelation:
+    """The query with :name params bound by name, unexecuted. Every param the query uses must be given."""
     missing = [p for p in param_names(sql) if p not in params]
     if missing:
         raise ValueError(f"query uses params without values: {missing}")
-    return con.sql(_PARAM.sub(r"$\1", sql), params=params).pl()
+    return con.sql(_PARAM.sub(r"$\1", sql), params=params)
+
+
+def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> pl.DataFrame:
+    """Run SQL with :name params bound by name, into a frame."""
+    return relation(con, sql, params).pl()
+
+
+def write_rows(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any], out: Path) -> int:
+    """The query straight to Parquet, never through a Python-side frame: DuckDB streams it. Returns the
+    row count. The forecast rows are tens of millions; a frame of them would not fit beside the fit."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    relation(con, sql, params).write_parquet(out.as_posix(), compression="zstd")
+    return int(con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0])
+
+
+def file_hash(path: Path) -> str:
+    """A stable, order-independent hash of a Parquet file's content and column types: the record of
+    what a fit read, computed by DuckDB without loading the file into Python."""
+    con = duckdb.connect()
+    try:
+        src = f"read_parquet('{path.as_posix()}')"
+        cols = con.sql(f"describe select * from {src}").fetchall()
+        n, x = con.sql(f"select count(*), bit_xor(hash(*COLUMNS(*))) from {src}").fetchall()[0]
+    finally:
+        con.close()
+    h = hashlib.sha256()
+    h.update(",".join(f"{c[0]}:{c[1]}" for c in cols).encode())
+    h.update(f"{n}:{x}".encode())
+    return h.hexdigest()
+
+
+def read_rows(path: Path, schema: Schema, fitting: bool) -> pl.DataFrame:
+    """The rows for a schema: numeric features and regression targets as Float32 while reading, the
+    key, categoricals and any extra columns as they are. Half the memory of reading everything as
+    Float64 and casting after."""
+    lf = pl.scan_parquet(path)
+    names = set(lf.collect_schema().names())
+    numeric = {f.name for f in schema.features if f.kind == "numeric"}
+    if schema.target.task == "regression":
+        numeric |= set(schema.target.columns)
+    casts = [pl.col(c).cast(pl.Float32) for c in sorted(numeric & names)]
+    return lf.with_columns(casts).collect()
 
 
 def frame_hash(df: pl.DataFrame, key: tuple[str, ...]) -> str:
@@ -208,6 +252,9 @@ class Prepared:
     truth: pl.DataFrame | None
     schema: Schema
     unknown_levels: dict[str, int] = field(default_factory=dict[str, int])
+    extra: pl.DataFrame | None = None
+    """Columns the query yielded that are neither key, feature nor target: carried into the
+    inference table for the metrics (the forecast's raw return and its scale, for instance)."""
 
 
 def check_columns(df: pl.DataFrame, schema: Schema, need_target: bool) -> None:
@@ -234,7 +281,7 @@ def prepare(df: pl.DataFrame, schema: Schema, fitting: bool) -> Prepared:
         s = df[f.name]
         if f.kind == "numeric":
             try:
-                arr = s.cast(pl.Float64, strict=True).to_numpy().astype("float32")
+                arr = s.cast(pl.Float32, strict=True).to_numpy()
             except Exception as exc:
                 raise ValueError(f"feature {f.name!r} is not numeric: {exc}") from None
             feats.append(f)
@@ -265,10 +312,7 @@ def prepare(df: pl.DataFrame, schema: Schema, fitting: bool) -> Prepared:
         truth = df.select(list(target.columns))
         if target.task == "regression":
             y_mat = np.column_stack(
-                [
-                    truth[c].cast(pl.Float64, strict=True).to_numpy().astype("float32")
-                    for c in target.columns
-                ]
+                [truth[c].cast(pl.Float32, strict=True).to_numpy() for c in target.columns]
             )
         else:
             labels = truth.select([pl.col(c).cast(pl.String) for c in target.columns])
@@ -293,4 +337,7 @@ def prepare(df: pl.DataFrame, schema: Schema, fitting: bool) -> Prepared:
             if fitting and (y_mat < 0).any():
                 raise ValueError("target has null labels")
     out = Schema(schema.key, tuple(feats), target, schema.version)
-    return Prepared(X, y_mat, df.select(list(schema.key)), truth, out, unknown)
+    used = set(schema.key) | set(schema.feature_names) | set(schema.target.columns)
+    rest = [c for c in df.columns if c not in used]
+    extra = df.select(rest) if rest else None
+    return Prepared(X, y_mat, df.select(list(schema.key)), truth, out, unknown, extra)

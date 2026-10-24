@@ -171,3 +171,252 @@ the information).
 The consumer: a trader of signals, a decision rule and execution; the hindsight-optimal trades as
 the ceiling it is scored against; the product `(collection, principal, start, end) -> expected
 return`. Discussed and parked until the forecast has a measured IC.
+
+## Results
+
+### IC screen, 15 minutes (2026-10-24)
+
+Rows: 22,112,730 at 5-minute spacing, 60-minute volatility window, 20 lakh over 60 minutes as the
+liquidity floor, 2023-10-03 to 2026-10-08; built in 529 s, screened in 116 s, by
+`python -m finance.ml.forecast --horizon 15`. IC is the Spearman correlation between the feature and
+the scaled 15-minute return within each decision point, averaged over the points of the year; t is the
+mean over its standard error. 2023 is October to December only.
+
+| feature | 2023 | 2024 | 2025 | 2026 | verdict |
+|---|---|---|---|---|---|
+| r1 | -0.0528 (t=-55.1) | -0.0482 (t=-87.5) | -0.0456 (t=-87.2) | -0.0421 (t=-72.7) | keep |
+| r5 | -0.0624 (t=-56.2) | -0.0558 (t=-88.5) | -0.0486 (t=-80.5) | -0.0415 (t=-62.3) | keep |
+| r15 | -0.0534 (t=-45.5) | -0.0463 (t=-70.7) | -0.0373 (t=-59.5) | -0.0335 (t=-48.4) | keep |
+| r30 | -0.0408 (t=-34.2) | -0.0375 (t=-56.0) | -0.0273 (t=-42.6) | -0.0249 (t=-35.3) | keep |
+| r60 | -0.0290 (t=-23.0) | -0.0253 (t=-36.4) | -0.0154 (t=-23.1) | -0.0116 (t=-15.9) | keep |
+| r_open | -0.0139 (t=-12.2) | -0.0085 (t=-13.3) | -0.0015 (t=-2.4) | -0.0019 (t=-2.7) | keep |
+| range_pos | -0.0175 (t=-14.1) | -0.0134 (t=-20.7) | -0.0054 (t=-8.3) | -0.0058 (t=-7.9) | keep |
+| vwap_dev | -0.0154 (t=-12.3) | -0.0130 (t=-19.7) | -0.0036 (t=-5.6) | -0.0013 (t=-1.8) | keep |
+| rv30 | -0.0048 (t=-3.2) | +0.0006 (t=0.8) | -0.0049 (t=-5.7) | +0.0031 (t=3.3) | flips |
+| rv_open | -0.0133 (t=-8.1) | -0.0055 (t=-6.1) | -0.0098 (t=-10.5) | -0.0036 (t=-3.5) | keep |
+| relvol5 | +0.0150 (t=14.8) | +0.0112 (t=21.0) | +0.0083 (t=15.7) | +0.0095 (t=15.9) | keep |
+| relvol15 | +0.0149 (t=14.2) | +0.0111 (t=19.9) | +0.0086 (t=15.3) | +0.0102 (t=15.7) | keep |
+| turn_liq | +0.0117 (t=8.8) | +0.0047 (t=6.1) | +0.0068 (t=9.7) | +0.0076 (t=9.5) | keep |
+| i_r5 |  |  |  |  | context |
+| i_r15 |  |  |  |  | context |
+| i_r30 |  |  |  |  | context |
+| i_r60 |  |  |  |  | context |
+| i_r_open |  |  |  |  | context |
+| x_r15 | -0.0534 (t=-45.5) | -0.0463 (t=-70.7) | -0.0373 (t=-59.5) | -0.0335 (t=-48.4) | keep |
+| x_r60 | -0.0290 (t=-23.0) | -0.0253 (t=-36.4) | -0.0154 (t=-23.1) | -0.0116 (t=-15.9) | keep |
+| imb5 | -0.0433 (t=-44.2) | -0.0359 (t=-67.9) | -0.0302 (t=-57.8) | -0.0275 (t=-48.1) | keep |
+| imb15 | -0.0306 (t=-31.0) | -0.0238 (t=-45.1) | -0.0176 (t=-33.6) | -0.0174 (t=-30.6) | keep |
+| imb30 | -0.0212 (t=-21.1) | -0.0170 (t=-31.8) | -0.0103 (t=-19.6) | -0.0106 (t=-18.2) | keep |
+| clv5 | -0.0379 (t=-42.4) | -0.0308 (t=-65.0) | -0.0247 (t=-53.1) | -0.0242 (t=-46.4) | keep |
+| clv15 | -0.0250 (t=-27.4) | -0.0183 (t=-39.2) | -0.0123 (t=-26.6) | -0.0152 (t=-29.2) | keep |
+| clv30 | -0.0182 (t=-19.9) | -0.0131 (t=-27.9) | -0.0064 (t=-13.7) | -0.0097 (t=-18.7) | keep |
+| vwret5 | -0.0491 (t=-48.2) | -0.0424 (t=-76.1) | -0.0352 (t=-65.0) | -0.0304 (t=-51.3) | keep |
+| vwret15 | -0.0342 (t=-34.2) | -0.0268 (t=-50.3) | -0.0196 (t=-37.4) | -0.0185 (t=-32.6) | keep |
+| vwret30 | -0.0234 (t=-23.7) | -0.0190 (t=-36.6) | -0.0114 (t=-22.2) | -0.0115 (t=-20.5) | keep |
+| up5 | -0.0477 (t=-47.1) | -0.0411 (t=-74.1) | -0.0359 (t=-66.4) | -0.0327 (t=-54.6) | keep |
+| up15 | -0.0362 (t=-34.9) | -0.0320 (t=-56.6) | -0.0265 (t=-47.4) | -0.0259 (t=-41.4) | keep |
+| up30 | -0.0264 (t=-25.5) | -0.0243 (t=-42.3) | -0.0191 (t=-34.0) | -0.0187 (t=-29.6) | keep |
+| impact15 | -0.0051 (t=-4.4) | +0.0002 (t=0.2) | -0.0047 (t=-7.0) | -0.0047 (t=-6.3) | keep |
+| impact30 | -0.0052 (t=-4.3) | +0.0009 (t=1.3) | -0.0052 (t=-7.5) | -0.0037 (t=-4.8) | keep |
+| turn_accel | +0.0062 (t=6.6) | +0.0037 (t=7.4) | +0.0012 (t=2.6) | +0.0017 (t=3.3) | keep |
+| ret_1d | -0.0021 (t=-1.8) | +0.0024 (t=3.9) | +0.0045 (t=7.3) | -0.0010 (t=-1.5) | keep |
+| gap | -0.0003 (t=-0.4) | +0.0005 (t=1.1) | +0.0003 (t=0.7) | +0.0003 (t=0.5) | drop |
+| ret_5d | -0.0050 (t=-4.2) | +0.0035 (t=5.5) | +0.0044 (t=6.6) | +0.0010 (t=1.4) | flips |
+| ret_20d | -0.0051 (t=-4.5) | +0.0033 (t=5.4) | +0.0055 (t=7.9) | +0.0010 (t=1.2) | flips |
+| vol_20d | -0.0209 (t=-14.0) | -0.0136 (t=-17.2) | -0.0139 (t=-17.2) | -0.0068 (t=-8.6) | keep |
+| dist_hi | +0.0069 (t=6.4) | +0.0131 (t=19.6) | +0.0135 (t=17.5) | +0.0097 (t=11.5) | keep |
+| dist_lo | -0.0150 (t=-11.4) | -0.0056 (t=-8.0) | -0.0024 (t=-3.4) | +0.0023 (t=2.6) | flips |
+| turn_rel | -0.0008 (t=-0.8) | +0.0005 (t=0.9) | +0.0012 (t=2.3) | -0.0004 (t=-0.7) | keep |
+| deliv_pct | +0.0184 (t=13.8) | +0.0133 (t=17.1) | +0.0175 (t=22.9) | +0.0134 (t=18.6) | keep |
+| rs_20 | -0.0051 (t=-4.5) | +0.0033 (t=5.4) | +0.0055 (t=7.9) | +0.0010 (t=1.2) | flips |
+| m |  |  |  |  | context |
+| m_left |  |  |  |  | context |
+| dow |  |  |  |  | context |
+| expiry |  |  |  |  | context |
+| after_holiday |  |  |  |  | context |
+
+What it says:
+
+- **Fifteen minutes ahead is reversal, everywhere.** Every recent-return and buying-pressure feature
+  is negative, large by the standards of this problem (r5 at −0.06 to −0.04, the 5-minute pressure
+  proxies at −0.03 to −0.05) and stable in sign across all four years. A stock that just rose, on
+  volume, with its minutes closing near their highs, is the one that gives back over the next quarter
+  hour. "Many traders buying" predicts the next 15 minutes *down*: at this horizon the crowd chasing a
+  print dominates the large order being worked.
+- **Part of that is microstructure, and the model will not get all of it.** A minute close is at the
+  bid or the ask; the next one tends to bounce back. The entry at the next bar's open removes some of
+  this, the exit at a later close does not. The IC is a true statistic of the data; the fraction that
+  survives the spread and costs is what the net-return evaluation is for, and it will be smaller.
+- **The edge decays by year**, from −0.062 (2023) to −0.042 (2026) on r5, the same shape on every
+  reversal feature. Either the market has become more efficient at this horizon or the three months of
+  2023 were unusual. Validation on 2026 is the right test either way.
+- **Volume is the one positive.** Relative volume at +0.01 and turnover at +0.005 to +0.01, both
+  stable: given the reversal, more participation now means a slightly better next 15 minutes. Price
+  impact is small and inconsistent; turnover acceleration small and positive.
+- **The daily layer is weak but two features are stable**: deliverable percentage at +0.013 to +0.018
+  every year, the one genuine buyer-side number, and distance from the 52-week high at +0.007 to
+  +0.014. Twenty-day volatility is stably negative. Daily momentum (5- and 20-day return, relative
+  strength) flips sign between 2023 and the rest; the gap is zero. These earn their place at longer
+  horizons if anywhere.
+- **Dropped for the 15-minute Fit:** gap. **Held out as flips:** rv30, ret_5d, ret_20d, rs_20,
+  dist_lo. `x_r15`/`x_r60` equal `r15`/`r60` within a decision point (the index is the same for every
+  stock), so their IC is identical; they stay because the model sees them together with the index's
+  own return as context, which the cross-sectional IC cannot measure.
+- The t-statistics are large because there are about 150,000 decision points; the magnitude is what to
+  read, not the t.
+
+### IC screen, 60 minutes
+
+Rows: 19,282,872, same parameters; built in 489 s, screened in 100 s.
+
+| feature | 2023 | 2024 | 2025 | 2026 | verdict |
+|---|---|---|---|---|---|
+| r1 | -0.0259 (t=-27.0) | -0.0268 (t=-48.6) | -0.0223 (t=-42.3) | -0.0199 (t=-34.5) | keep |
+| r5 | -0.0320 (t=-28.8) | -0.0303 (t=-48.3) | -0.0229 (t=-37.8) | -0.0190 (t=-28.8) | keep |
+| r15 | -0.0299 (t=-25.3) | -0.0275 (t=-40.4) | -0.0170 (t=-26.5) | -0.0141 (t=-20.1) | keep |
+| r30 | -0.0234 (t=-18.6) | -0.0228 (t=-32.1) | -0.0114 (t=-17.2) | -0.0084 (t=-11.6) | keep |
+| r60 | -0.0140 (t=-10.4) | -0.0147 (t=-19.3) | -0.0029 (t=-4.0) | +0.0000 (t=0.1) | keep |
+| r_open | -0.0129 (t=-10.1) | -0.0054 (t=-7.5) | +0.0001 (t=0.2) | -0.0038 (t=-5.0) | keep |
+| range_pos | -0.0038 (t=-2.9) | -0.0019 (t=-2.6) | +0.0028 (t=3.9) | +0.0008 (t=1.1) | flips |
+| vwap_dev | -0.0006 (t=-0.5) | -0.0010 (t=-1.4) | +0.0046 (t=6.5) | +0.0059 (t=8.0) | keep |
+| rv30 | -0.0076 (t=-4.5) | +0.0049 (t=5.1) | -0.0035 (t=-3.7) | +0.0060 (t=5.8) | flips |
+| rv_open | -0.0213 (t=-11.5) | -0.0056 (t=-5.4) | -0.0138 (t=-13.6) | -0.0063 (t=-5.6) | keep |
+| relvol5 | +0.0227 (t=21.1) | +0.0144 (t=25.4) | +0.0102 (t=17.8) | +0.0119 (t=18.9) | keep |
+| relvol15 | +0.0238 (t=21.0) | +0.0156 (t=25.7) | +0.0115 (t=18.6) | +0.0136 (t=20.0) | keep |
+| turn_liq | +0.0237 (t=17.1) | +0.0058 (t=7.3) | +0.0070 (t=9.5) | +0.0108 (t=13.6) | keep |
+| i_r5 |  |  |  |  | context |
+| i_r15 |  |  |  |  | context |
+| i_r30 |  |  |  |  | context |
+| i_r60 |  |  |  |  | context |
+| i_r_open |  |  |  |  | context |
+| x_r15 | -0.0299 (t=-25.3) | -0.0275 (t=-40.4) | -0.0170 (t=-26.5) | -0.0141 (t=-20.1) | keep |
+| x_r60 | -0.0140 (t=-10.4) | -0.0147 (t=-19.3) | -0.0029 (t=-4.0) | +0.0000 (t=0.1) | keep |
+| imb5 | -0.0211 (t=-21.2) | -0.0189 (t=-34.8) | -0.0120 (t=-22.4) | -0.0111 (t=-19.0) | keep |
+| imb15 | -0.0157 (t=-15.4) | -0.0136 (t=-24.2) | -0.0049 (t=-8.9) | -0.0047 (t=-7.8) | keep |
+| imb30 | -0.0109 (t=-10.3) | -0.0096 (t=-16.8) | -0.0012 (t=-2.1) | -0.0006 (t=-1.0) | keep |
+| clv5 | -0.0198 (t=-21.0) | -0.0173 (t=-34.9) | -0.0111 (t=-22.9) | -0.0140 (t=-25.7) | keep |
+| clv15 | -0.0142 (t=-14.6) | -0.0118 (t=-23.3) | -0.0047 (t=-9.6) | -0.0101 (t=-18.2) | keep |
+| clv30 | -0.0111 (t=-11.2) | -0.0093 (t=-18.1) | -0.0020 (t=-4.0) | -0.0076 (t=-13.9) | keep |
+| vwret5 | -0.0246 (t=-24.0) | -0.0223 (t=-39.5) | -0.0142 (t=-25.9) | -0.0124 (t=-20.9) | keep |
+| vwret15 | -0.0186 (t=-18.1) | -0.0159 (t=-28.3) | -0.0057 (t=-10.7) | -0.0057 (t=-9.7) | keep |
+| vwret30 | -0.0128 (t=-12.2) | -0.0118 (t=-21.3) | -0.0019 (t=-3.6) | -0.0021 (t=-3.6) | keep |
+| up5 | -0.0244 (t=-23.3) | -0.0229 (t=-40.1) | -0.0177 (t=-31.9) | -0.0159 (t=-25.9) | keep |
+| up15 | -0.0194 (t=-18.2) | -0.0193 (t=-32.1) | -0.0141 (t=-24.0) | -0.0124 (t=-19.2) | keep |
+| up30 | -0.0142 (t=-13.0) | -0.0151 (t=-24.3) | -0.0115 (t=-19.2) | -0.0091 (t=-13.9) | keep |
+| impact15 | -0.0171 (t=-13.2) | -0.0022 (t=-3.0) | -0.0059 (t=-8.4) | -0.0081 (t=-10.7) | keep |
+| impact30 | -0.0168 (t=-12.4) | -0.0016 (t=-2.1) | -0.0057 (t=-7.8) | -0.0069 (t=-8.9) | keep |
+| turn_accel | +0.0063 (t=6.5) | +0.0024 (t=4.6) | +0.0006 (t=1.2) | +0.0009 (t=1.8) | keep |
+| ret_1d | -0.0026 (t=-2.1) | +0.0036 (t=5.1) | +0.0072 (t=10.3) | -0.0015 (t=-2.0) | flips |
+| gap | -0.0041 (t=-4.4) | -0.0002 (t=-0.3) | -0.0014 (t=-2.7) | +0.0006 (t=1.0) | keep |
+| ret_5d | -0.0057 (t=-4.3) | +0.0077 (t=10.2) | +0.0080 (t=10.3) | +0.0028 (t=3.5) | flips |
+| ret_20d | -0.0067 (t=-5.3) | +0.0066 (t=9.2) | +0.0093 (t=11.4) | -0.0000 (t=-0.0) | flips |
+| vol_20d | -0.0380 (t=-22.7) | -0.0188 (t=-20.7) | -0.0203 (t=-23.3) | -0.0103 (t=-12.0) | keep |
+| dist_hi | +0.0118 (t=9.7) | +0.0197 (t=25.9) | +0.0209 (t=23.5) | +0.0140 (t=14.9) | keep |
+| dist_lo | -0.0303 (t=-20.4) | -0.0087 (t=-10.7) | -0.0044 (t=-5.5) | +0.0012 (t=1.2) | keep |
+| turn_rel | +0.0000 (t=0.0) | +0.0015 (t=2.6) | +0.0010 (t=1.7) | +0.0000 (t=0.1) | keep |
+| deliv_pct | +0.0299 (t=20.5) | +0.0192 (t=23.0) | +0.0277 (t=33.7) | +0.0229 (t=29.9) | keep |
+| rs_20 | -0.0067 (t=-5.3) | +0.0066 (t=9.2) | +0.0093 (t=11.4) | -0.0000 (t=-0.0) | flips |
+| m |  |  |  |  | context |
+| m_left |  |  |  |  | context |
+| dow |  |  |  |  | context |
+| expiry |  |  |  |  | context |
+| after_holiday |  |  |  |  | context |
+
+### IC screen, one session (to the close)
+
+Rows: 23,060,452, same parameters; built in 554 s, screened in 121 s. The horizon of a row is the
+minutes to the close, so the scaled return uses that, not 375; within a decision point every stock
+has the same horizon, so the ranking and the IC are unaffected either way.
+
+| feature | 2023 | 2024 | 2025 | 2026 | verdict |
+|---|---|---|---|---|---|
+| r1 | -0.0206 (t=-23.0) | -0.0195 (t=-39.9) | -0.0189 (t=-39.8) | -0.0163 (t=-30.5) | keep |
+| r5 | -0.0248 (t=-23.8) | -0.0243 (t=-43.5) | -0.0206 (t=-38.5) | -0.0163 (t=-27.3) | keep |
+| r15 | -0.0262 (t=-22.5) | -0.0266 (t=-42.4) | -0.0208 (t=-35.4) | -0.0164 (t=-25.5) | keep |
+| r30 | -0.0247 (t=-19.8) | -0.0271 (t=-40.0) | -0.0201 (t=-31.9) | -0.0145 (t=-21.4) | keep |
+| r60 | -0.0247 (t=-18.3) | -0.0247 (t=-33.5) | -0.0167 (t=-24.9) | -0.0100 (t=-13.9) | keep |
+| r_open | -0.0186 (t=-15.2) | -0.0214 (t=-31.6) | -0.0083 (t=-13.3) | -0.0087 (t=-12.4) | keep |
+| range_pos | -0.0097 (t=-7.3) | -0.0162 (t=-22.8) | -0.0069 (t=-10.3) | -0.0038 (t=-5.2) | keep |
+| vwap_dev | -0.0049 (t=-3.7) | -0.0056 (t=-7.8) | +0.0025 (t=3.8) | +0.0050 (t=7.3) | flips |
+| rv30 | -0.0061 (t=-3.4) | -0.0026 (t=-2.8) | -0.0133 (t=-15.8) | -0.0016 (t=-1.6) | keep |
+| rv_open | -0.0222 (t=-11.3) | -0.0171 (t=-17.0) | -0.0287 (t=-32.3) | -0.0200 (t=-18.6) | keep |
+| relvol5 | +0.0339 (t=35.4) | +0.0254 (t=50.3) | +0.0182 (t=35.2) | +0.0206 (t=35.6) | keep |
+| relvol15 | +0.0376 (t=37.1) | +0.0287 (t=53.3) | +0.0220 (t=39.2) | +0.0232 (t=36.6) | keep |
+| turn_liq | +0.0329 (t=24.3) | +0.0030 (t=3.8) | -0.0040 (t=-6.0) | +0.0141 (t=19.0) | flips |
+| i_r5 |  |  |  |  | context |
+| i_r15 |  |  |  |  | context |
+| i_r30 |  |  |  |  | context |
+| i_r60 |  |  |  |  | context |
+| i_r_open |  |  |  |  | context |
+| x_r15 | -0.0262 (t=-22.5) | -0.0266 (t=-42.4) | -0.0208 (t=-35.4) | -0.0164 (t=-25.5) | keep |
+| x_r60 | -0.0247 (t=-18.3) | -0.0247 (t=-33.5) | -0.0167 (t=-24.9) | -0.0100 (t=-13.9) | keep |
+| imb5 | -0.0139 (t=-14.7) | -0.0153 (t=-30.8) | -0.0105 (t=-21.7) | -0.0090 (t=-16.9) | keep |
+| imb15 | -0.0106 (t=-10.6) | -0.0144 (t=-27.4) | -0.0065 (t=-12.8) | -0.0057 (t=-10.3) | keep |
+| imb30 | -0.0074 (t=-7.2) | -0.0139 (t=-25.5) | -0.0041 (t=-7.8) | -0.0031 (t=-5.5) | keep |
+| clv5 | -0.0178 (t=-20.4) | -0.0164 (t=-36.1) | -0.0116 (t=-26.3) | -0.0122 (t=-24.8) | keep |
+| clv15 | -0.0148 (t=-16.3) | -0.0155 (t=-33.3) | -0.0090 (t=-20.0) | -0.0106 (t=-21.3) | keep |
+| clv30 | -0.0126 (t=-13.8) | -0.0156 (t=-32.7) | -0.0079 (t=-17.1) | -0.0090 (t=-18.1) | keep |
+| vwret5 | -0.0158 (t=-16.2) | -0.0173 (t=-33.7) | -0.0114 (t=-23.3) | -0.0092 (t=-17.1) | keep |
+| vwret15 | -0.0119 (t=-11.7) | -0.0155 (t=-29.2) | -0.0064 (t=-12.7) | -0.0055 (t=-10.1) | keep |
+| vwret30 | -0.0087 (t=-8.3) | -0.0150 (t=-27.6) | -0.0038 (t=-7.5) | -0.0029 (t=-5.3) | keep |
+| up5 | -0.0196 (t=-20.5) | -0.0188 (t=-37.0) | -0.0169 (t=-34.2) | -0.0152 (t=-27.6) | keep |
+| up15 | -0.0205 (t=-20.3) | -0.0208 (t=-38.1) | -0.0196 (t=-36.7) | -0.0170 (t=-28.6) | keep |
+| up30 | -0.0194 (t=-19.0) | -0.0206 (t=-36.3) | -0.0213 (t=-38.3) | -0.0172 (t=-28.4) | keep |
+| impact15 | -0.0228 (t=-16.9) | -0.0021 (t=-2.9) | -0.0018 (t=-2.8) | -0.0120 (t=-17.2) | keep |
+| impact30 | -0.0210 (t=-15.0) | -0.0002 (t=-0.2) | -0.0002 (t=-0.3) | -0.0105 (t=-14.5) | keep |
+| turn_accel | +0.0063 (t=6.9) | +0.0025 (t=5.4) | -0.0008 (t=-1.9) | +0.0022 (t=4.6) | keep |
+| ret_1d | -0.0146 (t=-13.3) | -0.0135 (t=-22.2) | -0.0208 (t=-33.6) | -0.0225 (t=-31.7) | keep |
+| gap | +0.0005 (t=0.6) | +0.0027 (t=6.0) | +0.0038 (t=7.9) | +0.0026 (t=4.3) | keep |
+| ret_5d | -0.0230 (t=-19.5) | -0.0093 (t=-13.8) | -0.0185 (t=-26.3) | -0.0262 (t=-33.1) | keep |
+| ret_20d | -0.0126 (t=-10.6) | -0.0061 (t=-9.0) | -0.0111 (t=-15.1) | -0.0237 (t=-26.9) | keep |
+| vol_20d | -0.0448 (t=-25.8) | -0.0332 (t=-39.7) | -0.0396 (t=-53.1) | -0.0144 (t=-18.8) | keep |
+| dist_hi | +0.0193 (t=16.5) | +0.0231 (t=32.5) | +0.0121 (t=14.6) | +0.0049 (t=5.6) | keep |
+| dist_lo | -0.0310 (t=-20.5) | -0.0093 (t=-12.6) | -0.0226 (t=-32.8) | -0.0050 (t=-5.6) | keep |
+| turn_rel | -0.0022 (t=-2.1) | -0.0048 (t=-9.0) | -0.0055 (t=-10.6) | -0.0117 (t=-19.1) | keep |
+| deliv_pct | +0.0572 (t=43.9) | +0.0439 (t=61.2) | +0.0555 (t=75.8) | +0.0372 (t=52.8) | keep |
+| rs_20 | -0.0126 (t=-10.6) | -0.0061 (t=-9.0) | -0.0111 (t=-15.1) | -0.0237 (t=-26.9) | keep |
+| m |  |  |  |  | context |
+| m_left |  |  |  |  | context |
+| dow |  |  |  |  | context |
+| expiry |  |  |  |  | context |
+| after_holiday |  |  |  |  | context |
+
+### Reading the three horizons together
+
+- **Reversal weakens with horizon but never turns.** The 5-minute return's IC goes −0.05 (15 min),
+  −0.03 (60 min), −0.02 (session). The buying-pressure proxies follow the same curve. Half of the
+  15-minute reversal is gone within the hour, which is the microstructure share.
+- **Participation grows with horizon.** Relative volume goes +0.01 (15 min), +0.015 (60 min), +0.02 to
+  +0.04 (session): a stock trading heavily at this clock time, relative to its own norm, does better
+  into the close. The strongest intraday feature at the session horizon, and stable every year.
+- **Deliverable percentage is the best daily feature at every horizon** and the single best feature
+  at the session horizon: +0.04 to +0.06 every year. Yesterday's delivery-heavy names outperform into
+  today's close. Twenty-day volatility is the mirror image, −0.015 to −0.045: calm names drift up,
+  volatile names bleed. Distance from the high stays positive; distance from the low negative.
+- **Daily momentum resolves at the session horizon into reversal.** Yesterday's, 5-day and 20-day
+  returns are stably negative at the session horizon (−0.01 to −0.026), after flipping at the
+  shorter ones. The gap turns slightly positive. The daily layer earns its place here, not at 15
+  minutes.
+- **VWAP deviation and range position change sign between 2024 and 2025** at 60 minutes and the
+  session. Held out as flips at those horizons; the model can still read them through the clock.
+- **Drop list per horizon.** 15 min: gap; flips held out: rv30, ret_5d, ret_20d, rs_20, dist_lo.
+  60 min: flips held out: range_pos, rv30, ret_1d, ret_5d, ret_20d, rs_20. Session: flips held out:
+  vwap_dev, turn_liq. Everything else stays. The first Fit is the 15-minute one, as planned, with the
+  session Fit the one the daily layer argues for next.
+
+## What was built for this (2026-10-24)
+
+- `finance/ml/forecast.py`: `ROWS_SQL` with the five parameters, `fit_definition(horizon)`, the
+  IC screen (`screen`, `screen_table`) and the CLI `python -m finance.ml.forecast --horizon N`.
+- Rows no longer pass through a Python frame: `LoadRows` has DuckDB write the Parquet and hash it
+  (`data.write_rows`, `data.file_hash`, order-independent, no Python-side copy); the fit child and
+  the scorer read with `data.read_rows`, numerics as Float32 while reading. Twenty-two million rows
+  at 45 features are about 4 GB as X; the frame beside it is freed before the fit. Not a batch
+  iterator into xgboost yet; the box's 31 GB carries this size, and the iterator is the next step if
+  a horizon's rows outgrow it.
+- The inference table carries the query's extra columns (`r`, `scale`, `entry`, `sig1`, ...), so
+  metrics can read the raw return: `prepare` returns them as `extra`, `_score` writes them.
+- Metrics that need the table: `ic`, `ic_se`, `ic_points` (within `group`, default `ts`),
+  `calibration_slope`, `calibration_monotone`, `net_return_raw`, `trades_raw` (predicted raw move =
+  `pred_y × scale` against `threshold`, minus `cost_bps`); and `by: month` on any Evaluation for the
+  per-month series. `forecast.evaluation_params(threshold)` builds the params.
