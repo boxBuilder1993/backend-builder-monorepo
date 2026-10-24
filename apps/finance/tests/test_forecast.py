@@ -583,3 +583,48 @@ def test_us_daily_rows_use_the_screener_sectors_etfs_and_the_nifty_of_the_entry_
     body = forecast.daily_fit_definition(21, "us")
     assert body["name"] == "forecast 21d us" and body["params"]["start"] == "2015-01-01"
     assert set(data.param_names(body["query"])) == set(body["params"])
+
+
+def test_topk_and_rescale_metrics() -> None:
+    from datetime import datetime
+
+    from finance.ml import metrics
+
+    rows: list[dict[str, object]] = []
+    for d in range(30):
+        ts = datetime(2026, 1, 5, 9, 30) + timedelta(days=d)
+        for i in range(25):
+            pred = (
+                i - 12
+            ) / 10  # ordered predictions; realised return follows them with noise-free order
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": f"S{i}",
+                    "y": pred,
+                    "pred_y": pred * 3,
+                    "r": pred * 0.001,
+                    "scale": 0.001,
+                }
+            )
+    table = pl.DataFrame(rows)
+    got = metrics.evaluate(
+        table,
+        ["y"],
+        ["net_return_topk", "trades_topk", "spread_topk", "net_return_raw", "trades_raw"],
+        forecast.evaluation_params(threshold=0.0005, cost_bps=0.0, by=None, top_k=3, rescale=1 / 3),
+    )
+    # top 3 per point are i = 24, 23, 22: mean pred (1.2 + 1.1 + 1.0) / 3 * 0.001
+    assert got["net_return_topk.y"] == pytest.approx(1.1 * 0.001) and got["trades_topk.y"] == 90
+    # bottom 3 are i = 0, 1, 2 with mean -1.1 * 0.001: the spread is 2.2 bps... in return units
+    assert got["spread_topk.y"] == pytest.approx(2.2 * 0.001)
+    # rescaled, the predicted raw move is pred_y / 3 * scale = pred * 0.001: 0.0005 keeps i >= 18
+    assert got["trades_raw.y"] == 30 * 7
+    unscaled = metrics.evaluate(
+        table, ["y"], ["trades_raw"], forecast.evaluation_params(0.0005, by=None)
+    )
+    assert (
+        unscaled["trades_raw.y"] > got["trades_raw.y"]
+    )  # the exaggerated magnitudes clear the threshold more often
+    with pytest.raises(ValueError, match="top-k metrics need"):
+        metrics.evaluate(table.drop("r"), ["y"], ["net_return_topk"], {})
