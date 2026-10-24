@@ -766,3 +766,215 @@ Seven Fits from these screens, features kept where stable with mean IC above 0.0
 context and categorical feature, and two runs each: fit through 2025 and fit on 2026 January to
 June, both validated on 2026 July to October with IC, calibration, top-k and threshold metrics after
 costs. Run as `FitSweep` and `ValidateSweep` reactions.
+
+## The session study: overnight, daytime short, both (2026-10-24, night)
+
+The owner's question: buy about 15 minutes before the close and sell 15 minutes after the open,
+every day. Which stocks pay for that, how consistently, what about indices, the US and
+commodities, and what if we also short the daytime? Three variants per instrument per year:
+**overnight** (long from the close to the next open), **daytime short** (short from the open to
+the close) and **both**. The `SessionStudy` reaction computes them from the daily tables for
+`nse`, `us` and `mcx`; the minute-bar check below uses the Kite bars at 15:14 and 09:29.
+
+### The official open is not a price you get
+
+The daily tables' open is the pre-open auction print. For ETFs and thin stocks it sits about one
+percent above the previous close almost every day and is gone within minutes, so the daily-table
+study makes NIFTYBEES look like +70% a year overnight with a 73% hit rate. Measured on the minute
+bars at the owner's actual times, NIFTYBEES overnight is +8% in 2024, +9% in 2025 and −8% so far
+in 2026: the index's own overnight drift, nothing more. Every NSE number below is from the minute
+bars (602 stocks with Kite history since October 2023, liquidity floor ₹5 crore a day). The US has
+no minute data here, so its numbers are open-to-close and carry this caveat; for SPY-sized names
+the auction print is close to tradeable, for small caps it is not.
+
+### NSE: the whole market, per liquid stock, median across stocks
+
+| year | overnight | hit | daytime short | hit | both | buy and hold |
+|---|---|---|---|---|---|---|
+| 2024 | +50% | 95% of stocks positive | +26% | 78% | +77% | +21% |
+| 2025 | +13% | 66% | +6% | 58% | +19% | +0% |
+| 2026 to Oct 22 | +3% | 57% | +2% | 55% | +7% | −2% |
+
+The edge is fading fast: 2.2 bps a night and 1.4 bps a day for the median stock in 2026, against
+about 4 bps round trip in a stock future and about 25 bps round trip for delivery in cash (STT
+0.1% each side). For the median stock neither variant covers its costs in 2026.
+
+### NSE indices (minute bars, % per year)
+
+| index | 2024 night | 2025 night | 2026 night | 2024 day short | 2025 day short | 2026 day short | 2026 both | 2026 buy and hold |
+|---|---|---|---|---|---|---|---|---|
+| Nifty 50 | +15 | +8 | −3 | +7 | −2 | +12 | +9 | −15 |
+| Nifty Bank | +10 | +9 | −4 | +5 | −7 | +5 | +1 | −10 |
+| Nifty Next 50 | +46 | +18 | −2 | +22 | +16 | +2 | 0 | −6 |
+| Nifty Midcap 150 | +40 | +11 | −1 | +19 | +6 | +5 | +4 | −8 |
+| Nifty IT | +32 | −7 | +5 | +12 | +6 | +20 | +25 | −18 |
+| Nifty PSU Bank | +45 | +36 | +14 | +32 | +9 | +18 | +31 | −6 |
+
+Overnight carried nearly all of the index return in 2024 and 2025 and has stopped in 2026. The
+daytime short on Nifty 50 is positive in 2026 only because the market fell. Tradeable with
+futures only: Nifty 50, Bank, Financial Services, Midcap Select; no futures on Next 50, Midcap
+150, PSU Bank or the sector indices, so their rows are what the prices did, not a trade.
+
+### NSE: which stocks, and does picking them persist
+
+Ranked by the worst of the three periods (2026 annualised), among stocks positive in all three.
+Returns in % per year before costs; turnover in ₹ crore a day; hit = fraction of sessions positive.
+
+Overnight (buy 15:14, sell 09:29):
+
+| stock | ₹cr/day | 2024 | 2025 | 2026 ytd | hit | buy and hold 2024 / 25 / 26 |
+|---|---|---|---|---|---|---|
+| NETWEB | 84 | +168 | +86 | +80 | 58% | +89 / +7 / +35 |
+| APOLLO | 71 | +134 | +83 | +77 | 60% | +1 / +83 / +31 |
+| CUPID | 24 | +114 | +77 | +97 | 57% | +26 / +193 / +107 |
+| AXISCADES | 11 | +126 | +74 | +69 | 57% | +1 / +70 / +37 |
+| VIYASH | 14 | +83 | +71 | +60 | 56% | +47 / +12 / −2 |
+| SYRMA | 60 | +87 | +79 | +54 | 59% | −6 / +14 / +69 |
+| ASTRAMICRO | 29 | +105 | +69 | +53 | 58% | +25 / +23 / +42 |
+| PARAS | 35 | +96 | +77 | +53 | 58% | +29 / +31 / +54 |
+| TDPOWERSYS | 34 | +132 | +101 | +50 | 59% | +51 / +41 / +64 |
+| REDINGTON | 52 | +72 | +62 | +50 | 54% | +13 / +32 / +29 |
+| BSE | 974 | +93 | +87 | +29 | 56% | +90 / +37 / +33 |
+| MCX | 354 | +48 | +53 | +30 | 57% | +69 / +56 / +20 |
+
+Daytime short (sell 09:29, cover 15:14):
+
+| stock | ₹cr/day | 2024 | 2025 | 2026 ytd | hit | buy and hold 2024 / 25 / 26 |
+|---|---|---|---|---|---|---|
+| INOXWIND | 93 | +102 | +96 | +41 | 60% | +37 / −41 / −45 |
+| JBMA | 24 | +83 | +78 | +56 | 64% | −5 / −21 / −25 |
+| OLECTRA | 66 | +103 | +69 | +59 | 66% | +8 / −21 / −23 |
+| SWSOLAR | 48 | +123 | +108 | +52 | 62% | +6 / −79 / −41 |
+| SWANCORP | 67 | +60 | +65 | +56 | 59% | +35 / −44 / −65 |
+| JWL | 45 | +78 | +102 | +48 | 62% | +46 / −41 / −66 |
+| TEJASNET | 65 | +67 | +108 | +46 | 63% | +30 / −96 / −10 |
+| HCC | 57 | +90 | +88 | +47 | 61% | +33 / −54 / −9 |
+| RVNL | 223 | +54 | +48 | +38 | 59% | +86 / −17 / −48 |
+
+Both:
+
+| stock | ₹cr/day | 2024 | 2025 | 2026 ytd | hit |
+|---|---|---|---|---|---|
+| NETWEB | 84 | +251 | +162 | +125 | 61% |
+| VIYASH | 14 | +122 | +127 | +123 | 60% |
+| OLECTRA | 66 | +210 | +118 | +98 | 63% |
+| JBMA | 24 | +164 | +135 | +89 | 62% |
+| TIMETECHNO | 42 | +152 | +117 | +88 | 60% |
+| POCL | 16 | +284 | +141 | +85 | 59% |
+| TEJASNET | 65 | +164 | +119 | +84 | 59% |
+| HCC | 57 | +211 | +124 | +83 | 60% |
+| ATGL | 62 | +113 | +104 | +81 | 62% |
+| HBLENGINE | 80 | +251 | +124 | +76 | 63% |
+
+The two lists are two different kinds of stock. The overnight names are small-cap electronics,
+defence and capital-goods stocks that also rose over the period: a stock that is bid up is bid up
+at the open. The daytime-short names are stocks that fell for two years (wind, solar, rail, infra):
+they open firm and sell off through the day. Both is best where the two coincide (NETWEB, HCC,
+OLECTRA).
+
+Selection out of sample, which is the only test that matters:
+
+| picked on | variant | top 20 next period | universe median | top 20 positive |
+|---|---|---|---|---|
+| 2024 | overnight, 2025 | +45% | +13% | 90% |
+| 2024 | daytime short, 2025 | +41% | +6% | 85% |
+| 2024 | both, 2025 | +95% | +19% | 100% |
+| 2024 + 2025 (worst of two) | overnight, 2026 ytd | +41% | +3% | 95% |
+| 2024 + 2025 | daytime short, 2026 ytd | +31% | +2% | 90% |
+| 2024 + 2025 | both, 2026 ytd | +50% | +7% | 95% |
+
+The stock ranking persists: the top twenty of one period keep roughly 40% a year in the next while
+the market's own edge has gone to zero. That is about 20 bps a night and 15 bps a day gross for
+the picked names. Two years of history and one out-of-sample year is thin evidence, and the names
+are small: a few crore a day of turnover, so the strategy is capped at a few lakh of principal per
+stock before it moves the open.
+
+### What it costs, and the minimum principal (India)
+
+| leg | instrument | round trip | net on a picked stock (gross 20 bps night / 15 bps day) |
+|---|---|---|---|
+| overnight | cash delivery (CNC) | ~25 bps (STT 0.1% both sides, fees) | **negative**: −5 bps a night |
+| overnight | stock future | ~4 bps | +16 bps a night |
+| daytime short | cash intraday (MIS) | ~5 bps (STT 0.025% on the sell, fees) | +10 bps a day |
+| daytime short | stock future | ~4 bps | +11 bps a day |
+| both | stock future | ~8 bps | +27 bps a session |
+
+So: the **overnight hold only works in a stock that has futures**; in cash the STT alone is more
+than the edge. Almost none of the stocks in the tables are in the F&O list (BSE, MCX, RVNL and
+ATGL are; the rest must be checked against the live NSE list, our Kite snapshot holds only the
+cash segment). The **daytime short works in cash** with an intraday order on any of them, and
+needs no futures. For the picked daytime-short names in 2026, +31% gross less ~10% of costs over
+199 sessions leaves about +20% a year on the capital, which intraday leverage (about 5x on MIS)
+multiplies, with the matching risk.
+
+Minimum principal: one cash share, so a few hundred rupees, for the daytime short; one futures
+lot, ₹5 to 15 lakh notional and ₹1 to 3 lakh margin, for the overnight leg. For the index legs the
+Nifty 50 future is one lot of 75 (about ₹19 lakh notional, ~₹2 lakh margin), and on the 2026
+numbers the both variant on Nifty 50 (+9% gross, 199 sessions, ~1.5 bps a session in costs)
+nets about +6%: ₹1,000 of notional becomes about ₹1,060, against ₹850 for buy and hold.
+
+### United States (open to close, daily tables)
+
+| year | SPY night | SPY day short | SPY both | SPY buy and hold | QQQ night | IWM night | median stock night | median stock day short |
+|---|---|---|---|---|---|---|---|---|
+| 2021 | +15 | −9 | +6 | +26 | +15 | +30 | +24 | +8 |
+| 2022 | −16 | +6 | −10 | −23 | −24 | −10 | −10 | +7 |
+| 2023 | +3 | −18 | −15 | +22 | +8 | +7 | +6 | −6 |
+| 2024 | +21 | −1 | +21 | +21 | +29 | +28 | +19 | +9 |
+| 2025 | +7 | −8 | −2 | +16 | +15 | +2 | +2 | −3 |
+| 2026 ytd | +7 | −3 | +5 | +11 | +8 | +8 | +7 | +5 |
+
+The US overnight carries most of the index return in most years, but it is not a hedge: 2022 was
+−16% overnight on SPY, and the daytime short on the US indices is negative in six of nine years.
+Nothing to trade at the index level. Per stock, requiring a price of at least $20, $20 million a
+day and a positive year every year 2021 to 2026:
+
+| overnight | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 ytd | worst |
+|---|---|---|---|---|---|---|---|
+| YPF | +66 | +45 | +60 | +41 | +58 | +26 | +33 |
+| CCJ | +47 | +26 | +24 | +50 | +56 | +21 | +24 |
+| WFRD | +83 | +28 | +28 | +45 | +24 | +34 | +24 |
+| TDW | +55 | +22 | +20 | +54 | +28 | +21 | +20 |
+| MOD | +23 | +24 | +30 | +39 | +20 | +61 | +20 |
+| AVAV | +61 | +19 | +61 | +62 | +45 | +76 | +19 |
+| STRL | +75 | +18 | +65 | +58 | +59 | +56 | +18 |
+
+| daytime short | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 ytd | worst |
+|---|---|---|---|---|---|---|---|
+| MP | +46 | +51 | +41 | +58 | +50 | +61 | +41 |
+| FUBO | +134 | +132 | +32 | +143 | +44 | +49 | +32 |
+| OUST | +156 | +133 | +89 | +18 | +24 | +24 | +18 |
+
+Same pattern as India: the overnight names are energy, uranium, defence and offshore stocks that
+rose for five years (buy and hold +180% to +300%); the daytime-short names fell. The US list is
+at the official open, so take 5 to 10 bps a session off for the open-print effect; the overnight
+names still clear that. Costs are near zero in the US (no STT; commissions ~0, SEC fee on the
+sell). Minimum principal: one share, but a daytime short every day needs a margin account above
+the $25,000 pattern-day-trader floor; the overnight hold alone does not.
+
+### MCX commodities
+
+Continuous front-month series, pairs straddling a roll excluded, contracts with at least a
+thousand lots a day. No consistent edge:
+
+| | 2022 | 2023 | 2024 | 2025 | 2026 ytd |
+|---|---|---|---|---|---|
+| GOLD night | +3 | +7 | +7 | +12 | +8 |
+| GOLD day short | −7 | −5 | −8 | −35 | +2 |
+| SILVER night | −5 | +9 | +11 | +14 | +12 |
+| CRUDEOIL night | +4 | −5 | +3 | −1 | +46 |
+| NATURALGAS day short | +7 | +84 | +41 | +31 | +15 |
+
+Gold's night is positive five years running but at 1 to 3 bps a night against roughly 2 to 3 bps
+round trip, so nothing is left. The daytime short on natural gas looks consistent from 2023 but
+is the three-year fall in the price itself (buy and hold −109% in 2023); 2021 and 2022 were the
+other sign. The MCX night (23:30 to 09:00) carries the London and New York sessions, and the
+study says the Indian close does not systematically misprice them.
+
+### What this says for the model
+
+The overnight gap is the richest single return in the data and it is stock-specific and
+persistent at the one-year scale, which is exactly the kind of structure the Fit can learn: the
+"close to next open" horizon should become a target for both markets (noted under Next in the
+second round), with the stock's own trailing overnight return as a feature. The daily-table open
+must not be the fill price in that target for NSE; the minute bars at 09:29 should be.
