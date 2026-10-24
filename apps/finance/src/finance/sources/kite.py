@@ -312,6 +312,7 @@ def fetch(
     no_data: list[NoData] = []
     requests = 0
     todo = ranges(missing)
+    wanted = set(missing)
     ranges_left = 0
     for i, (a, b) in enumerate(todo):
         if (
@@ -342,7 +343,8 @@ def fetch(
                     ]
                 )
             for d, rows in by_day.items():
-                w.write(d, {"symbol": inst.symbol, "token": inst.token, "candles": rows})
+                if d in wanted:  # a range spans held days too; those files are never rewritten
+                    w.write(d, {"symbol": inst.symbol, "token": inst.token, "candles": rows})
         done = w.close()
         for d in done:
             written.append(_written(root, raw_rel(NAME, d, EXT), "raw", NAME, d))
@@ -448,28 +450,24 @@ def backfill_symbols(
         for a, b in rs:
             candles = fetcher(kite, inst, a, b)
             requests += 1
+            by_day: dict[date, list[list[Any]]] = {}
             for c in candles:
                 ts = c["date"]
                 d = ts.date() if hasattr(ts, "date") else datetime.fromisoformat(str(ts)).date()
                 if not (a <= d <= b):
                     raise ValueError(f"kite returned {d} for {inst.symbol} outside {a}..{b}")
-                w.write(
-                    d,
-                    {
-                        "symbol": inst.symbol,
-                        "token": inst.token,
-                        "candles": [
-                            [
-                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-                                c["open"],
-                                c["high"],
-                                c["low"],
-                                c["close"],
-                                c["volume"],
-                            ]
-                        ],
-                    },
+                by_day.setdefault(d, []).append(
+                    [
+                        ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                        c["open"],
+                        c["high"],
+                        c["low"],
+                        c["close"],
+                        c["volume"],
+                    ]
                 )
+            for d, rows in by_day.items():  # one line per instrument per day, as the day files
+                w.write(d, {"symbol": inst.symbol, "token": inst.token, "candles": rows})
         days_touched.update(w.close())
         finished.append(inst.symbol)
         log.info(

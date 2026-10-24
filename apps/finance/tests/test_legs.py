@@ -314,6 +314,12 @@ def test_kite_fetch_writes_days_and_reports_empty_ones(
         tmp_path, date(2026, 10, 22), Ledger(), object(), insts, fetcher=fetcher
     )
     assert [(w.source, w.day) for w in written] == [("kite_1m", date(2026, 10, 21))]
+    # a later run asks 10-20 and 10-22 again as one range spanning the held 10-21: Kite returns
+    # 10-21's candles too, and the held file is not rewritten
+    held = tmp_path / raw_rel(K.NAME, date(2026, 10, 21), K.EXT)
+    before, held_bytes = held.stat().st_mtime_ns, held.read_bytes()
+    K.fetch(tmp_path, date(2026, 10, 22), Ledger(), object(), insts, fetcher=fetcher)
+    assert held.stat().st_mtime_ns == before and held.read_bytes() == held_bytes
     assert sorted(n.day for n in no_data) == [date(2026, 10, 20), date(2026, 10, 22)]
     assert counts == {"kite_requests": 2, "kite_instruments": 2}
     built = K.build(tmp_path)
@@ -536,7 +542,10 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
 
     def hist_fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
         asked.append((inst.symbol, a, b))
-        return [{"date": datetime(2026, 10, 21, 9, 16), **candle}]
+        return [
+            {"date": datetime(2026, 10, 21, 9, 16), **candle},
+            {"date": datetime(2026, 10, 21, 9, 17), **candle},
+        ]
 
     insts = old + [K.Instrument("TCS", 2), K.Instrument("INFY", 3)]
     written, counts = K.backfill_symbols(
@@ -556,7 +565,9 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
     ]  # covered from the start, and backfilled
     built = K.build(tmp_path)  # the day is rebuilt from the file and its supplement
     df = pl.read_parquet(tmp_path / built[0].path)
-    assert df["symbol"].to_list() == ["INFY", "RELIANCE", "TCS"] and df.height == 3
+    assert df["symbol"].to_list() == ["INFY", "INFY", "RELIANCE", "TCS", "TCS"] and df.height == 5
+    lines = gzip.decompress((tmp_path / supp[0].path).read_bytes()).splitlines()
+    assert len(lines) == 2  # one line per instrument per day, two candles each
     assert (
         len(K.register_existing(tmp_path)) == 2 + 1
     )  # the day's file, the supplement, kite_history
