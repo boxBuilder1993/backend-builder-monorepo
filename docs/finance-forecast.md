@@ -476,6 +476,7 @@ The best model by IC, xgboost depth 4 with 500 trees, by month at the 0.5 percen
 
 ### Next
 
+0. The drift check above: is the −0.5 bps mean a 2026 fact or an entry/exit bias in the target.
 1. Rescale by the calibration slope, and evaluate by within-point quantile as well as by threshold.
 2. A smaller search around depth 3 and 4, 200 to 500 trees, learning rate 0.03 to 0.05, more
    regularisation; `lightgbm` beside xgboost.
@@ -484,6 +485,43 @@ The best model by IC, xgboost depth 4 with 500 trees, by month at the 0.5 percen
 4. The volatility forecast (σ) as its own Fit, since position sizing needs it and the trailing window
    is crude around the open.
 5. `make kite-login` so the minute data runs past 2026-10-08 and the validation window grows.
+
+### Review of the best model (xgboost depth 4, 500 trees)
+
+How to review any model: the console (http://127.0.0.1:9400) for the Fit → FitRun → Model → InferRun →
+Evaluation chain and failures; the tables above for the comparison; the prediction table
+`parquet/inference/<infer run id>.parquet` (key, truth, prediction, raw return, scale) for any
+question a registered metric does not answer; the model directory `models/<model id>/` for the fitted
+object (`model.ubj`, `schema.json`, `fit.json`).
+
+Share of total gain, from the fitted booster: `i_r_open` 10.8%, `clv15` 10.4%, `clv30` 9.6%,
+`turn_rel` 7.1%, `ret_1d` 5.5%, `rv_open` 5.5%, `vwap_dev` 5.4%, `clv5` 4.9%, `m` 4.8%, `i_r15` 3.8%,
+`deliv_pct` 3.3%, `dist_hi` 3.2%, `i_r60` 3.0%, `dow` 2.3%, `range_pos` 2.0%; the other 29 share
+18.4%. The market's move since the open is the single biggest input; the buying-pressure proxies are
+the strongest stock-specific ones; the clock lets the model use the market move differently through
+the day.
+
+Realised return by prediction decile within each decision point, 2026:
+
+| decile | predicted, scaled | realised, scaled | realised, bps | share of ups |
+|---|---|---|---|---|
+| 1 (lowest) | −0.086 | −0.082 | −2.3 | 41.5% |
+| 2 | −0.048 | −0.047 | −1.3 | 44.3% |
+| 5 | −0.013 | −0.015 | −0.4 | 46.5% |
+| 9 | +0.028 | +0.023 | +0.8 | 48.6% |
+| 10 (highest) | +0.061 | +0.048 | +1.5 | 49.6% |
+
+- **The ranking is clean, monotone, and the decile means match the predictions.** The poor
+  calibration slope is the extreme individual predictions overshooting, not the ranking.
+- **Top minus bottom decile is 3.9 bps per 15 minutes before costs**, against a round trip near 10
+  bps. A decile long-short loses money; only the far tail (predicted moves above 0.5 percent) clears
+  cost, and that tail is thin and volatility-clustered, as the monthly table shows.
+- **Every decile has a negative mean and under half up-moves**: the average 15-minute return over all
+  6 million rows of 2026 is about −0.5 bps. Either 2026 to date drifted down intraday, or entering at
+  the next bar's open and exiting at a later close carries a small systematic bias (an open printing
+  on the ask side would do it). It is the size of most deciles, so it is checked before any rule is
+  built on these predictions: the same statistic on 2024 and 2025 rows, and with exit at the next
+  bar's open instead of a close.
 
 ## Operational notes (2026-10-24)
 
