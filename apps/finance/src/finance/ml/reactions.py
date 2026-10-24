@@ -23,7 +23,17 @@ from backend_builder import Context, Reaction
 from finance import reactions as poller
 from finance import settings, store
 from finance.entities import DataFile
-from finance.ml import artifacts, data, fitting, forecast, metrics, modelstore, search, study
+from finance.ml import (
+    artifacts,
+    data,
+    fitting,
+    forecast,
+    metrics,
+    modelstore,
+    search,
+    study,
+    windows,
+)
 from finance.ml import estimators as E
 from finance.ml import schema as S
 from finance.ml.entities import Evaluation, Fit, FitRun, InferRun, Model
@@ -676,6 +686,36 @@ class SessionStudy(Reaction):
         ctx.save("path", rel)
         for variant in study.VARIANTS:
             ctx.save(f"table_{variant}", study.summary_table(rows, variant))
+
+
+class WindowStudy(Reaction):
+    """Every pair of 15-minute grid points, inside a session or into the next, per stock per year
+    (finance.ml.windows). Input: {"params"?: windows.DEFAULTS overrides, "pick_years"?: [2024,
+    2025], "test_year"?: 2026}. Writes parquet/studies/windows_nse_<id>.parquet and publishes it;
+    saves the market tables (same day, night, break), the weekend table and the stock table in
+    vars."""
+
+    async def calculate(self, ctx: Context) -> None:
+        params = {**windows.DEFAULTS, **dict(ctx.input.get("params") or {})}
+        pick = tuple(int(y) for y in ctx.input.get("pick_years", [2024, 2025]))
+        test_year = int(ctx.input.get("test_year", 2026))
+        pull = await ctx.trigger(PullStore, {})
+        assert pull is not None
+        if pull.vars.get("status") == "failed":
+            raise RuntimeError(f"store unavailable: {pull.vars.get('error')}")
+        rel = f"parquet/studies/windows_nse_{uuid.uuid4().hex}.parquet"
+        out = poller.data_root() / rel
+        n = await asyncio.to_thread(_study, poller.data_root(), windows.study_sql(), params, out)
+        rows = pl.read_parquet(out)
+        await ctx.trigger(PublishArtifact, {"paths": [rel], "kind": "parquet", "source": "studies"})
+        ctx.save("params", params)
+        ctx.save("rows", n)
+        ctx.save("path", rel)
+        ctx.save("stocks", int(rows.filter(pl.col("kind") == "stock")["symbol"].n_unique()))
+        for across in ("none", "night", "break"):
+            ctx.save(f"table_market_{across}", windows.market_table(rows, across))
+        ctx.save("table_weekend", windows.weekend_table(rows))
+        ctx.save("table_stocks", windows.stock_table(rows, pick, test_year))
 
 
 def _study(root: Path, sql: str, params: dict[str, Any], out: Path) -> int:

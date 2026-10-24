@@ -755,3 +755,35 @@ def test_session_study_variants_and_summary(tmp_path: Path) -> None:
     assert set(mcx["kind"].to_list()) == {"stock"}
     table = study.summary_table(rows.to_dicts(), "overnight", min_years=1)
     assert table.startswith("| overnight: instrument | kind |") and "2025" in table
+
+
+def test_window_study_grid_pairs_and_tables(tmp_path: Path) -> None:
+    from finance.ml import windows
+
+    assert windows.GRID[:2] == ("09:29", "09:44") and windows.GRID[-2:] == ("15:14", "15:29")
+    assert len(windows.GRID) == 25
+    synthetic_mirror(tmp_path)
+    con = data.connect(tmp_path)
+    params = {**windows.DEFAULTS, "start": "2025-01-01", "min_turnover": 1.0, "min_sessions": 1}
+    rows = data.run_query(con, windows.study_sql(), params)
+    a = rows.filter(pl.col("symbol") == "AAA")
+    # 300 same-day pairs per year, 625 into the next session; the fixture's two days are Monday
+    # and Tuesday, so every cross-session window is a plain night, none spans a break
+    assert a.filter(pl.col("across") == "none").height == 300
+    assert a.filter(pl.col("across") == "night").height == 625
+    assert a.filter(pl.col("across") == "break").height == 0
+    one = a.filter((pl.col("t_in") == "15:14") & (pl.col("t_out") == "09:29")).row(0, named=True)
+    bars = pl.read_parquet(tmp_path / "parquet/equity_1m/year=2025/equity_1m_20250602.parquet")
+    nxt = pl.read_parquet(tmp_path / "parquet/equity_1m/year=2025/equity_1m_20250603.parquet")
+    p0 = bars.filter((pl.col("symbol") == "AAA") & (pl.col("ts").dt.strftime("%H:%M") == "15:14"))[
+        "close"
+    ][0]
+    p1 = nxt.filter((pl.col("symbol") == "AAA") & (pl.col("ts").dt.strftime("%H:%M") == "09:29"))[
+        "close"
+    ][0]
+    assert one["sessions"] == 1 and one["total"] == pytest.approx(math.log(p1 / p0))
+    assert set(rows["kind"].to_list()) == {"stock", "index"}
+    assert windows.market_table(rows, "none").startswith("| side | t_in | t_out |")
+    assert "Indices:" in windows.weekend_table(rows)
+    table = windows.stock_table(rows.with_columns(pl.lit(200).alias("sessions")), (2025,), 2025)
+    assert "Picked windows in 2025" in table
