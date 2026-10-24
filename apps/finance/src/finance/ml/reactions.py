@@ -652,7 +652,7 @@ class ValidateSweep(Reaction):
 
 class SessionStudy(Reaction):
     """Overnight, daytime-short and both, per instrument per year, for a market. Input: {"market":
-    "nse" | "us", "params"?: study.DEFAULTS overrides}. The table is written as
+    "nse" | "us" | "mcx", "params"?: study.DEFAULTS overrides}. The table is written as
     parquet/studies/session_<market>_<id>.parquet in the mirror and published; the three summary
     tables (the most consistent instruments per variant) are saved in vars."""
 

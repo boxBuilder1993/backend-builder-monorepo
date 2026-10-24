@@ -1,7 +1,11 @@
 """The session study: for every instrument of a market, the return of holding overnight (close to the
 next open), of being short in the daytime (open to close, sign flipped), and of both, per year, with
-hit rates and consistency. Pure SQL over the daily tables, so it reaches back to 2021 for NSE and to
-the 1990s for the US; the minute-bar version (15:14 to 09:29) is the same shape over three years.
+hit rates and consistency. Pure SQL over the daily tables, so it reaches back to 2021 for NSE and MCX
+and to the 1990s for the US; the minute-bar version (15:14 to 09:29) is the same shape over three years.
+
+The MCX market is the continuous front-month series: a pair of sessions that straddles a contract
+roll is left out (the `contract` column), so no overnight is the price difference between two
+contracts. Its "night" is 23:30 to 09:00, when London and New York trade the same metals and energy.
 
 Costs are not in the table: they depend on the instrument and the size, and the write-up applies
 them (docs/finance-forecast.md, the session study). Variants an instrument cannot trade (a short
@@ -26,17 +30,24 @@ NSE_INDICES = (
 
 MARKETS: dict[str, dict[str, str]] = {
     "nse": {
-        "stocks": """select symbol as instrument, 'stock' as kind, date as d, open, close, turnover
+        "stocks": """select symbol as instrument, 'stock' as kind, date as d, open, close, turnover, null::date as contract
     from equity where series = 'EQ' and open > 0 and close > 0
     qualify row_number() over (partition by symbol, date order by series) = 1""",
-        "indices": f"""select index_name as instrument, 'index' as kind, date as d, open, close, null::double as turnover
+        "indices": f"""select index_name as instrument, 'index' as kind, date as d, open, close, null::double as turnover, null::date as contract
     from index_daily where open > 0 and close > 0 and index_name in ({NSE_INDICES})""",
     },
     "us": {
-        "stocks": f"""select symbol as instrument, 'stock' as kind, date as d, open, close, close * volume as turnover
+        "stocks": f"""select symbol as instrument, 'stock' as kind, date as d, open, close, close * volume as turnover, null::date as contract
     from us_equity where open > 0 and close > 0 and symbol not like '^%' and symbol not in ({US_CONTEXT})""",
-        "indices": """select symbol as instrument, 'index' as kind, date as d, open, close, null::double as turnover
+        "indices": """select symbol as instrument, 'index' as kind, date as d, open, close, null::double as turnover, null::date as contract
     from us_equity where open > 0 and close > 0 and symbol in ('SPY', 'QQQ', 'IWM')""",
+    },
+    "mcx": {
+        # turnover is lots a day here: contract sizes differ, so rupee value is not comparable across symbols
+        "stocks": """select symbol as instrument, 'stock' as kind, date as d, open, close, volume::double as turnover, expiry as contract
+    from commodity_continuous where open > 0 and close > 0""",
+        "indices": """select null::varchar as instrument, 'index' as kind, null::date as d, null::double as open, null::double as close, null::double as turnover, null::date as contract
+    where false""",
     },
 }
 
@@ -54,11 +65,13 @@ s as (
            ln(lead(open) over w / close) as overnight,
            -ln(close / open) as short_day,
            ln(lead(close) over w / close) as buy_hold,
-           lead(d) over w as nd
+           lead(d) over w as nd,
+           lead(contract) over w is not distinct from contract as same_contract
     from u where d between :start and :end
     window w as (partition by instrument order by d)
 ),
-r as (select *, overnight + short_day as combined from s where overnight is not null and nd - d <= 5),
+r as (select *, overnight + short_day as combined from s
+      where overnight is not null and nd - d <= 5 and same_contract),
 per_year as (
     select instrument, kind, y, count(*) as sessions,
            sum(overnight) as overnight_total, avg(overnight) as overnight_mean,
@@ -95,8 +108,16 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "min_turnover": 5e6,
         "min_sessions": 60,
     },
+    "mcx": {
+        "start": "2021-09-01",
+        "end": "2030-12-31",
+        "liq_from": "2024-01-01",
+        "min_turnover": 1000,
+        "min_sessions": 60,
+    },
 }
-"""The NSE liquidity floor is 5 crore a day (median since 2024), the US 5 million dollars."""
+"""The NSE liquidity floor is 5 crore a day (median since 2024), the US 5 million dollars, MCX a
+thousand lots a day."""
 
 VARIANTS = ("overnight", "short_day", "combined")
 

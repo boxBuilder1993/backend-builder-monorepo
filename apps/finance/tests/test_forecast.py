@@ -217,7 +217,7 @@ def synthetic_mirror(
                 "date": [d] * 3,
                 "symbol": ["GOLD", "SILVER", "CRUDEOIL"],
                 "instrument": ["FUTCOM"] * 3,
-                "expiry": [d + timedelta(days=40)] * 3,
+                "expiry": [daily_days[-1] + timedelta(days=40)] * 3,
                 "open": [1.0] * 3,
                 "high": [1.0] * 3,
                 "low": [1.0] * 3,
@@ -737,5 +737,21 @@ def test_session_study_variants_and_summary(tmp_path: Path) -> None:
     assert {"SPY", "QQQ", "IWM"} <= set(
         us.filter(pl.col("kind") == "index")["instrument"].to_list()
     )
+    mcx = data.run_query(
+        con,
+        study.study_sql("mcx"),
+        {
+            **study.DEFAULTS["mcx"],
+            "start": "2025-04-01",
+            "end": DAYS[-1].isoformat(),
+            "min_turnover": 1.0,
+            "liq_from": "2025-01-01",
+            "min_sessions": 5,
+        },
+    )
+    # one contract throughout the fixture, so every pair of sessions is kept and the three
+    # commodities come through as "stocks" (there is no index on MCX)
+    assert set(mcx["instrument"].to_list()) == {"GOLD", "SILVER", "CRUDEOIL"}
+    assert set(mcx["kind"].to_list()) == {"stock"}
     table = study.summary_table(rows.to_dicts(), "overnight", min_years=1)
     assert table.startswith("| overnight: instrument | kind |") and "2025" in table
