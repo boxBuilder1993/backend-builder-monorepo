@@ -311,5 +311,6 @@ def test_an_evening_session_yields_no_rows_and_no_nan_targets(tmp_path: Path) ->
     _mirror(tmp_path, muhurat=True)
     rows = _rows(tmp_path, step_minutes=1)
     assert set(rows["day"].to_list()) == {DAYS[1]}  # the evening session is not a decision point
-    assert rows["y"].is_finite().all() and rows["m"].min() >= 0
-    assert rows["m_left"].min() >= 1 and rows["scale"].min() > 0
+    assert rows["y"].is_finite().all()
+    assert float(rows["m"].to_numpy().min()) >= 0 and float(rows["m_left"].to_numpy().min()) >= 1
+    assert float(rows["scale"].to_numpy().min()) > 0
