@@ -566,3 +566,203 @@ Built: `ROWS_SQL` with 99 features; `daily_sql(market)` for NSE and US from one 
 from NSE's constituent files and a per-symbol history backfill; the US screener snapshot and
 `us_sectors`; the sector indices (Kite) and sector ETFs (Yahoo) as context. The screens and fits
 follow once the backfills have landed.
+
+## Second round: the screens (2026-10-24, evening)
+
+Seven screens, each a `Screen` run (the last five as one `ScreenSweep`), tables in
+`parquet/screens/`. The minute rows carry 99 features (70 screenable, 29 context), the NSE daily rows
+64, the US daily rows 53; categoricals and context features have no cross-sectional IC and are not
+in the tables. "Stable" means significant with one sign in every year it is significant; a feature
+is listed when its mean IC over the years is at least 0.01.
+
+#### 15 min: 28,180,780 rows, 2023 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| r5 | -0.058 | -0.067 to -0.048 |
+| r1 | -0.052 | -0.057 to -0.047 |
+| r15 | -0.047 | -0.057 to -0.039 |
+| x_r15 | -0.047 | -0.057 to -0.039 |
+| xp_r15 | -0.046 | -0.054 to -0.039 |
+| xs_r15 | -0.046 | -0.055 to -0.039 |
+| up5 | -0.043 | -0.051 to -0.037 |
+| vwret5 | -0.043 | -0.052 to -0.035 |
+| imb5 | -0.037 | -0.046 to -0.032 |
+| r30 | -0.036 | -0.044 to -0.030 |
+| up15 | -0.033 | -0.039 to -0.029 |
+| clv5 | -0.033 | -0.041 to -0.028 |
+| vwret15 | -0.027 | -0.035 to -0.021 |
+| up30 | -0.025 | -0.028 to -0.021 |
+| imb15 | -0.024 | -0.032 to -0.020 |
+| r60 | -0.023 | -0.031 to -0.016 |
+
+Flips (sign changes between years): none. Noise: none.
+
+#### 60 min: 24,581,069 rows, 2023 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| r5 | -0.029 | -0.034 to -0.023 |
+| r1 | -0.026 | -0.029 to -0.023 |
+| xp_r15 | -0.025 | -0.030 to -0.020 |
+| r15 | -0.025 | -0.031 to -0.019 |
+| x_r15 | -0.025 | -0.031 to -0.019 |
+| xs_r15 | -0.025 | -0.030 to -0.020 |
+| vol_60d | -0.024 | -0.037 to -0.013 |
+| deliv_pct | +0.023 | +0.019 to +0.026 |
+| up5 | -0.022 | -0.026 to -0.019 |
+| vwret5 | -0.020 | -0.026 to -0.016 |
+| vol_20d | -0.020 | -0.035 to -0.010 |
+| r30 | -0.019 | -0.025 to -0.013 |
+| up15 | -0.018 | -0.021 to -0.015 |
+| clv5 | -0.018 | -0.022 to -0.013 |
+| imb5 | -0.018 | -0.022 to -0.014 |
+| in_small250 | -0.016 | -0.029 to -0.009 |
+
+Flips (sign changes between years): none. Noise: none.
+
+#### 375 min (to the close): 29,387,001 rows, 2023 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| deliv_pct | +0.044 | +0.035 to +0.048 |
+| vol_60d | -0.033 | -0.043 to -0.016 |
+| vol_20d | -0.030 | -0.042 to -0.014 |
+| relvol15 | +0.027 | +0.020 to +0.040 |
+| in_small250 | -0.027 | -0.044 to -0.017 |
+| xp_r15 | -0.025 | -0.029 to -0.021 |
+| xs_r15 | -0.024 | -0.028 to -0.021 |
+| x_r15 | -0.024 | -0.028 to -0.019 |
+| r15 | -0.024 | -0.028 to -0.019 |
+| relvol5 | +0.024 | +0.016 to +0.036 |
+| r5 | -0.023 | -0.026 to -0.019 |
+| r30 | -0.023 | -0.028 to -0.018 |
+| xp_r60 | -0.022 | -0.028 to -0.016 |
+| up15 | -0.020 | -0.022 to -0.018 |
+| up30 | -0.020 | -0.023 to -0.018 |
+| r1 | -0.020 | -0.021 to -0.017 |
+
+Flips (sign changes between years): turn_liq, impact30. Noise: none.
+
+#### NSE 1 session: 1,668,749 rows, 2021 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| vol_20d | +0.052 | +0.038 to +0.075 |
+| log_turn20 | +0.050 | +0.043 to +0.055 |
+| gap_d | -0.044 | -0.051 to -0.041 |
+| in_n500 | +0.043 | +0.033 to +0.048 |
+| ret_1d | -0.039 | -0.051 to -0.027 |
+| trades_rel | -0.033 | -0.044 to -0.025 |
+| log_px | +0.032 | +0.017 to +0.046 |
+| avg_trade | +0.031 | +0.027 to +0.036 |
+| vol_60d | +0.030 | +0.012 to +0.065 |
+| turn_rel | -0.030 | -0.040 to -0.020 |
+| log_trades | +0.029 | +0.024 to +0.034 |
+| sp_5d | -0.029 | -0.040 to -0.013 |
+| ret_5d | -0.026 | -0.040 to -0.011 |
+| relvol_day | -0.024 | -0.035 to -0.015 |
+| p_ret_1d | +0.024 | +0.016 to +0.029 |
+| in_n50 | +0.023 | +0.018 to +0.031 |
+
+Flips (sign changes between years): dist_hi. Noise: xs_ret_20d, sp_20d, rv_day, r_last60, r_first60.
+
+#### NSE 21 sessions: 1,631,829 rows, 2021 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| tick_bps | +0.076 | +0.041 to +0.098 |
+| p_ret_20d | +0.038 | +0.014 to +0.061 |
+| deliv_pct | +0.037 | +0.018 to +0.066 |
+| p_ret_5d | +0.036 | +0.007 to +0.048 |
+| p_ret_1d | +0.032 | +0.009 to +0.045 |
+| s_ret_5d | +0.027 | -0.007 to +0.052 |
+| s_ret_1d | +0.026 | +0.005 to +0.041 |
+| in_small250 | +0.025 | +0.013 to +0.039 |
+| rs_60 | +0.025 | -0.007 to +0.070 |
+| ret_60d | +0.025 | -0.007 to +0.070 |
+| pw_ret_20d | +0.024 | -0.002 to +0.046 |
+| dist_lo | +0.020 | -0.007 to +0.048 |
+| sp_60d | +0.018 | -0.012 to +0.056 |
+| sp_5d | -0.013 | -0.023 to +0.004 |
+| ret_1d | -0.011 | -0.016 to -0.001 |
+| gap_d | -0.010 | -0.020 to +0.008 |
+
+Flips (sign changes between years): in_n500, dist_hi, avg_trade, s_ret_20d, log_turn20, ret_20d, rs_20, in_n50, in_mid100, vol_60d, xs_ret_20d, sp_20d, log_trades. Noise: r_first60.
+
+#### US 1 session: 4,872,101 rows, 2015 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| vol_20d | -0.018 | -0.038 to -0.002 |
+| vol_60d | -0.018 | -0.030 to -0.002 |
+| in_n500 | +0.015 | +0.005 to +0.025 |
+| dist_hi | +0.014 | +0.004 to +0.024 |
+| in_small250 | -0.013 | -0.023 to -0.003 |
+
+Flips (sign changes between years): none. Noise: p_ret_1d, sp_60d, ret_60d, rs_60, sp_20d, xs_ret_20d, ret_20d, rs_20, p_ret_20d.
+
+#### US 21 sessions: 4,822,191 rows, 2015 to 2026
+
+| feature | mean IC | range over years |
+|---|---|---|
+| in_n500 | +0.064 | +0.028 to +0.115 |
+| in_small250 | -0.055 | -0.093 to -0.011 |
+| vol_20d | -0.046 | -0.153 to +0.015 |
+| vol_60d | -0.043 | -0.160 to +0.020 |
+| dist_hi | +0.038 | -0.009 to +0.087 |
+| in_n50 | +0.034 | +0.007 to +0.067 |
+
+Flips (sign changes between years): log_turn20, log_px, tick_bps, p_ret_20d, in_mid100, s_ret_20d, ret_20d, rs_20, sp_5d. Noise: s_ret_1d, clv_d, range_pos_d.
+
+### Reading across the seven
+
+- **Minutes: reversal, fading with horizon.** The stock's own recent return, its return against its
+  industry peers and against its sector index are the strongest features at 15 minutes (−0.05 to
+  −0.06), half that at 60 and a third at the close. Peers and sector add little beyond the stock's
+  own move at these horizons: `xp_r15` and `xs_r15` track `r15` almost exactly. Relative volume is
+  the one stable positive intraday feature and grows with horizon (+0.01 at 15 minutes, +0.027 at the
+  close).
+- **The slow layer takes over by the close.** At 375 minutes delivery percentage is the single best
+  feature (+0.044, every year +0.035 to +0.048), followed by 20- and 60-day volatility (−0.03, calm
+  names drift up), small-cap membership (−0.027) and relative volume (+0.027). This is what the
+  first round's screen predicted.
+- **NSE one session ahead is the richest horizon.** Fourteen features above +/−0.02 and all stable
+  over five years: 20-day volatility (+0.052; here the target is the next session's open-to-close
+  move, so volatile names move more intraday relative to their 20-day daily volatility, and the
+  sign must not be read as "volatility pays"), 20-session turnover (+0.05), today's gap (−0.044),
+  Nifty 500 membership (+0.043), yesterday's return (−0.039), trades against the norm (−0.033),
+  price level (+0.032), average trade size (+0.031), peers' and the sector's recent returns (+0.02),
+  distance from the low (+0.022). Liquid, large, calm, un-gapped names have the better next session.
+- **NSE one month ahead is where flips appear.** Tick size over price (+0.076, cheap stocks win the
+  month, a small-cap effect), peers' 20-day return (+0.038) and delivery percentage (+0.037) are
+  stable; Nifty 500 membership, distance from the high, average trade size, turnover and 20-day
+  momentum all flip sign between years. Five years is three regimes; monthly horizons need the long
+  daily history and a model that conditions on regime features rather than fixed signs.
+- **The US is weaker and larger-cap-led.** One session ahead, nothing reaches 0.02: 20- and 60-day
+  volatility −0.018, large-cap membership +0.015, small-cap −0.013, distance from the high +0.014.
+  One month ahead, large-cap membership (+0.064) and small-cap (−0.055) dominate with low
+  volatility (−0.046): the 2015 to 2026 large-cap decade, stable each year but a regime fact more
+  than a stock-selection signal. Price level, turnover, momentum and sector returns flip.
+- **US versus NSE, as asked.** The NSE has more and stronger stock-level signal at every horizon the
+  two share: the one-session screen has fourteen stable features above 0.02 against the US's none;
+  the monthly screen has stable microstructure and delivery signals the US data cannot express
+  (no delivery, no trade counts). The US signal that exists is size and volatility, which is
+  mostly what the indices did. The fits will say whether the US combination is still worth a model.
+
+### Caveats
+
+- The US daily rows carry a turnover floor of 10 million dollars a day (median over 20 sessions),
+  about 1,700 stocks; the NSE floor is 1 crore, about 1,300 stocks. The floors decide the universe
+  the ICs describe.
+- The NSE sector index returns at daily grain and the sector ETFs in the US are joined by the
+  industry's mapped index; industries without one get the market index and so a zero spread.
+- The screens are univariate. Context features (market move, breadth, regime, overseas, clock) and
+  interactions are only measured by the fits.
+
+### Next: the fits
+
+Seven Fits from these screens, features kept where stable with mean IC above 0.003 plus every
+context and categorical feature, and two runs each: fit through 2025 and fit on 2026 January to
+June, both validated on 2026 July to October with IC, calibration, top-k and threshold metrics after
+costs. Run as `FitSweep` and `ValidateSweep` reactions.
