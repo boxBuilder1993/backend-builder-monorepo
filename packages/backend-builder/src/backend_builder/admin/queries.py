@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from backend_builder.store import Store
+
+LOG_LINES = 300
+"""Most lines the console renders for one run; the rest are Grafana's."""
 
 
 async def overview(store: Store, since_hours: float = 24) -> dict[str, Any]:
@@ -206,3 +214,88 @@ async def schedules(store: Store) -> list[dict[str, Any]]:
         " and o.scheduled_for is not null and o.dead_at is null) as next_due "
         "from _schedule s order by s.reaction, s.cron"
     )
+
+
+# --- logs, from Loki ---------------------------------------------------------------------------
+
+Fetch = Callable[[str], bytes]
+
+
+def _fetch(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=5) as response:  # noqa: S310 - operator-configured URL
+        return response.read()
+
+
+def log_query(app: str, record: dict[str, Any]) -> str:
+    """The LogQL for one invocation: the whole run for a seed, one invocation
+    for a child. Ids are filtered from the line, never labels (docs/logs.md)."""
+    field = "root_id" if record["id"] == record["root_id"] else "reaction_id"
+    return f'{{app="{app}"}} | json | {field}="{record["id"]}"'
+
+
+def log_window(record: dict[str, Any]) -> tuple[datetime, datetime]:
+    """From the invocation's start to its end, with a margin either side for
+    the record's own timestamps lagging the lines."""
+    started: datetime = record["started_at"]
+    ended = started + timedelta(milliseconds=float(record["duration_ms"] or 0))
+    if record["outcome"] == "running":
+        ended = datetime.now(UTC)
+    return started - timedelta(seconds=5), ended + timedelta(seconds=30)
+
+
+async def logs(
+    logs_url: str,
+    app: str,
+    record: dict[str, Any],
+    *,
+    retention_hours: float = 24,
+    fetch: Fetch = _fetch,
+) -> dict[str, Any]:
+    """The lines Loki holds for ``record``, oldest first, or why there are none:
+    ``expired`` past the retention, ``unreachable`` when Loki does not answer."""
+    started: datetime = record["started_at"]
+    if datetime.now(UTC) - started > timedelta(hours=retention_hours):
+        return {"state": "expired", "lines": [], "query": log_query(app, record)}
+    query = log_query(app, record)
+    start, end = log_window(record)
+    params = urllib.parse.urlencode(
+        {
+            "query": query,
+            "start": int(start.timestamp() * 1_000_000_000),
+            "end": int(end.timestamp() * 1_000_000_000),
+            "limit": LOG_LINES,
+            "direction": "forward",
+        }
+    )
+    url = f"{logs_url}/loki/api/v1/query_range?{params}"
+    try:
+        body = await asyncio.to_thread(fetch, url)
+        payload: dict[str, Any] = json.loads(body)
+    except Exception as exc:  # noqa: BLE001 - shown to the operator, never raised
+        return {"state": "unreachable", "lines": [], "query": query, "error": str(exc)}
+    lines: list[dict[str, Any]] = []
+    for stream in payload.get("data", {}).get("result", []):
+        for ts, raw in stream.get("values", []):
+            try:
+                line: dict[str, Any] = json.loads(raw)
+            except json.JSONDecodeError:
+                line = {"message": raw}
+            lines.append(
+                {
+                    "time": datetime.fromtimestamp(int(ts) / 1_000_000_000, UTC),
+                    "level": str(line.get("level", "")),
+                    "logger": str(line.get("logger", "")),
+                    "message": str(line.get("message", raw)),
+                    "reaction_id": line.get("reaction_id"),
+                    "runtime": str(line.get("logger", "")).startswith("backend_builder"),
+                }
+            )
+    lines.sort(key=lambda row: row["time"])
+    return {
+        "state": "ok",
+        "lines": lines[:LOG_LINES],
+        "truncated": len(lines) >= LOG_LINES,
+        "query": query,
+        "start": start,
+        "end": end,
+    }

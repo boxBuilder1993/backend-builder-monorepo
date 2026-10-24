@@ -1,6 +1,6 @@
 # Logs
 
-Status: design, 2026-10-24. Decided in discussion, not built. Companion to [design.md](design.md) §11, which describes what the runtime logs today, and to [pools.md](pools.md), whose Kubernetes manifests carry the collection pieces described here.
+Status: 2026-10-24. Sections 1 to 5 are built on `main`: structured lines, the compose `logs` profile with one day of retention, and the console panel. Section 6 step 4, Kubernetes collection, waits for the pools work. Companion to [design.md](design.md) §11, which describes what the runtime logs today, and to [pools.md](pools.md), whose Kubernetes manifests carry the collection pieces described here.
 
 ## Intent
 
@@ -73,6 +73,7 @@ Grafana itself is the fleet-wide view: search across runs, a reaction's error li
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BACKEND_BUILDER_LOGS_URL` | unset | Loki base URL the console queries; unset disables the panel |
+| `BACKEND_BUILDER_GRAFANA_URL` | unset | Grafana base URL for the panel's "open in Grafana" link |
 | `BACKEND_BUILDER_LOG_LEVEL` | `INFO` | unchanged |
 | `RUNTIME_ENV` | `dev` | `dev` writes the human format; `test` and `prod` write JSON |
 

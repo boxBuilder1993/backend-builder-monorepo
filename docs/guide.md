@@ -439,6 +439,8 @@ Configuration is environment variables:
 | `BACKEND_BUILDER_METRICS_PORT` | `9100` | `/metrics` and `/health` on every process |
 | `BACKEND_BUILDER_ADMIN_PORT` | `9200` | |
 | `BACKEND_BUILDER_ADMIN_TOKEN` | unset | when set, the console asks for it once |
+| `BACKEND_BUILDER_LOGS_URL` | unset | Loki base URL; the console's run page shows the run's log lines |
+| `BACKEND_BUILDER_GRAFANA_URL` | unset | Grafana base URL for the console's "open in Grafana" links |
 | `SECRET_<NAME>` | | app secrets, read by `ctx.secret` |
 
 Locally, `compose.yaml` runs all of it for the shop under the `shop` profile; copy that block for a new app, changing the `APP` build argument. The `Dockerfile` builds any app with `--build-arg APP=myshop`.
@@ -451,7 +453,7 @@ Locally, `compose.yaml` runs all of it for the shop under the `shop` profile; co
 
 **Metrics.** Every process serves Prometheus metrics on its metrics port: runs by reaction, source and outcome; run and span durations; HTTP requests by route and status; outbox deliveries and depth; schedule seeds and purges. Labels are bounded; there is no per-id metric. `/health` on the same port pings the store.
 
-**Logs** go to stderr, one line per lifecycle event at INFO with identifiers only (reaction name, reaction id, parent id, counts, durations) and payloads only at DEBUG. Every line of a run carries its `reaction_id`, which is also the `X-Reaction-Id` response header and the run record's id, so an error report, a log search and a console page meet at one string.
+**Logs.** Use `logging.getLogger(__name__)` in a reaction like anywhere else. Every line written inside a run, yours or the runtime's, carries the run's `root_id`, the invocation's `reaction_id`, the reaction and the source, so one id finds everything a run said. In `dev` lines are readable text on stderr; elsewhere they are JSON on stdout for a collector. The compose `logs` profile runs Loki, Alloy and Grafana with one day of retention, and with `BACKEND_BUILDER_LOGS_URL` set the console's run page shows the run's lines and links to Grafana. The runtime stores no log lines itself; the design is in [logs.md](logs.md). The `reaction_id` is also the `X-Reaction-Id` response header and the run record's id, so an error report, a log search and a console page meet at one string. Never log a secret; `ctx.secret` values are redacted, but only by exact match.
 
 ## 16. Checklist
 

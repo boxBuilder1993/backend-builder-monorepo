@@ -19,6 +19,24 @@
 {% for r in a.rows %}<tr><td class="name">{{ ('&nbsp;' * (r.depth * 4)) | safe }}{{ '↳ ' if r.depth else '' }}{{ r.reaction | reaction_short }}</td><td>{% if r.id == record.id %}<code>{{ r.id }}</code>{% else %}<a href="/runs/{{ r.id }}"><code>{{ r.id }}</code></a>{% endif %}</td><td>{{ r.duration_ms | ms }}</td><td class="{{ r.outcome }}">{{ r.outcome }}</td></tr>{% endfor %}
 </table>
 {% endfor %}
+<h2>Logs</h2>
+{% if logs is none %}
+<p class="muted">Logs are not wired: set <code>BACKEND_BUILDER_LOGS_URL</code> to the Loki base URL and the lines this run wrote appear here. See docs/logs.md.</p>
+{% elif logs.state == 'expired' %}
+<p class="muted">Logs expired: Loki keeps one day, and this run is older.</p>
+{% elif logs.state == 'unreachable' %}
+<p class="error">Loki at <code>{{ logs_url }}</code> did not answer: {{ logs.error }}</p>
+{% else %}
+{% if logs.lines %}
+<table class="logs"><tr><th>time</th><th>level</th><th>logger</th><th>message</th><th>invocation</th></tr>
+{% for l in logs.lines %}<tr class="{{ 'muted' if l.runtime else '' }}"><td>{{ l.time.strftime('%H:%M:%S.%f')[:-3] }}</td><td class="{{ 'error' if l.level in ('ERROR', 'CRITICAL') else ('warn' if l.level == 'WARNING' else '') }}">{{ l.level }}</td><td>{{ l.logger }}</td><td>{{ l.message }}</td><td>{% if l.reaction_id and l.reaction_id != record.id %}<a href="/runs/{{ l.reaction_id }}"><code>{{ l.reaction_id[:8] }}</code></a>{% elif l.reaction_id %}<code>{{ l.reaction_id[:8] }}</code>{% endif %}</td></tr>{% endfor %}
+</table>
+{% if logs.truncated %}<p class="muted">Showing the first {{ logs.lines | length }} lines.</p>{% endif %}
+{% else %}
+<p class="muted">No lines in Loki for this run yet.</p>
+{% endif %}
+<p class="muted"><code>{{ logs.query }}</code>{% if logs.grafana %} · <a href="{{ logs.grafana }}">open in Grafana</a>{% endif %}</p>
+{% endif %}
 <h2>Input</h2><pre>{{ record.input | tojson(indent=2) if record.input is not none else '(not recorded)' }}</pre>
 <h2>Saved vars</h2><pre>{{ record.vars | tojson(indent=2) if record.vars is not none else '(not recorded)' }}</pre>
 <h2>{{ 'Changes written' if record.is_root else 'Created and deleted' }}</h2>

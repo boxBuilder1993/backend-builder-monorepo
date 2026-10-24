@@ -273,7 +273,7 @@ Each source is optional on any method. FastAPI validates and documents each one 
 
 Built.
 
-The package logs under `backend_builder` with a `NullHandler`; applications call `configure_logging(level)`. INFO carries identifiers and counts, never payloads. DEBUG carries inputs and rows.
+The package logs under `backend_builder` with a `NullHandler`; processes call `configure_logging(level, format=)`, which attaches one handler to the root logger so an app's own loggers travel with the runtime's. Every record emitted inside a run carries `root_id`, `reaction_id`, `reaction` and `source`, stamped by the log record factory from a context variable `invoke` sets; `app` and `process` identify the process. `dev` writes a readable line to stderr; `test` and `prod` write one JSON object per line to stdout for a collector. Collection, retention and the console's per-run view are in [logs.md](logs.md). INFO carries identifiers and counts, never payloads. DEBUG carries inputs and rows.
 
 | Event | Level |
 | --- | --- |
