@@ -69,10 +69,24 @@ that no stock dominates and the model learns relative moves. Nothing from after 
 | layer | features |
 |---|---|
 | intraday, bars up to t | returns over the last 1, 5, 15, 30, 60 min and since open; position within today's range; deviation from today's VWAP; realised volatility over the last 30 min and since open; volume in the last 5 and 15 min relative to the same clock time over the past 20 sessions; rupee turnover over the trailing `:liq_minutes`, as a level across stocks (how much can be traded here, beyond passing the floor); NIFTY 50's returns over the same spans; the stock's return minus the index's over 15 and 60 min |
+| buying pressure, bars up to t, over 5, 15 and 30 min | signed volume imbalance (volume on up minutes minus volume on down minutes, over total volume; an up minute closes above the previous close); close-location volume (volume × ((close − low) − (high − close)) / (high − low), summed, the accumulation-distribution line); volume-weighted return; share of up minutes; price impact (absolute return over rupee turnover); turnover acceleration (last 5 min over last 30) |
 | daily, frozen at yesterday's close | yesterday's return; today's gap at open; 5- and 20-day return; 20-day volatility; distance from the trailing 52-week high and low; turnover relative to its 20-day median; deliverable percentage where NSE reports it; relative strength against NIFTY 50 over 20 days |
 | clock | minutes since open; minutes to close; day of week; expiry day; day after a holiday |
 
-About 30 features. The final list is decided by the IC screen below, not by this table.
+About 45 features. The final list is decided by the IC screen below, not by this table.
+
+**Buying pressure is inferred, not observed.** The bars have no trade direction, bid, ask or book, so
+"many traders buying" is read from what buying does to a bar: price up on volume. The tick rule and the
+close-location line are the standard bar-level proxies and they work tolerably at the minute scale.
+The predictive question is not whether buying moves the price, which is simultaneous, but whether
+pressure over the last window continues into the next one (a large order being worked) or reverses (a
+crowd chasing a print); the proxies together with relative volume and the clock let the model learn
+which. Deliverable percentage, at the daily layer, is the one genuine buyer-side number NSE gives.
+
+Kite's live feed carries total buy and sell quantities and the top-five book per tick, which is real
+order flow, but only live. A collector running during the session would build that history from now
+on; in a year it would be a feature the bars cannot provide. A separate leg, noted here as the next
+data source, not part of this Fit.
 
 ### Search
 
