@@ -306,11 +306,17 @@ class Infer(Reaction):
         ctx.save("infer_run_id", run.id)
         try:
             directory = await asyncio.to_thread(self._model_dir, ctx.secret, model)
-            loaded = await ctx.trigger(
-                LoadRows, {"query": run.query, "params": params, "key": list(schema.key)}
-            )
-            assert loaded is not None
-            rows_path = str(loaded.load("rows_path"))
+            hint = ctx.input.get("rows_path")
+            if (
+                hint and Path(str(hint)).exists()
+            ):  # a caller that built the rows once for many models
+                rows_path = str(hint)
+            else:
+                loaded = await ctx.trigger(
+                    LoadRows, {"query": run.query, "params": params, "key": list(schema.key)}
+                )
+                assert loaded is not None
+                rows_path = str(loaded.load("rows_path"))
             rel = f"parquet/inference/{run.id}.parquet"
             n, unknown = await asyncio.to_thread(
                 _score, directory, schema, rows_path, poller.data_root() / rel, model.id, run.id
@@ -517,6 +523,14 @@ class Validate(Reaction):
             "select * from model where fit_run_id = :run and status = 'fitted' order by created_at",
             run=run.id,
         )
+        rows_path: str | None = None
+        if models:  # the validation rows once, for every model of the run
+            loaded = await ctx.trigger(
+                LoadRows, {"query": fit.query, "params": params, "key": list(fit.key)}
+            )
+            assert loaded is not None
+            rows_path = str(loaded.load("rows_path"))
+            ctx.save("rows", loaded.vars.get("rows"))
         done: dict[str, Any] = {}
         for m in models:
             prior = await ctx.query(
@@ -531,7 +545,14 @@ class Validate(Reaction):
                 done[m.id] = {"infer_run_id": prior[0].id, "skipped": True}
                 continue
             inferred = await ctx.trigger(
-                Infer, {"model_id": m.id, "label": label, "query": fit.query, "params": params}
+                Infer,
+                {
+                    "model_id": m.id,
+                    "label": label,
+                    "query": fit.query,
+                    "params": params,
+                    "rows_path": rows_path,
+                },
             )
             assert inferred is not None
             infer_run_id = inferred.vars.get("infer_run_id")
@@ -581,3 +602,49 @@ class ScreenSweep(Reaction):
                 results.append({"spec": key, "error": _err(exc)})
             ctx.save("results", results)
         ctx.save("screens", len(results))
+
+
+class FitSweep(Reaction):
+    """Several FitRuns as one job. Input: {"runs": [{"fit_id", "params"?}, ...]}. Triggers a RunFit
+    child per entry, in order (each builds its rows and queues its models for the worker); saves the
+    fit run ids. A child's failure is recorded under its entry and the sweep goes on."""
+
+    async def calculate(self, ctx: Context) -> None:
+        results: list[dict[str, Any]] = []
+        for entry in ctx.input["runs"]:
+            try:
+                child = await ctx.trigger(
+                    RunFit, {"fit_id": entry["fit_id"], "params": entry.get("params") or {}}
+                )
+                assert child is not None
+                results.append(
+                    {
+                        "fit_id": entry["fit_id"],
+                        "params": entry.get("params") or {},
+                        "fit_run_id": child.vars.get("fit_run_id"),
+                        "rows": child.vars.get("rows"),
+                        "models": len(child.vars.get("models") or []),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - one run's outcome, not the sweep's
+                results.append({"fit_id": entry["fit_id"], "error": _err(exc)})
+            ctx.save("results", results)
+        ctx.save("runs", len(results))
+
+
+class ValidateSweep(Reaction):
+    """Validate several FitRuns as one job. Input: {"fit_run_ids": [...], "label", "params",
+    "thresholds"?, "cost_bps"?, "top_k"?, "rescale"?}: the same validation range for every run."""
+
+    async def calculate(self, ctx: Context) -> None:
+        shared = {k: v for k, v in ctx.input.items() if k != "fit_run_ids"}
+        results: list[dict[str, Any]] = []
+        for run_id in ctx.input["fit_run_ids"]:
+            try:
+                child = await ctx.trigger(Validate, {**shared, "fit_run_id": run_id})
+                assert child is not None
+                results.append({"fit_run_id": run_id, "models": child.vars.get("models")})
+            except Exception as exc:  # noqa: BLE001
+                results.append({"fit_run_id": run_id, "error": _err(exc)})
+            ctx.save("results", results)
+        ctx.save("runs", len(results))

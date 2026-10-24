@@ -663,3 +663,36 @@ def test_write_rows_in_chunks_matches_one_shot_and_drops_the_warm_up(tmp_path: P
         (date(2025, 11, 15), date(2026, 1, 31)),
         (date(2026, 2, 1), date(2026, 2, 10)),
     ]
+
+
+def test_features_from_screen_keeps_stable_signal_and_every_context_feature(tmp_path: Path) -> None:
+    years = [2023, 2024, 2025, 2026]
+    rows: list[dict[str, object]] = []
+    for y in years:
+        rows += [
+            {"feature": "r5", "year": y, "ic": -0.05, "se": 0.001, "points": 100},  # stable, strong
+            {"feature": "gap", "year": y, "ic": 0.0005, "se": 0.001, "points": 100},  # noise
+            {
+                "feature": "ret_5d",
+                "year": y,
+                "ic": 0.004 if y % 2 else -0.004,
+                "se": 0.001,
+                "points": 100,
+            },  # flips
+            {
+                "feature": "deliv_pct",
+                "year": y,
+                "ic": 0.004,
+                "se": 0.001,
+                "points": 100,
+            },  # stable, just above the floor
+        ]
+    pl.DataFrame(rows).write_parquet(tmp_path / "screen.parquet")
+    kept = forecast.features_from_screen(
+        tmp_path / "screen.parquet", forecast.FEATURES, forecast.CONTEXT
+    )
+    assert "r5" in kept and "deliv_pct" in kept
+    assert "gap" not in kept and "ret_5d" not in kept
+    assert set(forecast.CONTEXT) <= set(kept) and "industry" in kept and "dow" in kept
+    assert kept == [f for f in forecast.FEATURES if f in set(kept)]  # order of the feature list
+    assert "r15" not in kept  # not in the screen table at all: not kept
