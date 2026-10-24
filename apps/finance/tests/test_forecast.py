@@ -468,3 +468,49 @@ def test_new_layers_resolve_from_the_reference_and_context_tables(tmp_path: Path
     assert early["or_pos"] is None and early["or_break"] is None
     assert a["or_break"] in (-1, 0, 1) and a["or_pos"] is not None
     assert set(rows.columns) >= set(forecast.FEATURES)
+
+
+def test_daily_rows_decide_at_the_close_and_enter_at_the_next_open(tmp_path: Path) -> None:
+    _mirror(tmp_path)
+    con = data.connect(tmp_path)
+    params = {
+        **forecast.DAILY_PARAMS,
+        "start": "2025-04-01",
+        "end": DAYS[-1].isoformat(),
+        "min_turnover_day": 1.0,
+    }
+    rows = data.run_query(con, forecast.DAILY_SQL, {**params, "horizon_sessions": 1})
+    assert set(rows.columns) >= {
+        *forecast.DAILY_FEATURES,
+        "symbol",
+        "ts",
+        "y",
+        "r",
+        "scale",
+        "entry",
+        "exit_",
+    }
+    a = rows.filter((pl.col("symbol") == "AAA") & (pl.col("day") == DAYS[0])).row(0, named=True)
+    # the fixture's daily rows: open 100, close 100 + i; DAYS[0] is i = 40, DAYS[1] is i = 41
+    assert a["entry"] == 100.0 and a["exit_"] == 141.0 and a["entry_date"] == DAYS[1]
+    assert a["r"] == pytest.approx(math.log(141 / 100)) and a["y"] == pytest.approx(
+        a["r"] / a["scale"]
+    )
+    assert a["ts"] == datetime.combine(DAYS[0], datetime.min.time()).replace(hour=15, minute=30)
+    assert a["ret_1d"] == pytest.approx(math.log(140 / 139)) and a["deliv_pct"] == 80.0
+    # the US session dated t is known before the entry at t+1's open: it is the row used
+    assert a["spy_cc"] == pytest.approx(math.log((100 + 40 * 0.1) / (100 + 39 * 0.1)))
+    assert a["industry"] == "Financial Services" and a["sector_idx"] == "NIFTY FIN SERVICE"
+    # the session's shape comes from the minute bars held for DAYS[0]
+    assert (
+        a["rv_day"] is not None and a["vwap_dev_close"] is not None and a["r_first60"] is not None
+    )
+    assert a["dow"] == 2 and a["after_holiday"] == 0  # the entry day is DAYS[1], a Tuesday
+    # the last session has no next open and is not a row; the horizon moves the exit
+    assert rows.filter(pl.col("day") == DAYS[1]).height == 0
+    h3 = data.run_query(con, forecast.DAILY_SQL, {**params, "horizon_sessions": 3})
+    last_h3 = h3.filter(pl.col("symbol") == "AAA")["day"].max()
+    assert isinstance(last_h3, date) and last_h3 < DAYS[0]
+    body = forecast.daily_fit_definition(21)
+    assert body["params"]["horizon_sessions"] == 21
+    assert set(data.param_names(body["query"])) == set(body["params"])
