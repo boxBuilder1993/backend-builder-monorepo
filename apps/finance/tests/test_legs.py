@@ -314,6 +314,13 @@ def test_kite_fetch_writes_days_and_reports_empty_ones(
         tmp_path, date(2026, 10, 22), Ledger(), object(), insts, fetcher=fetcher
     )
     assert [(w.source, w.day) for w in written] == [("kite_1m", date(2026, 10, 21))]
+    # a later run whose range spans the held day gets its candles again but never rewrites the file
+    before = (tmp_path / raw_rel(K.NAME, date(2026, 10, 21), K.EXT)).stat().st_mtime_ns
+    (tmp_path / raw_rel(K.NAME, date(2026, 10, 20), K.EXT)).write_bytes(
+        b""
+    )  # 10-20 held, 10-22 missing
+    K.fetch(tmp_path, date(2026, 10, 22), Ledger(), object(), insts, fetcher=fetcher)
+    assert (tmp_path / raw_rel(K.NAME, date(2026, 10, 21), K.EXT)).stat().st_mtime_ns == before
     assert sorted(n.day for n in no_data) == [date(2026, 10, 20), date(2026, 10, 22)]
     assert counts == {"kite_requests": 2, "kite_instruments": 2}
     built = K.build(tmp_path)

@@ -312,6 +312,7 @@ def fetch(
     no_data: list[NoData] = []
     requests = 0
     todo = ranges(missing)
+    wanted = set(missing)
     ranges_left = 0
     for i, (a, b) in enumerate(todo):
         if (
@@ -342,7 +343,8 @@ def fetch(
                     ]
                 )
             for d, rows in by_day.items():
-                w.write(d, {"symbol": inst.symbol, "token": inst.token, "candles": rows})
+                if d in wanted:  # a range spans held days too; those files are never rewritten
+                    w.write(d, {"symbol": inst.symbol, "token": inst.token, "candles": rows})
         done = w.close()
         for d in done:
             written.append(_written(root, raw_rel(NAME, d, EXT), "raw", NAME, d))
