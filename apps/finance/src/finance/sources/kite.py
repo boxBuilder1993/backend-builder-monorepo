@@ -258,12 +258,23 @@ class DayWriters:
         self.files[d].write((json.dumps(line, separators=(",", ":")) + "\n").encode())
 
     def close(self) -> set[date]:
+        """Finalise every day. A day's file is moved into place; a supplement that exists already from
+        this run is appended to as a further gzip member (a run's supplement for a day is one file,
+        whatever the number of instruments it covered), so a run of 140 instruments over 750 sessions
+        leaves 750 files, not 100,000."""
         done: set[date] = set()
         for d, f in self.files.items():
             f.close()
             p = self.root / self._rel(d)
-            Path(str(p) + ".tmp").replace(p)
+            tmp = Path(str(p) + ".tmp")
+            if self.stamp and p.exists():
+                with p.open("ab") as out:
+                    out.write(tmp.read_bytes())
+                tmp.unlink()
+            else:
+                tmp.replace(p)
             done.add(d)
+        self.files = {}
         return done
 
 
@@ -402,8 +413,9 @@ def backfill_symbols(
 ) -> tuple[list[Written], dict[str, Any]]:
     """History for instruments that joined the universe after the days were fetched: every session
     held (a day with a raw file) from KITE_START to the day before the instrument's first held bar,
-    asked of Kite in 60-day ranges and written as supplement files. An instrument is done when all
-    its ranges are, and recorded in kite_history; the deadline stops between instruments, so a run
+    asked of Kite in 60-day ranges and written as supplement files, one per day for the run (every
+    instrument's candles for the day appended as the instrument finishes). An instrument is done when
+    all its ranges are, and recorded in kite_history; the deadline stops between instruments, so a run
     cut short resumes with the next instrument next time."""
     done_before = history(root)
     cov = coverage(root)
@@ -423,6 +435,7 @@ def backfill_symbols(
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     written: list[Written] = []
     finished: list[str] = []
+    days_touched: set[date] = set()
     requests = 0
     left = 0
     for i, (inst, days) in enumerate(todo):
@@ -431,7 +444,7 @@ def backfill_symbols(
             left = len(todo) - i
             log.info("kite backfill: out of time, %d instruments left for the next run", left)
             break
-        w = DayWriters(root, stamp=f"{stamp}_{inst.token}")
+        w = DayWriters(root, stamp=stamp)
         for a, b in rs:
             candles = fetcher(kite, inst, a, b)
             requests += 1
@@ -457,13 +470,13 @@ def backfill_symbols(
                         ],
                     },
                 )
-        for d in w.close():
-            rel = supplement_rel(d, f"{stamp}_{inst.token}")
-            written.append(_written(root, rel, "raw", NAME, d))
+        days_touched.update(w.close())
         finished.append(inst.symbol)
         log.info(
             "kite backfill: %s done, %d ranges, %d requests so far", inst.symbol, len(rs), requests
         )
+    for d in sorted(days_touched):  # the run's supplements, one per day, registered once complete
+        written.append(_written(root, supplement_rel(d, stamp), "raw", NAME, d))
     new_done = [s for s in done_before if s not in history(root)] + finished
     if new_done:
         written.append(record_history(root, sorted(set(new_done)), today))
