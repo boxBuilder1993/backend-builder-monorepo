@@ -74,6 +74,32 @@ KITE_STAY_SESSIONS = 250
 """A stock fetched on any of the last this many sessions stays in the universe: entry is a gate, not
 a nightly vote, so minute histories have no holes from hovering around the turnover bar."""
 KITE_EXTRA = ("NIFTYBEES", "BANKBEES", "JUNIORBEES")
-KITE_INDICES = ("NIFTY 50", "NIFTY BANK", "NIFTY MIDCAP 100")
+KITE_INDICES = (
+    "NIFTY 50",
+    "NIFTY BANK",
+    "NIFTY MIDCAP 100",
+    "NIFTY 500",
+    "NIFTY NEXT 50",
+    "NIFTY MIDCAP 150",
+    "NIFTY AUTO",
+    "NIFTY IT",
+    "NIFTY PHARMA",
+    "NIFTY FMCG",
+    "NIFTY METAL",
+    "NIFTY REALTY",
+    "NIFTY ENERGY",
+    "NIFTY FIN SERVICE",
+    "NIFTY PSU BANK",
+    "NIFTY PVT BANK",
+    "NIFTY INFRA",
+    "NIFTY OIL AND GAS",
+    "NIFTY HEALTHCARE",
+    "NIFTY CONSUMPTION",
+    "NIFTY MEDIA",
+    "NIFTY COMMODITIES",
+    "INDIA VIX",
+)
+"""Minute bars of the market, size and sector indices, as context features: a stock's move against
+its sector is a different signal from its move against the market. Kite's INDICES segment names."""
 KITE_RANGE_DAYS = 60
 KITE_PAUSE = 0.35
