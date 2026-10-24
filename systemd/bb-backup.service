@@ -1,0 +1,9 @@
+# Nightly Postgres backups for every app database. Installed by `make pg-backup-install`.
+[Unit]
+Description=backend-builder postgres backups
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/bin/bb-backup dump

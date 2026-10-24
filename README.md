@@ -79,6 +79,7 @@ uv run pytest
 - [Builder's guide](docs/guide.md): how to write an app. Entities, reactions, the context, triggers, endpoints, secrets, migrations, testing. Start here.
 - [Design](docs/design.md): why it is the way it is. The full model, every decision and its reasoning, what is parked for later.
 - [Infrastructure](docs/infrastructure.md): repository layout, environments and the deployment path. Partly a draft.
+- [Backups](docs/backups.md): `make pg-backup`, nightly dumps of every app database with retention and an off-box copy.
 - [Logs](docs/logs.md): structured lines to stdout, collected into Loki with one day of retention, shown per run in the console. Decided, not built.
 - [Compute pools and service calls](docs/pools.md): the design for running reactions in Kubernetes pools, with `call` as the transactional service-call mode. Decided, not built.
 - [Running on a host](docs/running.md): `make up APP=<app>`, one shared Postgres in Docker and the app's processes as systemd user units that start at boot.

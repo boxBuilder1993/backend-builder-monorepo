@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Back up, list, fetch and restore the app databases of the shared Postgres. Plain bash over
+# `docker compose exec postgres` (no client needed on the host, versions always match) and the `hf` CLI.
+# Reads ~/.config/backend-builder/backup.env: BACKUP_REPO (a private Hugging Face dataset repo, optional)
+# and HF_TOKEN. Dumps live under ~/.local/share/backend-builder/backups/<db>/<db>_<UTC>.dump.
+#
+#   bb-backup dump [db]                     dump every app database (or one), prune, upload when configured
+#   bb-backup list [db]                     local dumps, and remote ones when configured
+#   bb-backup fetch <db> [name]             pull the newest (or the named) dump from the remote repo
+#   bb-backup restore <db> <file> [into]    pg_restore into a fresh database (default <db>_restored);
+#                                           into=<db> restores over the live database and asks first
+set -euo pipefail
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+cd "$(dirname "$0")/.."
+BACKUP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/backend-builder/backups"
+ENV_FILE="$HOME/.config/backend-builder/backup.env"
+[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
+BACKUP_REPO="${BACKUP_REPO:-}"
+KEEP_DAILY="${BACKUP_KEEP_DAILY:-14}"
+PG_USER=backend_builder
+psql() { docker compose exec -T postgres psql -U $PG_USER -v ON_ERROR_STOP=1 -tA "$@"; }
+hf_cli() { uv run --no-sync hf "$@"; }
+remote_files() {
+  # paths in the remote repo under <db>/, sorted; the hf CLI of this version has no file listing
+  uv run --no-sync python -c "
+import sys
+from huggingface_hub import HfApi
+files = HfApi(token='$HF_TOKEN').list_repo_files('$BACKUP_REPO', repo_type='dataset')
+print('\\n'.join(sorted(f for f in files if f.startswith(sys.argv[1] + '/'))))" "$1"
+}
+
+app_dbs() {
+  # every database that carries the runtime's tables, i.e. an app's; never the maintenance db
+  psql -c "select datname from pg_database where datistemplate = false and datname not in ('postgres', 'backend_builder') order by 1"
+}
+
+dump_one() {
+  local db=$1 stamp; stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  local dir="$BACKUP_DIR/$db" out="$BACKUP_DIR/$db/${db}_${stamp}.dump"
+  mkdir -p "$dir"
+  docker compose exec -T postgres pg_dump -U $PG_USER -Fc --no-owner --no-acl "$db" > "$out.tmp"
+  mv "$out.tmp" "$out"
+  echo "dumped $db -> $out ($(du -h "$out" | cut -f1))"
+  prune "$db"
+  if [ -n "$BACKUP_REPO" ]; then
+    hf_cli upload "$BACKUP_REPO" "$out" "$db/$(basename "$out")" --repo-type dataset \
+      --commit-message "backup $db $stamp" >/dev/null && echo "uploaded to $BACKUP_REPO/$db/$(basename "$out")"
+  fi
+}
+
+prune() {
+  # keep the newest KEEP_DAILY dumps and the first dump of every month
+  local db=$1
+  ls -1 "$BACKUP_DIR/$db"/*.dump 2>/dev/null | sort | awk -v keep="$KEEP_DAILY" '
+    { files[NR] = $0; m = substr($0, length($0) - 21, 6); if (!(m in first)) first[m] = $0 }
+    END { for (i = 1; i <= NR - keep; i++) { f = files[i]; isfirst = 0; for (k in first) if (first[k] == f) isfirst = 1; if (!isfirst) print f } }
+  ' | while read -r f; do rm -f "$f"; echo "pruned $(basename "$f")"; done
+}
+
+cmd_dump() {
+  if [ -n "${1:-}" ]; then dump_one "$1"; else for db in $(app_dbs); do dump_one "$db"; done; fi
+}
+
+cmd_list() {
+  for db in ${1:-$(app_dbs)}; do
+    echo "== $db (local)"
+    ls -lh "$BACKUP_DIR/$db"/*.dump 2>/dev/null | awk '{print "  " $5 "  " $6 " " $7 " " $8 "  " $9}' || echo "  none"
+    if [ -n "$BACKUP_REPO" ]; then
+      echo "== $db (remote $BACKUP_REPO)"
+      remote_files "$db" | sed '/^$/d; s/^/  /' | grep . || echo "  none"
+    fi
+  done
+}
+
+cmd_fetch() {
+  local db=${1:?fetch <db> [name]} name=${2:-}
+  [ -n "$BACKUP_REPO" ] || { echo "BACKUP_REPO is not set in $ENV_FILE" >&2; exit 2; }
+  if [ -z "$name" ]; then
+    name=$(remote_files "$db" | grep . | tail -1 | sed "s#^$db/##")
+    [ -n "$name" ] || { echo "no remote dumps for $db" >&2; exit 2; }
+  fi
+  mkdir -p "$BACKUP_DIR/$db"
+  hf_cli download "$BACKUP_REPO" "$db/$name" --repo-type dataset --local-dir "$BACKUP_DIR" >/dev/null
+  echo "fetched $BACKUP_DIR/$db/$name"
+}
+
+cmd_restore() {
+  local db=${1:?restore <db> <file> [into]} file=${2:?restore <db> <file> [into]} into=${3:-${1}_restored}
+  [ -f "$file" ] || file="$BACKUP_DIR/$db/$file"
+  [ -f "$file" ] || { echo "no such dump: $file" >&2; exit 2; }
+  if [ "$into" = "$db" ]; then
+    echo "This drops and replaces the LIVE database '$db'. Stop its units first. Type the database name to continue:"
+    read -r answer; [ "$answer" = "$db" ] || { echo "aborted"; exit 2; }
+    psql -c "drop database if exists \"$db\" with (force)" >/dev/null
+  else
+    psql -c "drop database if exists \"$into\" with (force)" >/dev/null
+  fi
+  psql -c "create database \"$into\"" >/dev/null
+  docker compose exec -T postgres pg_restore -U $PG_USER -d "$into" --no-owner --no-acl < "$file"
+  echo "restored $(basename "$file") into $into: $(psql -d "$into" -c "select count(*) from pg_tables where schemaname = 'public'") tables"
+}
+
+case "${1:-}" in
+  dump) shift; cmd_dump "$@" ;;
+  list) shift; cmd_list "$@" ;;
+  fetch) shift; cmd_fetch "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  *) sed -n '2,13p' "$0"; exit 2 ;;
+esac
