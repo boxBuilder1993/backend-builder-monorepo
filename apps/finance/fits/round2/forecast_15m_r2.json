@@ -1,0 +1,358 @@
+{
+  "name": "forecast 15m r2",
+  "description": "Round two (minute, nse, horizon 15): features kept by screen b0ebcd51 (stable, mean |IC| >= 0.003) plus context and categoricals; docs/finance-forecast.md",
+  "query": "\nwith\nbars as (\n    select distinct symbol, ts, ts::date as day, open, high, low, close, volume, close * volume as turnover\n    from equity_1m\n    where symbol not like 'NIFTY%' and symbol <> 'INDIA VIX' and ts::date between :start and :end\n),\nidx0 as (\n    select distinct ts, ts::date as day, open, close from equity_1m where symbol = 'NIFTY 50' and ts::date between :start and :end\n),\nidx as (\n    select ts,\n           ln(close / lag(close, 5) over w) as i_r5, ln(close / lag(close, 15) over w) as i_r15,\n           ln(close / lag(close, 30) over w) as i_r30, ln(close / lag(close, 60) over w) as i_r60,\n           ln(close / first_value(open) over w) as i_r_open\n    from idx0 window w as (partition by day order by ts)\n),\nsidx as (  -- every sector and size index; the stock's own sector joins by name\n    select symbol as sector_idx, ts,\n           ln(close / lag(close, 15) over w) as s_r15, ln(close / lag(close, 60) over w) as s_r60,\n           ln(close / first_value(open) over w) as s_r_open\n    from (select distinct symbol, ts, ts::date as day, open, close from equity_1m\n          where symbol like 'NIFTY%' and ts::date between :start and :end)\n    window w as (partition by symbol, day order by ts)\n),\nb1 as (\n    select *,\n           datediff('minute', day::timestamp + interval 9 hour + interval 15 minute, ts) as m,\n           ln(close / lag(close) over w) as ret1,\n           ln(close / lag(close, 5) over w) as r5, ln(close / lag(close, 15) over w) as r15,\n           ln(close / lag(close, 30) over w) as r30, ln(close / lag(close, 60) over w) as r60,\n           first_value(open) over w as day_open,\n           ln(close / first_value(open) over w) as r_open,\n           (close - min(low) over wd) / nullif(max(high) over wd - min(low) over wd, 0) as range_pos,\n           close / nullif(sum(close * volume) over wd / nullif(sum(volume) over wd, 0), 0) - 1 as vwap_dev,\n           sum(volume) over wd as cumvol,\n           volume * ((close - low) - (high - close)) / nullif(high - low, 0) as clv_bar,\n           max(case when datediff('minute', day::timestamp + interval 9 hour + interval 15 minute, ts) < 15 then high end) over wd as or_high,\n           min(case when datediff('minute', day::timestamp + interval 9 hour + interval 15 minute, ts) < 15 then low end) over wd as or_low,\n           lead(open, 1) over w as entry,\n           lead(close, :horizon_minutes) over w as exit_h,\n           last_value(close) over (partition by symbol, day order by ts rows between unbounded preceding and unbounded following) as day_close\n    from bars\n    window w as (partition by symbol, day order by ts),\n           wd as (partition by symbol, day order by ts rows between unbounded preceding and current row)\n),\nb2 as (\n    select *,\n           ret1 as r1,\n           stddev_samp(ret1) over w30 as rv30,\n           stddev_samp(ret1) over wd as rv_open,\n           stddev_samp(ret1) over (partition by symbol, day order by ts rows between :vol_minutes - 1 preceding and current row) as sig1,\n           sum(volume) over w5 as vol5, sum(volume) over w15 as vol15,\n           sum(turnover) over w5 as turn5, sum(turnover) over w30 as turn30,\n           sum(turnover) over (partition by symbol, day order by ts rows between :liq_minutes - 1 preceding and current row) as turn_liq,\n           sum(case when ret1 > 0 then volume when ret1 < 0 then -volume end) over w5 / nullif(sum(volume) over w5, 0) as imb5,\n           sum(case when ret1 > 0 then volume when ret1 < 0 then -volume end) over w15 / nullif(sum(volume) over w15, 0) as imb15,\n           sum(case when ret1 > 0 then volume when ret1 < 0 then -volume end) over w30 / nullif(sum(volume) over w30, 0) as imb30,\n           sum(clv_bar) over w5 / nullif(sum(volume) over w5, 0) as clv5,\n           sum(clv_bar) over w15 / nullif(sum(volume) over w15, 0) as clv15,\n           sum(clv_bar) over w30 / nullif(sum(volume) over w30, 0) as clv30,\n           sum(ret1 * volume) over w5 / nullif(sum(volume) over w5, 0) as vwret5,\n           sum(ret1 * volume) over w15 / nullif(sum(volume) over w15, 0) as vwret15,\n           sum(ret1 * volume) over w30 / nullif(sum(volume) over w30, 0) as vwret30,\n           avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w5 as up5,\n           avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w15 as up15,\n           avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w30 as up30,\n           abs(r15) / nullif(sum(turnover) over w15, 0) * 1e7 as impact15,\n           abs(r30) / nullif(sum(turnover) over w30, 0) * 1e7 as impact30,\n           case when m >= 15 then (close - or_low) / nullif(or_high - or_low, 0) end as or_pos,\n           case when m < 15 then null when close > or_high then 1 when close < or_low then -1 else 0 end as or_break\n    from b1\n    window w5 as (partition by symbol, day order by ts rows between 4 preceding and current row),\n           w15 as (partition by symbol, day order by ts rows between 14 preceding and current row),\n           w30 as (partition by symbol, day order by ts rows between 29 preceding and current row),\n           wd as (partition by symbol, day order by ts rows between unbounded preceding and current row)\n),\nb3 as (\n    select *,\n           vol5 / nullif(avg(vol5) over wc, 0) as relvol5,\n           vol15 / nullif(avg(vol15) over wc, 0) as relvol15,\n           turn5 / nullif(turn30 / 6, 0) as turn_accel\n    from b2\n    window wc as (partition by symbol, m order by day rows between 20 preceding and 1 preceding)\n),\nd0 as (\n    select symbol, date, close, high, low, turnover, trades, deliv_pct,\n           ln(close / lag(close) over (partition by symbol order by date)) as dret\n    from equity\n    qualify row_number() over (partition by symbol, date order by series) = 1\n),\nd1 as (\n    select symbol, date, close as d_close, deliv_pct,\n           dret as ret_1d,\n           ln(close / lag(close, 5) over w) as ret_5d,\n           ln(close / lag(close, 20) over w) as ret_20d,\n           stddev_samp(dret) over (partition by symbol order by date rows between 19 preceding and current row) as vol_20d,\n           stddev_samp(dret) over (partition by symbol order by date rows between 59 preceding and current row) as vol_60d,\n           close / nullif(max(high) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_hi,\n           close / nullif(min(low) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_lo,\n           turnover / nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as turn_rel,\n           ln(nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 19 preceding and current row), 0)) as log_turn20,\n           ln(nullif(trades, 0)) as log_trades,\n           ln(nullif(turnover / nullif(trades, 0), 0)) as avg_trade,\n           trades / nullif(quantile_cont(trades, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as trades_rel,\n           ((close - low) - (high - close)) / nullif(high - low, 0) as clv_prev,\n           ln(close) as log_px\n    from d0 window w as (partition by symbol order by date)\n),\ni0 as (\n    select date, close, ln(close / lag(close) over (order by date)) as iret\n    from index_daily where index_name = 'Nifty 50'\n),\ni1 as (\n    select date,\n           ln(close / lag(close, 20) over (order by date)) as i_ret_20d,\n           ln(close / lag(close, 60) over (order by date)) as mkt_ret60,\n           stddev_samp(iret) over (order by date rows between 19 preceding and current row) as mkt_vol20,\n           stddev_samp(iret) over (order by date rows between 59 preceding and current row) as mkt_vol60\n    from i0\n),\nvix as (select date, close as vix from index_daily where index_name = 'India VIX'),\nus as (\n    select date,\n           max(case when symbol = 'SPY' then ln(close / open) end) as spy_oc,\n           max(case when symbol = 'SPY' then ln(close / lag_close) end) as spy_cc,\n           max(case when symbol = 'QQQ' then ln(close / open) end) as qqq_oc,\n           max(case when symbol = 'QQQ' then ln(close / lag_close) end) as qqq_cc,\n           max(case when symbol = 'SPY' then ln(close / lag_close5) end) as spy_5d,\n           max(case when symbol = 'SPY' then (high - low) / nullif(close, 0) end) as spy_range\n    from (select symbol, date, open, high, low, close,\n                 lag(close) over (partition by symbol order by date) as lag_close,\n                 lag(close, 5) over (partition by symbol order by date) as lag_close5\n          from us_equity where symbol in ('SPY', 'QQQ'))\n    group by date\n),\nmcx as (\n    select date,\n           max(case when symbol = 'GOLD' then ln(close / lag_close) end) as gold_cc,\n           max(case when symbol = 'SILVER' then ln(close / lag_close) end) as silver_cc,\n           max(case when symbol = 'CRUDEOIL' then ln(close / lag_close) end) as crude_cc\n    from (select symbol, date, close, lag(close) over (partition by symbol order by date) as lag_close\n          from commodity_continuous where symbol in ('GOLD', 'SILVER', 'CRUDEOIL'))\n    group by date\n),\ncons as (  -- one row per (symbol, snapshot day): membership and the industry label\n    select symbol, as_of,\n           any_value(industry) as industry,\n           max(case when index = 'NIFTY 50' then 1 else 0 end) as in_n50,\n           max(case when index = 'NIFTY 500' then 1 else 0 end) as in_n500,\n           max(case when index = 'NIFTY MIDCAP 100' then 1 else 0 end) as in_mid100,\n           max(case when index = 'NIFTY SMALLCAP 250' then 1 else 0 end) as in_small250\n    from index_constituents group by symbol, as_of\n),\ncons_first as (select * from cons qualify row_number() over (partition by symbol order by as_of) = 1),\nticks as (select tradingsymbol as symbol, any_value(tick_size) as tick from kite_instruments where segment = 'NSE' group by 1),\ndays as (\n    select day, lag(day) over (order by day) as prev_day from (select distinct day from bars)\n),\nattr as (  -- the stock's slow attributes on the day: the newest snapshot on or before it, else the first\n    select b.symbol, b.day,\n           coalesce(c.industry, f.industry) as industry,\n           coalesce(c.in_n50, f.in_n50, 0) as in_n50, coalesce(c.in_n500, f.in_n500, 0) as in_n500,\n           coalesce(c.in_mid100, f.in_mid100, 0) as in_mid100, coalesce(c.in_small250, f.in_small250, 0) as in_small250,\n           t.tick\n    from (select distinct symbol, day from bars) b\n    asof left join cons c on b.symbol = c.symbol and b.day >= c.as_of\n    left join cons_first f on b.symbol = f.symbol\n    left join ticks t on t.symbol = b.symbol\n),\nr1 as (\n    select b.*, i.i_r5, i.i_r15, i.i_r30, i.i_r60, i.i_r_open,\n           d.ret_1d, d.d_close, d.ret_5d, d.ret_20d, d.vol_20d, d.vol_60d, d.dist_hi, d.dist_lo, d.turn_rel,\n           d.deliv_pct, d.log_turn20, d.log_trades, d.avg_trade, d.trades_rel, d.clv_prev, d.log_px,\n           ii.i_ret_20d, ii.mkt_ret60, ii.mkt_vol20, ii.mkt_vol60, v.vix,\n           u.spy_oc, u.spy_cc, u.qqq_oc, u.qqq_cc, u.spy_5d, u.spy_range, x.gold_cc, x.silver_cc, x.crude_cc,\n           a.industry, a.in_n50, a.in_n500, a.in_mid100, a.in_small250,\n           a.tick / nullif(d.d_close, 0) * 1e4 as tick_bps,\n           case a.industry when 'Financial Services' then 'NIFTY FIN SERVICE' when 'Information Technology' then 'NIFTY IT' when 'Automobile and Auto Components' then 'NIFTY AUTO' when 'Healthcare' then 'NIFTY HEALTHCARE' when 'Fast Moving Consumer Goods' then 'NIFTY FMCG' when 'Metals & Mining' then 'NIFTY METAL' when 'Realty' then 'NIFTY REALTY' when 'Oil Gas & Consumable Fuels' then 'NIFTY OIL AND GAS' when 'Power' then 'NIFTY ENERGY' when 'Consumer Durables' then 'NIFTY CONSUMPTION' when 'Consumer Services' then 'NIFTY CONSUMPTION' when 'Capital Goods' then 'NIFTY INFRA' when 'Construction' then 'NIFTY INFRA' when 'Construction Materials' then 'NIFTY INFRA' when 'Media Entertainment & Publication' then 'NIFTY MEDIA' when 'Chemicals' then 'NIFTY COMMODITIES' else 'NIFTY 500' end as sector_idx,\n           dy.prev_day\n    from (select * exclude (open, high, low, volume, turnover, ret1, cumvol, clv_bar, or_high, or_low,\n                            vol5, vol15, turn5, turn30) from b3) b\n    left join idx i using (ts)\n    asof left join d1 d on b.symbol = d.symbol and b.day > d.date\n    asof left join i1 ii on b.day > ii.date\n    asof left join vix v on b.day > v.date\n    asof left join us u on b.day > u.date\n    asof left join mcx x on b.day > x.date\n    left join attr a on a.symbol = b.symbol and a.day = b.day\n    left join days dy on dy.day = b.day\n    where b.m between 0 and 374  -- the regular session only: Muhurat evening bars run past it\n      and b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover  -- the decision points, before the wide joins\n),\nr2 as (  -- peers at the same minute, breadth at the same minute\n    select r.*,\n           avg(r5) over wp as p_r5, avg(r15) over wp as p_r15, avg(r30) over wp as p_r30,\n           avg(r60) over wp as p_r60, avg(r_open) over wp as p_r_open,\n           sum(r15 * exp(log_turn20)) over wp / nullif(sum(exp(log_turn20)) over wp, 0) as pw_r15,\n           ret_5d - avg(ret_5d) over wp as sp_5d, ret_20d - avg(ret_20d) over wp as sp_20d,\n           avg(case when r_open > 0 then 1.0 else 0.0 end) over wt as breadth_open,\n           avg(case when r15 > 0 then 1.0 else 0.0 end) over wt as breadth_15,\n           stddev_samp(r15) over wt as disp_15,\n           s.s_r15, s.s_r60, s.s_r_open\n    from r1 r\n    left join sidx s on s.sector_idx = r.sector_idx and s.ts = r.ts\n    window wp as (partition by coalesce(r.industry, 'none'), r.ts), wt as (partition by r.ts)\n),\nrows_ as (\n    select symbol, ts, day, close, entry, sig1,\n           case when :horizon_minutes >= 375 then day_close else exit_h end as exit_,  -- a session horizon is the close\n           r1, r5, r15, r30, r60, r_open, range_pos, vwap_dev, rv30, rv_open, relvol5, relvol15, turn_liq,\n           i_r5, i_r15, i_r30, i_r60, i_r_open, r15 - i_r15 as x_r15, r60 - i_r60 as x_r60,\n           imb5, imb15, imb30, clv5, clv15, clv30, vwret5, vwret15, vwret30, up5, up15, up30, impact15, impact30, turn_accel,\n           or_pos, or_break, clv_prev,\n           ret_1d, day_open / nullif(d_close, 0) - 1 as gap, ret_5d, ret_20d, vol_20d, dist_hi, dist_lo, turn_rel, deliv_pct,\n           ret_20d - i_ret_20d as rs_20,\n           log_trades, avg_trade, trades_rel,\n           industry, sector_idx, in_n50, in_n500, in_mid100, in_small250, log_px, tick_bps, log_turn20, vol_60d,\n           p_r5, p_r15, p_r30, p_r60, p_r_open, r15 - p_r15 as xp_r15, r60 - p_r60 as xp_r60, pw_r15, sp_5d, sp_20d,\n           s_r15, s_r60, s_r_open, r15 - s_r15 as xs_r15,\n           breadth_open, breadth_15, disp_15,\n           mkt_vol20, mkt_vol60, mkt_ret60, vix,\n           spy_oc, spy_cc, qqq_oc, qqq_cc, spy_5d, spy_range, gold_cc, silver_cc, crude_cc,\n           m, 375 - m as m_left, isodow(day) as dow, dayofmonth(day) as dom, month(day) as moy,\n           (day = (last_day(day) - (((isodow(last_day(day)) - (case when day < date '2025-09-01' then 4 else 2 end) + 7) % 7)::int)))::int as expiry,\n           greatest(0, (last_day(day) - (((isodow(last_day(day)) - (case when day < date '2025-09-01' then 4 else 2 end) + 7) % 7)::int)) - day) as dte,\n           (day - prev_day > case when isodow(day) = 1 then 3 else 1 end)::int as after_holiday\n    from r2\n)\nselect *,\n       sig1 * sqrt(least(:horizon_minutes, m_left - 1)) as scale,\n       ln(exit_ / entry) as r,\n       ln(exit_ / entry) / (sig1 * sqrt(least(:horizon_minutes, m_left - 1))) as y\nfrom rows_\nwhere entry is not null and exit_ is not null and sig1 > 0\norder by ts, symbol\n",
+  "params": {
+    "horizon_minutes": 15,
+    "step_minutes": 5,
+    "vol_minutes": 60,
+    "liq_minutes": 60,
+    "min_turnover": 2000000.0,
+    "start": "2023-10-03",
+    "end": "2030-12-31"
+  },
+  "key": [
+    "symbol",
+    "ts"
+  ],
+  "features": [
+    {
+      "name": "r1",
+      "kind": "numeric"
+    },
+    {
+      "name": "r5",
+      "kind": "numeric"
+    },
+    {
+      "name": "r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "r30",
+      "kind": "numeric"
+    },
+    {
+      "name": "r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "r_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "range_pos",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwap_dev",
+      "kind": "numeric"
+    },
+    {
+      "name": "rv_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "relvol5",
+      "kind": "numeric"
+    },
+    {
+      "name": "relvol15",
+      "kind": "numeric"
+    },
+    {
+      "name": "turn_liq",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r5",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r30",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "x_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "x_r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "imb5",
+      "kind": "numeric"
+    },
+    {
+      "name": "imb15",
+      "kind": "numeric"
+    },
+    {
+      "name": "imb30",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv5",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv15",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv30",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwret5",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwret15",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwret30",
+      "kind": "numeric"
+    },
+    {
+      "name": "up5",
+      "kind": "numeric"
+    },
+    {
+      "name": "up15",
+      "kind": "numeric"
+    },
+    {
+      "name": "up30",
+      "kind": "numeric"
+    },
+    {
+      "name": "turn_accel",
+      "kind": "numeric"
+    },
+    {
+      "name": "or_pos",
+      "kind": "numeric"
+    },
+    {
+      "name": "or_break",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv_prev",
+      "kind": "numeric"
+    },
+    {
+      "name": "vol_20d",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_hi",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_lo",
+      "kind": "numeric"
+    },
+    {
+      "name": "deliv_pct",
+      "kind": "numeric"
+    },
+    {
+      "name": "avg_trade",
+      "kind": "numeric"
+    },
+    {
+      "name": "industry",
+      "kind": "categorical"
+    },
+    {
+      "name": "sector_idx",
+      "kind": "categorical"
+    },
+    {
+      "name": "in_n50",
+      "kind": "numeric"
+    },
+    {
+      "name": "in_mid100",
+      "kind": "numeric"
+    },
+    {
+      "name": "in_small250",
+      "kind": "numeric"
+    },
+    {
+      "name": "log_px",
+      "kind": "numeric"
+    },
+    {
+      "name": "vol_60d",
+      "kind": "numeric"
+    },
+    {
+      "name": "p_r5",
+      "kind": "numeric"
+    },
+    {
+      "name": "p_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "p_r30",
+      "kind": "numeric"
+    },
+    {
+      "name": "xp_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "xp_r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "xs_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "breadth_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "breadth_15",
+      "kind": "numeric"
+    },
+    {
+      "name": "disp_15",
+      "kind": "numeric"
+    },
+    {
+      "name": "mkt_vol20",
+      "kind": "numeric"
+    },
+    {
+      "name": "mkt_vol60",
+      "kind": "numeric"
+    },
+    {
+      "name": "mkt_ret60",
+      "kind": "numeric"
+    },
+    {
+      "name": "vix",
+      "kind": "numeric"
+    },
+    {
+      "name": "spy_oc",
+      "kind": "numeric"
+    },
+    {
+      "name": "spy_cc",
+      "kind": "numeric"
+    },
+    {
+      "name": "qqq_oc",
+      "kind": "numeric"
+    },
+    {
+      "name": "qqq_cc",
+      "kind": "numeric"
+    },
+    {
+      "name": "spy_5d",
+      "kind": "numeric"
+    },
+    {
+      "name": "spy_range",
+      "kind": "numeric"
+    },
+    {
+      "name": "gold_cc",
+      "kind": "numeric"
+    },
+    {
+      "name": "silver_cc",
+      "kind": "numeric"
+    },
+    {
+      "name": "crude_cc",
+      "kind": "numeric"
+    },
+    {
+      "name": "m",
+      "kind": "numeric"
+    },
+    {
+      "name": "m_left",
+      "kind": "numeric"
+    },
+    {
+      "name": "dow",
+      "kind": "categorical"
+    },
+    {
+      "name": "dom",
+      "kind": "numeric"
+    },
+    {
+      "name": "moy",
+      "kind": "categorical"
+    },
+    {
+      "name": "expiry",
+      "kind": "numeric"
+    },
+    {
+      "name": "dte",
+      "kind": "numeric"
+    },
+    {
+      "name": "after_holiday",
+      "kind": "numeric"
+    }
+  ],
+  "target": {
+    "columns": [
+      "y"
+    ],
+    "task": "regression"
+  },
+  "search": [
+    {
+      "algorithm": "sklearn.linear",
+      "params": {}
+    },
+    {
+      "algorithm": "xgboost",
+      "params": {
+        "max_depth": [
+          3,
+          4
+        ],
+        "learning_rate": 0.05,
+        "n_estimators": [
+          300,
+          600
+        ],
+        "min_child_weight": 200,
+        "subsample": 0.8,
+        "colsample_bytree": 0.7,
+        "reg_lambda": 5.0
+      }
+    }
+  ]
+}
