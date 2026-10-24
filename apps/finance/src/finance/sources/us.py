@@ -202,6 +202,7 @@ def fetch_prices(
     written: list[Written] = []
     fetched: set[str] = set()
     n_fail = n_rows = 0
+    stamp = time.strftime("%H%M%S")  # a day may see several runs; a batch file is never rewritten
     for n, (syms, start) in enumerate(jobs, 1):
         try:
             df = retry(
@@ -234,7 +235,7 @@ def fetch_prices(
                 dormant[s] = rec
         fetched |= got
         if df.height:
-            rel = f"raw/yahoo/{today:%Y}/yahoo_{today:%Y%m%d}_b{n:03d}.parquet"
+            rel = f"raw/yahoo/{today:%Y}/yahoo_{today:%Y%m%d}_{stamp}_b{n:03d}.parquet"
             buf = io.BytesIO()
             df.sort(["symbol", "date"]).write_parquet(buf, compression="zstd")
             write_if_changed(root / rel, buf.getvalue())
