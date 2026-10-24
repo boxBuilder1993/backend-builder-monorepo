@@ -81,6 +81,9 @@ PRESSURE = [
     "impact30",
     "turn_accel",
 ]
+SHAPE = ["or_pos", "or_break", "clv_prev"]
+"""Opening range (first 15 minutes): position within it and whether price is outside it; yesterday's
+close location in its own range."""
 DAILY = [
     "ret_1d",
     "gap",
@@ -93,19 +96,119 @@ DAILY = [
     "deliv_pct",
     "rs_20",
 ]
-CLOCK = ["m", "m_left", "dow", "expiry", "after_holiday"]
-FEATURES: list[str] = INTRADAY + PRESSURE + DAILY + CLOCK
-CATEGORICAL = {"dow"}
-CONTEXT = {"i_r5", "i_r15", "i_r30", "i_r60", "i_r_open", *CLOCK}
-"""Constant across stocks at a decision point: the market and the clock. They condition the others
-rather than rank stocks, so they have no cross-sectional IC and are not rank-normalised in the Fit."""
+PARTICIPATION = ["log_trades", "avg_trade", "trades_rel"]
+"""Yesterday's number of trades, average trade size (turnover over trades) and trades against the
+20-day median: large average trades are institutions, many small ones are retail."""
+ATTRIBUTES = [
+    "industry",
+    "sector_idx",
+    "in_n50",
+    "in_n500",
+    "in_mid100",
+    "in_small250",
+    "log_px",
+    "tick_bps",
+    "log_turn20",
+    "vol_60d",
+]
+"""Slow properties of the stock: NSE industry and sector index from the newest constituent snapshot
+on or before the day, index membership, price level and tick size over price (market mechanics),
+typical turnover and volatility."""
+PEERS = [
+    "p_r5",
+    "p_r15",
+    "p_r30",
+    "p_r60",
+    "p_r_open",
+    "xp_r15",
+    "xp_r60",
+    "pw_r15",
+    "sp_5d",
+    "sp_20d",
+    "s_r15",
+    "s_r60",
+    "s_r_open",
+    "xs_r15",
+]
+"""The stock's industry peers at the same minute: their average return (p_*), the stock minus them
+(xp_*), the turnover-weighted peer return (pw_r15, where the leaders dominate), the slow spread of the
+stock against its peers over 5 and 20 sessions (sp_*); and the stock's sector index (s_*, xs_*)."""
+BREADTH = ["breadth_open", "breadth_15", "disp_15"]
+"""Share of stocks up since the open and over the last 15 minutes, and the cross-sectional spread of
+15-minute returns: whether the whole market moved or a few names did."""
+REGIME = ["mkt_vol20", "mkt_vol60", "mkt_ret60", "vix"]
+"""The market's regime as of yesterday: Nifty 50 realised volatility over 20 and 60 sessions, its
+60-session return, India VIX. What a year stands for, measurable in a year the model never saw."""
+OVERSEAS = [
+    "spy_oc",
+    "spy_cc",
+    "qqq_oc",
+    "qqq_cc",
+    "spy_5d",
+    "spy_range",
+    "gold_cc",
+    "silver_cc",
+    "crude_cc",
+]
+"""The previous US session (open to close, close to close, five sessions, range) and the previous MCX
+session, all closed hours before the NSE open."""
+CLOCK = ["m", "m_left", "dow", "dom", "moy", "expiry", "dte", "after_holiday"]
+FEATURES: list[str] = (
+    INTRADAY
+    + PRESSURE
+    + SHAPE
+    + DAILY
+    + PARTICIPATION
+    + ATTRIBUTES
+    + PEERS
+    + BREADTH
+    + REGIME
+    + OVERSEAS
+    + CLOCK
+)
+CATEGORICAL = {"dow", "industry", "sector_idx", "moy"}
+CONTEXT = {"i_r5", "i_r15", "i_r30", "i_r60", "i_r_open", *BREADTH, *REGIME, *OVERSEAS, *CLOCK}
+"""Constant across stocks at a decision point: the market, breadth, regime, overseas and the clock.
+They condition the others rather than rank stocks, so they have no cross-sectional IC and are not
+rank-normalised in the Fit."""
+
+SECTOR_INDEX: dict[str, str] = {
+    "Financial Services": "NIFTY FIN SERVICE",
+    "Information Technology": "NIFTY IT",
+    "Automobile and Auto Components": "NIFTY AUTO",
+    "Healthcare": "NIFTY HEALTHCARE",
+    "Fast Moving Consumer Goods": "NIFTY FMCG",
+    "Metals & Mining": "NIFTY METAL",
+    "Realty": "NIFTY REALTY",
+    "Oil Gas & Consumable Fuels": "NIFTY OIL AND GAS",
+    "Power": "NIFTY ENERGY",
+    "Consumer Durables": "NIFTY CONSUMPTION",
+    "Consumer Services": "NIFTY CONSUMPTION",
+    "Capital Goods": "NIFTY INFRA",
+    "Construction": "NIFTY INFRA",
+    "Construction Materials": "NIFTY INFRA",
+    "Media Entertainment & Publication": "NIFTY MEDIA",
+    "Chemicals": "NIFTY COMMODITIES",
+}
+"""NSE industry (the constituent files' label) to the Kite index whose minute bars stand for the
+sector; industries without one, and stocks without an industry, fall back to NIFTY 500."""
+SECTOR_FALLBACK = "NIFTY 500"
+_SECTOR_CASE = (
+    "case a.industry "
+    + " ".join(f"when '{k}' then '{v}'" for k, v in SECTOR_INDEX.items())
+    + f" else '{SECTOR_FALLBACK}' end"
+)
+_EXPIRY_DAY = (
+    "(last_day(day) - (((isodow(last_day(day)) - (case when day < date "
+    f"'{EXPIRY_WEEKDAY_CHANGE.isoformat()}' then 4 else 2 end) + 7) % 7)::int))"
+)
 
 ROWS_SQL = f"""
 with
 bars as (
     select distinct symbol, ts, ts::date as day, open, high, low, close, volume, close * volume as turnover
     from equity_1m
-    where symbol not like 'NIFTY %' and ts::date between :start and :end
+    where symbol not like 'NIFTY%' and symbol <> 'INDIA VIX' and ts::date between :start and :end
 ),
 idx0 as (
     select distinct ts, ts::date as day, open, close from equity_1m where symbol = '{INDEX}' and ts::date between :start and :end
@@ -116,6 +219,14 @@ idx as (
            ln(close / lag(close, 30) over w) as i_r30, ln(close / lag(close, 60) over w) as i_r60,
            ln(close / first_value(open) over w) as i_r_open
     from idx0 window w as (partition by day order by ts)
+),
+sidx as (  -- every sector and size index; the stock's own sector joins by name
+    select symbol as sector_idx, ts,
+           ln(close / lag(close, 15) over w) as s_r15, ln(close / lag(close, 60) over w) as s_r60,
+           ln(close / first_value(open) over w) as s_r_open
+    from (select distinct symbol, ts, ts::date as day, open, close from equity_1m
+          where symbol like 'NIFTY%' and ts::date between :start and :end)
+    window w as (partition by symbol, day order by ts)
 ),
 b1 as (
     select *,
@@ -129,6 +240,8 @@ b1 as (
            close / nullif(sum(close * volume) over wd / nullif(sum(volume) over wd, 0), 0) - 1 as vwap_dev,
            sum(volume) over wd as cumvol,
            volume * ((close - low) - (high - close)) / nullif(high - low, 0) as clv_bar,
+           max(case when datediff('minute', day::timestamp + interval 9 hour + interval 15 minute, ts) < 15 then high end) over wd as or_high,
+           min(case when datediff('minute', day::timestamp + interval 9 hour + interval 15 minute, ts) < 15 then low end) over wd as or_low,
            lead(open, 1) over w as entry,
            lead(close, :horizon_minutes) over w as exit_h,
            last_value(close) over (partition by symbol, day order by ts rows between unbounded preceding and unbounded following) as day_close
@@ -158,7 +271,9 @@ b2 as (
            avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w15 as up15,
            avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w30 as up30,
            abs(r15) / nullif(sum(turnover) over w15, 0) * 1e7 as impact15,
-           abs(r30) / nullif(sum(turnover) over w30, 0) * 1e7 as impact30
+           abs(r30) / nullif(sum(turnover) over w30, 0) * 1e7 as impact30,
+           case when m >= 15 then (close - or_low) / nullif(or_high - or_low, 0) end as or_pos,
+           case when m < 15 then null when close > or_high then 1 when close < or_low then -1 else 0 end as or_break
     from b1
     window w5 as (partition by symbol, day order by ts rows between 4 preceding and current row),
            w15 as (partition by symbol, day order by ts rows between 14 preceding and current row),
@@ -174,7 +289,7 @@ b3 as (
     window wc as (partition by symbol, m order by day rows between 20 preceding and 1 preceding)
 ),
 d0 as (
-    select symbol, date, close, high, low, turnover, deliv_pct,
+    select symbol, date, close, high, low, turnover, trades, deliv_pct,
            ln(close / lag(close) over (partition by symbol order by date)) as dret
     from equity
     qualify row_number() over (partition by symbol, date order by series) = 1
@@ -185,39 +300,136 @@ d1 as (
            ln(close / lag(close, 5) over w) as ret_5d,
            ln(close / lag(close, 20) over w) as ret_20d,
            stddev_samp(dret) over (partition by symbol order by date rows between 19 preceding and current row) as vol_20d,
+           stddev_samp(dret) over (partition by symbol order by date rows between 59 preceding and current row) as vol_60d,
            close / nullif(max(high) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_hi,
            close / nullif(min(low) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_lo,
-           turnover / nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as turn_rel
+           turnover / nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as turn_rel,
+           ln(nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 19 preceding and current row), 0)) as log_turn20,
+           ln(nullif(trades, 0)) as log_trades,
+           ln(nullif(turnover / nullif(trades, 0), 0)) as avg_trade,
+           trades / nullif(quantile_cont(trades, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as trades_rel,
+           ((close - low) - (high - close)) / nullif(high - low, 0) as clv_prev,
+           ln(close) as log_px
     from d0 window w as (partition by symbol order by date)
 ),
-i1 as (
-    select date, ln(close / lag(close, 20) over (order by date)) as i_ret_20d
+i0 as (
+    select date, close, ln(close / lag(close) over (order by date)) as iret
     from index_daily where index_name = '{INDEX_DAILY}'
 ),
+i1 as (
+    select date,
+           ln(close / lag(close, 20) over (order by date)) as i_ret_20d,
+           ln(close / lag(close, 60) over (order by date)) as mkt_ret60,
+           stddev_samp(iret) over (order by date rows between 19 preceding and current row) as mkt_vol20,
+           stddev_samp(iret) over (order by date rows between 59 preceding and current row) as mkt_vol60
+    from i0
+),
+vix as (select date, close as vix from index_daily where index_name = 'India VIX'),
+us as (
+    select date,
+           max(case when symbol = 'SPY' then ln(close / open) end) as spy_oc,
+           max(case when symbol = 'SPY' then ln(close / lag_close) end) as spy_cc,
+           max(case when symbol = 'QQQ' then ln(close / open) end) as qqq_oc,
+           max(case when symbol = 'QQQ' then ln(close / lag_close) end) as qqq_cc,
+           max(case when symbol = 'SPY' then ln(close / lag_close5) end) as spy_5d,
+           max(case when symbol = 'SPY' then (high - low) / nullif(close, 0) end) as spy_range
+    from (select symbol, date, open, high, low, close,
+                 lag(close) over (partition by symbol order by date) as lag_close,
+                 lag(close, 5) over (partition by symbol order by date) as lag_close5
+          from us_equity where symbol in ('SPY', 'QQQ'))
+    group by date
+),
+mcx as (
+    select date,
+           max(case when symbol = 'GOLD' then ln(close / lag_close) end) as gold_cc,
+           max(case when symbol = 'SILVER' then ln(close / lag_close) end) as silver_cc,
+           max(case when symbol = 'CRUDEOIL' then ln(close / lag_close) end) as crude_cc
+    from (select symbol, date, close, lag(close) over (partition by symbol order by date) as lag_close
+          from commodity_continuous where symbol in ('GOLD', 'SILVER', 'CRUDEOIL'))
+    group by date
+),
+cons as (  -- one row per (symbol, snapshot day): membership and the industry label
+    select symbol, as_of,
+           any_value(industry) as industry,
+           max(case when index = 'NIFTY 50' then 1 else 0 end) as in_n50,
+           max(case when index = 'NIFTY 500' then 1 else 0 end) as in_n500,
+           max(case when index = 'NIFTY MIDCAP 100' then 1 else 0 end) as in_mid100,
+           max(case when index = 'NIFTY SMALLCAP 250' then 1 else 0 end) as in_small250
+    from index_constituents group by symbol, as_of
+),
+cons_first as (select * from cons qualify row_number() over (partition by symbol order by as_of) = 1),
+ticks as (select tradingsymbol as symbol, any_value(tick_size) as tick from kite_instruments where segment = 'NSE' group by 1),
 days as (
     select day, lag(day) over (order by day) as prev_day from (select distinct day from bars)
 ),
-rows_ as (
-    select b.symbol, b.ts, b.day, b.close, b.entry, b.sig1,
-           case when :horizon_minutes >= {SESSION_MINUTES} then b.day_close else b.exit_h end as exit_,  -- a session horizon is the close
-           b.r1, b.r5, b.r15, b.r30, b.r60, b.r_open, b.range_pos, b.vwap_dev, b.rv30, b.rv_open,
-           b.relvol5, b.relvol15, b.turn_liq,
-           i.i_r5, i.i_r15, i.i_r30, i.i_r60, i.i_r_open,
-           b.r15 - i.i_r15 as x_r15, b.r60 - i.i_r60 as x_r60,
-           b.imb5, b.imb15, b.imb30, b.clv5, b.clv15, b.clv30, b.vwret5, b.vwret15, b.vwret30,
-           b.up5, b.up15, b.up30, b.impact15, b.impact30, b.turn_accel,
-           d.ret_1d, b.day_open / nullif(d.d_close, 0) - 1 as gap, d.ret_5d, d.ret_20d, d.vol_20d,
-           d.dist_hi, d.dist_lo, d.turn_rel, d.deliv_pct, d.ret_20d - ii.i_ret_20d as rs_20,
-           b.m, {SESSION_MINUTES} - b.m as m_left, isodow(b.day) as dow,
-           (b.day = last_day(b.day) - (((isodow(last_day(b.day)) - (case when b.day < date '{EXPIRY_WEEKDAY_CHANGE.isoformat()}' then 4 else 2 end) + 7) % 7))::int) as expiry,
-           (b.day - dy.prev_day > case when isodow(b.day) = 1 then 3 else 1 end)::int as after_holiday
+attr as (  -- the stock's slow attributes on the day: the newest snapshot on or before it, else the first
+    select b.symbol, b.day,
+           coalesce(c.industry, f.industry) as industry,
+           coalesce(c.in_n50, f.in_n50, 0) as in_n50, coalesce(c.in_n500, f.in_n500, 0) as in_n500,
+           coalesce(c.in_mid100, f.in_mid100, 0) as in_mid100, coalesce(c.in_small250, f.in_small250, 0) as in_small250,
+           t.tick
+    from (select distinct symbol, day from bars) b
+    asof left join cons c on b.symbol = c.symbol and b.day >= c.as_of
+    left join cons_first f on b.symbol = f.symbol
+    left join ticks t on t.symbol = b.symbol
+),
+r1 as (
+    select b.*, i.i_r5, i.i_r15, i.i_r30, i.i_r60, i.i_r_open,
+           d.ret_1d, d.d_close, d.ret_5d, d.ret_20d, d.vol_20d, d.vol_60d, d.dist_hi, d.dist_lo, d.turn_rel,
+           d.deliv_pct, d.log_turn20, d.log_trades, d.avg_trade, d.trades_rel, d.clv_prev, d.log_px,
+           ii.i_ret_20d, ii.mkt_ret60, ii.mkt_vol20, ii.mkt_vol60, v.vix,
+           u.spy_oc, u.spy_cc, u.qqq_oc, u.qqq_cc, u.spy_5d, u.spy_range, x.gold_cc, x.silver_cc, x.crude_cc,
+           a.industry, a.in_n50, a.in_n500, a.in_mid100, a.in_small250,
+           a.tick / nullif(d.d_close, 0) * 1e4 as tick_bps,
+           {_SECTOR_CASE} as sector_idx,
+           dy.prev_day
     from b3 b
     left join idx i using (ts)
     asof left join d1 d on b.symbol = d.symbol and b.day > d.date
     asof left join i1 ii on b.day > ii.date
-    left join days dy using (day)
+    asof left join vix v on b.day > v.date
+    asof left join us u on b.day > u.date
+    asof left join mcx x on b.day > x.date
+    left join attr a on a.symbol = b.symbol and a.day = b.day
+    left join days dy on dy.day = b.day
     where b.m between 0 and {SESSION_MINUTES - 1}  -- the regular session only: Muhurat evening bars run past it
-      and b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover
+),
+r2 as (  -- peers at the same minute, breadth at the same minute
+    select r.*,
+           avg(r5) over wp as p_r5, avg(r15) over wp as p_r15, avg(r30) over wp as p_r30,
+           avg(r60) over wp as p_r60, avg(r_open) over wp as p_r_open,
+           sum(r15 * exp(log_turn20)) over wp / nullif(sum(exp(log_turn20)) over wp, 0) as pw_r15,
+           ret_5d - avg(ret_5d) over wp as sp_5d, ret_20d - avg(ret_20d) over wp as sp_20d,
+           avg(case when r_open > 0 then 1.0 else 0.0 end) over wt as breadth_open,
+           avg(case when r15 > 0 then 1.0 else 0.0 end) over wt as breadth_15,
+           stddev_samp(r15) over wt as disp_15,
+           s.s_r15, s.s_r60, s.s_r_open
+    from r1 r
+    left join sidx s on s.sector_idx = r.sector_idx and s.ts = r.ts
+    window wp as (partition by coalesce(r.industry, 'none'), r.ts), wt as (partition by r.ts)
+),
+rows_ as (
+    select symbol, ts, day, close, entry, sig1,
+           case when :horizon_minutes >= {SESSION_MINUTES} then day_close else exit_h end as exit_,  -- a session horizon is the close
+           r1, r5, r15, r30, r60, r_open, range_pos, vwap_dev, rv30, rv_open, relvol5, relvol15, turn_liq,
+           i_r5, i_r15, i_r30, i_r60, i_r_open, r15 - i_r15 as x_r15, r60 - i_r60 as x_r60,
+           imb5, imb15, imb30, clv5, clv15, clv30, vwret5, vwret15, vwret30, up5, up15, up30, impact15, impact30, turn_accel,
+           or_pos, or_break, clv_prev,
+           ret_1d, day_open / nullif(d_close, 0) - 1 as gap, ret_5d, ret_20d, vol_20d, dist_hi, dist_lo, turn_rel, deliv_pct,
+           ret_20d - i_ret_20d as rs_20,
+           log_trades, avg_trade, trades_rel,
+           industry, sector_idx, in_n50, in_n500, in_mid100, in_small250, log_px, tick_bps, log_turn20, vol_60d,
+           p_r5, p_r15, p_r30, p_r60, p_r_open, r15 - p_r15 as xp_r15, r60 - p_r60 as xp_r60, pw_r15, sp_5d, sp_20d,
+           s_r15, s_r60, s_r_open, r15 - s_r15 as xs_r15,
+           breadth_open, breadth_15, disp_15,
+           mkt_vol20, mkt_vol60, mkt_ret60, vix,
+           spy_oc, spy_cc, qqq_oc, qqq_cc, spy_5d, spy_range, gold_cc, silver_cc, crude_cc,
+           m, {SESSION_MINUTES} - m as m_left, isodow(day) as dow, dayofmonth(day) as dom, month(day) as moy,
+           (day = {_EXPIRY_DAY})::int as expiry,
+           greatest(0, {_EXPIRY_DAY} - day) as dte,
+           (day - prev_day > case when isodow(day) = 1 then 3 else 1 end)::int as after_holiday
+    from r2
+    where m % :step_minutes = 0 and turn_liq >= :min_turnover
 )
 select *,
        sig1 * sqrt(least(:horizon_minutes, m_left - 1)) as scale,
@@ -303,7 +515,7 @@ def screen(
     """Per feature, per year: the Spearman correlation with y within each decision point, averaged over
     decision points, with the standard error of that mean."""
     out: list[IC] = []
-    for f in features or [f for f in FEATURES if f not in CONTEXT]:
+    for f in features or [f for f in FEATURES if f not in CONTEXT and f not in CATEGORICAL]:
         got = con.sql(
             f"""
             with ranked as (
@@ -330,8 +542,9 @@ def screen_table(ics: list[IC]) -> str:
         "|---|" + "---|" * (len(years) + 1),
     ]
     for f in FEATURES:
-        if f in CONTEXT:
-            lines.append(f"| {f} | " + " | ".join("" for _ in years) + " | context |")
+        if f in CONTEXT or f in CATEGORICAL:
+            kind = "context" if f in CONTEXT else "categorical"
+            lines.append(f"| {f} | " + " | ".join("" for _ in years) + f" | {kind} |")
             continue
         cells = by.get(f, {})
         ts = [

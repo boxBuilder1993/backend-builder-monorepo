@@ -49,6 +49,10 @@ def _mirror(root: Path, *, perturb_after: datetime | None = None, muhurat: bool 
         frames.append(
             _bars(day, forecast.INDEX, 99).with_columns(pl.lit(0).cast(pl.Int64).alias("volume"))
         )
+        for k, name in enumerate(("NIFTY FIN SERVICE", "NIFTY IT", "NIFTY 500")):
+            frames.append(
+                _bars(day, name, 90 + k).with_columns(pl.lit(0).cast(pl.Int64).alias("volume"))
+            )
         if muhurat and day == DAYS[0]:  # an evening session, 18:00 to 19:15, like Diwali's
             frames = [
                 f.filter(pl.col("ts").dt.hour() < 10).with_columns(
@@ -101,13 +105,95 @@ def _mirror(root: Path, *, perturb_after: datetime | None = None, muhurat: bool 
         out = root / f"parquet/equity/year={d.year}"
         out.mkdir(parents=True, exist_ok=True)
         eq.filter(pl.col("date") == d).write_parquet(out / f"equity_{d:%Y%m%d}.parquet")
-    idx = pl.DataFrame(
-        {
-            "date": daily_days,
-            "index_name": [forecast.INDEX_DAILY] * len(daily_days),
-            "close": [20000.0 + i for i in range(len(daily_days))],
-        }
+    idx = pl.concat(
+        [
+            pl.DataFrame(
+                {
+                    "date": daily_days,
+                    "index_name": [forecast.INDEX_DAILY] * len(daily_days),
+                    "close": [20000.0 + i for i in range(len(daily_days))],
+                }
+            ),
+            pl.DataFrame(
+                {
+                    "date": daily_days,
+                    "index_name": ["India VIX"] * len(daily_days),
+                    "close": [12.0 + i / 10 for i in range(len(daily_days))],
+                }
+            ),
+        ]
     )
+    ref = root / "parquet/reference"
+    ref.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "index": ["NIFTY 500", "NIFTY 500", "NIFTY BANK", "NIFTY 50"],
+            "symbol": ["AAA", "BBB", "AAA", "BBB"],
+            "isin": ["INAAA", "INBBB", "INAAA", "INBBB"],
+            "company": ["a", "b", "a", "b"],
+            "industry": [
+                "Financial Services",
+                "Information Technology",
+                "Financial Services",
+                "Information Technology",
+            ],
+            "series": ["EQ"] * 4,
+            "as_of": [date(2026, 10, 24)]
+            * 4,  # a snapshot after the rows' days: the first one applies
+        }
+    ).write_parquet(ref / "index_constituents.parquet")
+    pl.DataFrame(
+        {
+            "instrument_token": [1, 2, 3],
+            "exchange_token": [1, 2, 3],
+            "tradingsymbol": SYMBOLS,
+            "name": SYMBOLS,
+            "segment": ["NSE"] * 3,
+            "instrument_type": ["EQ"] * 3,
+            "exchange": ["NSE"] * 3,
+            "tick_size": [0.05, 0.05, 0.1],
+            "lot_size": [1, 1, 1],
+        }
+    ).write_parquet(ref / "kite_instruments.parquet")
+    us_rows = [
+        {
+            "date": d,
+            "symbol": sym,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.0 + i * 0.1,
+            "adj_close": 100.0,
+            "volume": 1,
+            "dividend": 0.0,
+            "split": 1.0,
+        }
+        for i, d in enumerate(daily_days)
+        for sym in ("SPY", "QQQ")
+    ]
+    for d in daily_days:
+        out = root / f"parquet/us_equity/year={d.year}"
+        out.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame([r for r in us_rows if r["date"] == d]).write_parquet(
+            out / f"us_equity_{d:%Y%m%d}.parquet"
+        )
+    for d in daily_days:
+        out = root / f"parquet/commodity/year={d.year}"
+        out.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {
+                "date": [d] * 3,
+                "symbol": ["GOLD", "SILVER", "CRUDEOIL"],
+                "instrument": ["FUTCOM"] * 3,
+                "expiry": [d + timedelta(days=40)] * 3,
+                "open": [1.0] * 3,
+                "high": [1.0] * 3,
+                "low": [1.0] * 3,
+                "close": [100.0 + daily_days.index(d)] * 3,
+                "volume": [1] * 3,
+                "open_interest": [1] * 3,
+            }
+        ).write_parquet(out / f"commodity_{d:%Y%m%d}.parquet")
     for d in daily_days:
         out = root / f"parquet/index/year={d.year}"
         out.mkdir(parents=True, exist_ok=True)
@@ -161,7 +247,17 @@ def test_nothing_at_t_sees_a_bar_after_t(tmp_path: Path) -> None:
     before = _rows(tmp_path, step_minutes=1).filter(pl.col("ts") <= cut).sort(["symbol", "ts"])
     _mirror(tmp_path, perturb_after=cut)
     after = _rows(tmp_path, step_minutes=1).filter(pl.col("ts") <= cut).sort(["symbol", "ts"])
-    cross = [f for f in forecast.FEATURES if f not in forecast.CONTEXT and f not in forecast.DAILY]
+    slow = (
+        set(forecast.DAILY)
+        | set(forecast.PARTICIPATION)
+        | set(forecast.ATTRIBUTES)
+        | {"sp_5d", "sp_20d", "clv_prev"}
+    )
+    cross = [
+        f
+        for f in forecast.FEATURES
+        if f not in forecast.CONTEXT and f not in slow and f not in forecast.CATEGORICAL
+    ]
     for f in [*cross, *forecast.CLOCK, "i_r5", "i_r15", "i_r30", "i_r60", "i_r_open"]:
         a, b = before[f].to_numpy().astype(float), after[f].to_numpy().astype(float)
         assert np.array_equal(np.nan_to_num(a, nan=-9), np.nan_to_num(b, nan=-9)), f
@@ -314,3 +410,61 @@ def test_an_evening_session_yields_no_rows_and_no_nan_targets(tmp_path: Path) ->
     assert rows["y"].is_finite().all()
     assert float(rows["m"].to_numpy().min()) >= 0 and float(rows["m_left"].to_numpy().min()) >= 1
     assert float(rows["scale"].to_numpy().min()) > 0
+
+
+def test_new_layers_resolve_from_the_reference_and_context_tables(tmp_path: Path) -> None:
+    _mirror(tmp_path)
+    rows = _rows(tmp_path, step_minutes=5)
+    a = rows.filter(
+        (pl.col("symbol") == "AAA") & (pl.col("day") == DAYS[1]) & (pl.col("m") == 100)
+    ).row(0, named=True)
+    b = rows.filter(
+        (pl.col("symbol") == "BBB") & (pl.col("day") == DAYS[1]) & (pl.col("m") == 100)
+    ).row(0, named=True)
+    c = rows.filter(
+        (pl.col("symbol") == "CCC") & (pl.col("day") == DAYS[1]) & (pl.col("m") == 100)
+    ).row(0, named=True)
+    # attributes from the first snapshot (dated after the rows); the fallback for the unlabelled
+    assert a["industry"] == "Financial Services" and a["sector_idx"] == "NIFTY FIN SERVICE"
+    assert (
+        b["industry"] == "Information Technology"
+        and b["sector_idx"] == "NIFTY IT"
+        and b["in_n50"] == 1
+    )
+    assert (
+        c["industry"] is None and c["sector_idx"] == forecast.SECTOR_FALLBACK and c["in_n500"] == 0
+    )
+    assert a["in_n500"] == 1 and a["in_n50"] == 0
+    assert a["tick_bps"] == pytest.approx(0.05 / 140 * 1e4) and a["log_px"] == pytest.approx(
+        math.log(140)
+    )
+    # peers: AAA is alone in its industry, so its peer return is its own and the spread is zero
+    assert (
+        a["p_r15"] == pytest.approx(a["r15"])
+        and a["xp_r15"] == pytest.approx(0.0)
+        and a["sp_5d"] == pytest.approx(0.0)
+    )
+    # the sector index joined by name: one 15-minute return for every stock of the sector
+    assert a["s_r15"] is not None and a["xs_r15"] == pytest.approx(a["r15"] - a["s_r15"])
+    # breadth is the same for all three stocks at the minute and lies in [0, 1]
+    assert (
+        a["breadth_open"] == b["breadth_open"] == c["breadth_open"] and 0 <= a["breadth_open"] <= 1
+    )
+    # overseas and regime: the US row before DAYS[1] is the 41st (i = 40)
+    assert a["spy_cc"] is not None and a["spy_cc"] == pytest.approx(
+        math.log((100 + 40 * 0.1) / (100 + 39 * 0.1))
+    )
+    assert a["gold_cc"] == pytest.approx(math.log(140 / 139)) and a["vix"] == pytest.approx(
+        12.0 + 40 / 10
+    )
+    assert (
+        a["mkt_ret60"] is None or a["mkt_ret60"] == a["mkt_ret60"]
+    )  # 42 sessions of index: 60-day return is null
+    assert a["log_trades"] is None  # the fixture's daily rows carry no trades
+    # calendar
+    assert a["dom"] == 3 and a["moy"] == 6 and a["dte"] >= 0
+    # opening range: defined from minute 15 on, position within it, break flag in {-1, 0, 1}
+    early = rows.filter((pl.col("symbol") == "AAA") & (pl.col("m") == 10)).row(0, named=True)
+    assert early["or_pos"] is None and early["or_break"] is None
+    assert a["or_break"] in (-1, 0, 1) and a["or_pos"] is not None
+    assert set(rows.columns) >= set(forecast.FEATURES)

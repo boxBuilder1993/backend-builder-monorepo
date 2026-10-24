@@ -70,7 +70,15 @@ def install_views(con: duckdb.DuckDBPyConnection, root: Path) -> list[str]:
         con.execute(f"create or replace view {name} as {sql}")
         made.append(name)
 
-    for ref in ("corp_actions", "holidays", "symbol_changes", "equity_master", "securities"):
+    for ref in (
+        "corp_actions",
+        "holidays",
+        "symbol_changes",
+        "equity_master",
+        "securities",
+        "index_constituents",
+        "kite_instruments",
+    ):
         if _has_ref(root, ref):
             view(ref, f"select * from read_parquet('{_ref(root, ref)}')")
     if _has_days(root, "equity"):
