@@ -274,3 +274,42 @@ def test_fit_job_streams_the_file(tmp_path: Path) -> None:
     assert schema.features[1].levels == ("bank", "it", "pharma")
     assert info["rows"] == 300 and info["batch_rows"] == 50
     assert list(fitted.predict(np.zeros((2, 2), dtype="float32"))) == ["pred_fwd"]
+
+
+def test_fit_job_falls_back_to_cpu_on_cuda_out_of_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finance.ml import fitting
+
+    path = tmp_path / "rows.parquet"
+    frame(n=120).write_parquet(path)
+    declared = S.declare(KEY, FEATURES, {"columns": ["fwd"], "task": "regression"})
+    adapter = E.REGISTRY["xgboost"]
+    real = adapter.fit_batches
+    calls: list[str] = []
+
+    def flaky(batches: Any, schema: Any, params: Any, device: str, seed: int) -> Any:
+        calls.append(device)
+        if device == "cuda":
+            raise RuntimeError("XGBoostError: cudaErrorMemoryAllocation: out of memory")
+        return real(batches, schema, params, device, seed)
+
+    monkeypatch.setattr(adapter, "fit_batches", flaky)
+
+    def cuda(adapter: type[Any], wanted: str) -> str:
+        return "cuda"
+
+    monkeypatch.setattr(E, "pick_device", cuda)
+    job = fitting.FitJob(
+        rows_path=str(path),
+        schema=declared.to_dict(),
+        algorithm="xgboost",
+        params=E.resolve_params("xgboost", {"n_estimators": 5}),
+        device="auto",
+        seed=1,
+        out_dir=str(tmp_path / "m"),
+        info={},
+    )
+    done = fitting.fit_job(job)
+    assert calls == ["cuda", "cpu"] and done.device == "cpu"
+    assert artifacts.load(tmp_path / "m")[2]["device"] == "cpu"

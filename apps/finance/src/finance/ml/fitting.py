@@ -53,7 +53,15 @@ def fit_job(job: FitJob) -> FitDone:
     def batches() -> Any:
         return data.iter_batches(path, schema, job.batch_rows)
 
-    fitted = adapter.fit_batches(batches, schema, job.params, device, job.seed)
+    try:
+        fitted = adapter.fit_batches(batches, schema, job.params, device, job.seed)
+    except Exception as exc:
+        if device == "cpu" or not cuda_out_of_memory(exc):
+            raise
+        # the GPU could not hold the quantised matrix (an 8 GB card against a 20-million-row
+        # fit); the same fit on the CPU is slower and never short of memory
+        device = "cpu"
+        fitted = adapter.fit_batches(batches, schema, job.params, device, job.seed)
     out = Path(job.out_dir)
     info = dict(
         job.info,
@@ -67,6 +75,11 @@ def fit_job(job: FitJob) -> FitDone:
     artifacts.save(out, fitted, schema, info)
     sha, size = artifacts.archive_hash(out)
     return FitDone(schema.to_dict(), device, time.time() - t0, rows, sha, size)
+
+
+def cuda_out_of_memory(exc: BaseException) -> bool:
+    text = str(exc)
+    return "cudaErrorMemoryAllocation" in text or "CUDA out of memory" in text
 
 
 def fit_in_subprocess(job: FitJob) -> FitDone:
