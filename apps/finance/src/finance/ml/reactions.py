@@ -16,13 +16,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import polars as pl
 from backend_builder import Context, Reaction
 
 from finance import reactions as poller
 from finance import settings, store
 from finance.entities import DataFile
-from finance.ml import artifacts, data, fitting, metrics, modelstore, search
+from finance.ml import artifacts, data, fitting, forecast, metrics, modelstore, search
 from finance.ml import estimators as E
 from finance.ml import schema as S
 from finance.ml.entities import Evaluation, Fit, FitRun, InferRun, Model
@@ -424,3 +425,131 @@ class Evaluate(Reaction):
             ctx.save("error", ev.error)
         ctx.save("evaluation_id", ev.id)
         ctx.save("results", ev.results)
+
+
+class Screen(Reaction):
+    """The per-feature IC screen of the forecast rows, as a run. Input: {"grain": minute | daily,
+    "market": "nse" | "us" (daily only), "horizon": minutes or sessions, "params"?: query overrides,
+    "rows_path"?: an existing rows file to screen instead of building one}. Rows come through
+    LoadRows (PullStore, then the query in quarter chunks); the IC per feature per year is written
+    as parquet/screens/<id>.parquet in the mirror and published, and the markdown table is saved."""
+
+    async def calculate(self, ctx: Context) -> None:
+        grain = str(ctx.input.get("grain", "minute"))
+        market = str(ctx.input.get("market", "nse"))
+        horizon = int(ctx.input["horizon"])
+        overrides = dict(ctx.input.get("params") or {})
+        if grain == "minute":
+            body = forecast.fit_definition(horizon, **overrides)
+            features, context = forecast.FEATURES, forecast.CONTEXT
+        else:
+            body = forecast.daily_fit_definition(horizon, market, **overrides)
+            features, context = forecast.daily_features(market), forecast.daily_context(market)
+        ctx.save("grain", grain)
+        ctx.save("market", market)
+        ctx.save("horizon", horizon)
+        ctx.save("query_params", body["params"])
+        rows_path = ctx.input.get("rows_path")
+        if not (rows_path and Path(str(rows_path)).exists()):
+            loaded = await ctx.trigger(
+                LoadRows, {"query": body["query"], "params": body["params"], "key": body["key"]}
+            )
+            assert loaded is not None
+            rows_path = str(loaded.load("rows_path"))
+            ctx.save("rows", loaded.vars.get("rows"))
+        ctx.save("rows_path", str(rows_path))
+        ics = await asyncio.to_thread(_screen, Path(str(rows_path)), features, context)
+        table = forecast.screen_table(ics, features, context)
+        rel = f"parquet/screens/{uuid.uuid4().hex}.parquet"
+        out = poller.data_root() / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {
+                "feature": [i.feature for i in ics],
+                "year": [i.year for i in ics],
+                "ic": [i.ic for i in ics],
+                "se": [i.se for i in ics],
+                "points": [i.points for i in ics],
+            }
+        ).with_columns(
+            pl.lit(grain).alias("grain"),
+            pl.lit(market).alias("market"),
+            pl.lit(horizon).alias("horizon"),
+            pl.lit(_now()).alias("screened_at"),
+        ).write_parquet(out, compression="zstd")
+        await ctx.trigger(PublishArtifact, {"paths": [rel], "kind": "parquet", "source": "screens"})
+        ctx.save("path", rel)
+        ctx.save("features_screened", len({i.feature for i in ics}))
+        ctx.save("table", table)
+
+
+def _screen(rows: Path, features: list[str], context: set[str]) -> list[forecast.IC]:
+    con = duckdb.connect()
+    try:
+        data.tune(con)
+        return forecast.screen(con, rows, all_features=features, context=context)
+    finally:
+        con.close()
+
+
+class Validate(Reaction):
+    """Score and evaluate every fitted model of a FitRun on a later range, as one run. Input:
+    {"fit_run_id", "label", "params": query overrides for the validation range (start, end),
+    "thresholds"?: [0.001, 0.002, 0.005], "cost_bps"?: 10, "top_k"?: 5, "rescale"?: 1}. Models that
+    already have a done InferRun under the label are skipped, so a run cut short resumes. Saves one
+    line per model: the infer run id and the evaluation ids."""
+
+    async def calculate(self, ctx: Context) -> None:
+        run = await ctx.get_by_id(FitRun, ctx.input["fit_run_id"])
+        if run is None:
+            raise LookupError(f"no FitRun {ctx.input['fit_run_id']}")
+        fit = await ctx.get_by_id(Fit, run.fit_id)
+        if fit is None:
+            raise LookupError(f"FitRun {run.id} without its Fit")
+        label = str(ctx.input["label"])
+        params = {**fit.params, **run.params, **dict(ctx.input.get("params") or {})}
+        thresholds = [float(t) for t in ctx.input.get("thresholds", [0.001, 0.002, 0.005])]
+        cost = float(ctx.input.get("cost_bps", 10.0))
+        top_k = int(ctx.input.get("top_k", 5))
+        rescale = float(ctx.input.get("rescale", 1.0))
+        models = await ctx.query(
+            Model,
+            "select * from model where fit_run_id = :run and status = 'fitted' order by created_at",
+            run=run.id,
+        )
+        done: dict[str, Any] = {}
+        for m in models:
+            prior = await ctx.query(
+                InferRun,
+                "select * from infer_run where model_id = :m and label = :label "
+                "and status = 'done' "
+                "order by created_at desc limit 1",
+                m=m.id,
+                label=label,
+            )
+            if prior:
+                done[m.id] = {"infer_run_id": prior[0].id, "skipped": True}
+                continue
+            inferred = await ctx.trigger(
+                Infer, {"model_id": m.id, "label": label, "query": fit.query, "params": params}
+            )
+            assert inferred is not None
+            infer_run_id = inferred.vars.get("infer_run_id")
+            entry: dict[str, Any] = {"infer_run_id": infer_run_id, "evaluations": []}
+            if inferred.vars.get("status") == "done":
+                for t in thresholds:
+                    ev = await ctx.trigger(
+                        Evaluate,
+                        {
+                            "infer_run_id": infer_run_id,
+                            "metrics": forecast.EVALUATION_METRICS,
+                            "params": forecast.evaluation_params(t, cost, "month", top_k, rescale),
+                        },
+                    )
+                    assert ev is not None
+                    entry["evaluations"].append(ev.vars.get("evaluation_id"))
+            else:
+                entry["error"] = inferred.vars.get("error")
+            done[m.id] = entry
+        ctx.save("label", label)
+        ctx.save("models", done)
