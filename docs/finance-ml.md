@@ -206,6 +206,18 @@ in `fitting` or `uploading` is how a stuck fit is found. Nothing is inferred fro
 whose models never arrive is visible as `running` with `specs` larger than its terminal models, and the
 row can be requeued from the console.
 
+**Streaming fits (2026-10-25).** The child never holds the matrix. It completes the schema from the
+rows file in one aggregate pass (`data.complete_schema`: the levels of each categorical, the classes of
+a classification target), then hands the adapter a factory of `(X, Y)` float32 chunks read row group by
+row group (`data.iter_batches`, `FINANCE_FIT_BATCH_ROWS` rows each, a million by default). xgboost
+builds its `QuantileDMatrix` from the chunks, the 256-bin sketch `hist` uses anyway, about a byte per
+cell; the ridge accumulates the Gram matrix and solves in closed form, identical to scikit-learn's
+`Ridge` on the whole matrix, with medians from a one-pass reservoir sample of a million rows; lightgbm
+and logistic regression concatenate the chunks. A 20-million-row fit that peaked at 27 GB and was
+killed twice on 2026-10-25 now runs in a few GB. The model's `fit.json` records `rows` and
+`batch_rows`. The worker unit also carries `MemoryMax=24G`, so a fit that still outgrows the box dies
+inside its own cgroup and the model is recorded `failed`, instead of the kernel choosing a victim.
+
 **Budgets.** `PullStore` an hour for a first pull, `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
 the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`. Retries are the runtime's default: every failure a reaction understands is an outcome, so a
 retry replays only infrastructure faults, such as two `CloseFitRun` runs for one sweep colliding.

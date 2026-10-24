@@ -68,6 +68,10 @@ Postgres has no memory ceiling in `compose.yaml` and needs none: it uses tens of
 has a floor instead (`mem_reservation: 1g`), the lowest priority for the kernel's out-of-memory
 killer (`oom_score_adj: -900`), and a 1 GB `/dev/shm`. The processes that fill the box are the apps':
 the finance worker runs one deferred run at a time (`BACKEND_BUILDER_OUTBOX_CONCURRENCY=1` in its env
-file; a fit holds several GB), and its row builds cap DuckDB at `FINANCE_DUCKDB_MEMORY` (12 GB). A
+file; a fit streams its rows in chunks of `FINANCE_FIT_BATCH_ROWS`, so it holds a few GB), its row
+builds cap DuckDB at `FINANCE_DUCKDB_MEMORY` (12 GB), and every `bb@` unit has `MemoryMax=24G` in
+`systemd/bb@.service`, so a runaway process is killed inside its own unit and nothing else on the box
+is a candidate. The unit file is installed by `make up`; after changing it, run `make up APP=finance`
+(or copy it to `~/.config/systemd/user/` and `systemctl --user daemon-reload`) and restart the roles. A
 change to the postgres service takes effect on `docker compose up -d postgres`, which recreates the
 container: do it when no app run is mid-transaction, since every connection drops.

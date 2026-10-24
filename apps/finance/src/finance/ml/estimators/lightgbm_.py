@@ -76,6 +76,19 @@ class Lightgbm:
         return parts[schema.target.columns[0]] if len(parts) == 1 else E.PerColumn(parts)
 
     @classmethod
+    def fit_batches(
+        cls,
+        batches: E.Batches,
+        schema: Schema,
+        params: dict[str, Any],
+        device: str,
+        seed: int,
+    ) -> E.Fitted:
+        """No streaming form here: the chunks are stacked and fitted in memory."""
+        X, Y = E.concat(batches)
+        return cls.fit(X, Y, schema, params, device, seed)
+
+    @classmethod
     def load(cls, directory: Path, schema: Schema) -> E.Fitted:
         import lightgbm as lgb
 

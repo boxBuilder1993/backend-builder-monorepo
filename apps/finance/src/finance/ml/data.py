@@ -321,6 +321,83 @@ def read_rows(path: Path, schema: Schema, fitting: bool) -> pl.DataFrame:
     return lf.with_columns(casts).collect()
 
 
+FIT_BATCH_ROWS = int(os.environ.get("FINANCE_FIT_BATCH_ROWS", "1000000"))
+"""Rows per chunk when a fit streams its file: a million rows of 99 float32 features is 400 MB."""
+
+
+def complete_schema(path: Path, schema: Schema) -> Schema:
+    """The declared schema completed from the file in one aggregate pass: the sorted distinct
+    levels of each categorical feature and, for classification, the target's classes. What
+    ``prepare(..., fitting=True)`` learns from a whole frame, without holding the frame."""
+    cats = [f.name for f in schema.features if f.kind != "numeric"]
+    tcols = list(schema.target.columns) if schema.target.task != "regression" else []
+    names = set(pl.scan_parquet(path).collect_schema().names())
+    want = list(schema.key) + list(schema.feature_names) + list(schema.target.columns)
+    missing = [c for c in want if c not in names]
+    if missing:
+        raise ValueError(f"query did not yield the columns the schema needs: {missing}")
+    levels: dict[str, list[str]] = {}
+    if cats or tcols:
+        con = duckdb.connect()
+        try:
+            agg = ", ".join(
+                f"list(distinct {_q(c)}::varchar order by {_q(c)}::varchar) "
+                f"filter (where {_q(c)} is not null)"
+                for c in cats + tcols
+            )
+            row = con.execute(f"select {agg} from read_parquet(?)", [str(path)]).fetchone()
+            got: tuple[Any, ...] = tuple(row) if row is not None else ()
+            levels = {
+                c: [str(v) for v in (vals or [])] for c, vals in zip(cats + tcols, got, strict=True)
+            }
+        finally:
+            con.close()
+    feats = tuple(
+        f if f.kind == "numeric" else Feature(f.name, f.kind, tuple(levels[f.name]))
+        for f in schema.features
+    )
+    target = schema.target
+    if tcols:
+        seen = sorted({v for c in tcols for v in levels[c]})
+        if target.task == "binary" and len(seen) != 2:
+            raise ValueError(f"a binary target has exactly two classes, saw {seen}")
+        target = Target(target.columns, target.task, tuple(seen))
+    return Schema(schema.key, feats, target, schema.version)
+
+
+def _q(column: str) -> str:
+    return '"' + column.replace('"', '""') + '"'
+
+
+def count_rows(path: Path) -> int:
+    import pyarrow.parquet as pq  # pyright: ignore[reportMissingTypeStubs]
+
+    return int(pq.ParquetFile(path).metadata.num_rows)  # pyright: ignore[reportUnknownMemberType]
+
+
+def iter_batches(path: Path, schema: Schema, batch_rows: int = FIT_BATCH_ROWS) -> Any:
+    """(X, Y) float32 chunks of a rows file encoded against a completed schema, in file order; the
+    schema's levels and classes are final, so a chunk never learns anything. ``Prepared`` per chunk
+    is built the same way as for a whole frame."""
+    import pyarrow.parquet as pq  # pyright: ignore[reportMissingTypeStubs]
+
+    numeric = {f.name for f in schema.features if f.kind == "numeric"}
+    if schema.target.task == "regression":
+        numeric |= set(schema.target.columns)
+    cols = list(schema.key) + list(schema.feature_names) + list(schema.target.columns)
+    pf = pq.ParquetFile(path)  # pyright: ignore[reportUnknownMemberType]
+    for rb in pf.iter_batches(batch_size=batch_rows, columns=cols):  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        df = pl.from_arrow(rb)  # pyright: ignore[reportUnknownArgumentType]
+        assert isinstance(df, pl.DataFrame)
+        casts = [pl.col(c).cast(pl.Float32) for c in sorted(numeric & set(df.columns))]
+        p = prepare(df.with_columns(casts), schema, fitting=False)
+        if p.Y is None:
+            raise ValueError("fitting needs the target columns")
+        if schema.target.task != "regression" and (p.Y < 0).any():
+            raise ValueError("target has null labels")
+        yield p.X, p.Y
+
+
 def frame_hash(df: pl.DataFrame, key: tuple[str, ...]) -> str:
     """A stable hash of a frame's content in key order: the record of what a fit read."""
     ordered = df.sort(list(key)) if key else df
