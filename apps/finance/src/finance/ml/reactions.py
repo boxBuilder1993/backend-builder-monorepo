@@ -557,7 +557,7 @@ class Validate(Reaction):
 
 class ScreenSweep(Reaction):
     """Several screens as one job. Input: {"specs": [{"grain", "market", "horizon", "params"?,
-    "rows_path"?}, ...]}. Triggers a Screen child per spec, in order, and saves each child's path and
+    "rows_path"?}, ...]}. Triggers a Screen child per spec, in order, saving each child's path and
     row count; a child's failure is recorded under its spec and the sweep goes on to the next. One
     run on the console with its children, instead of a shell loop of unrelated runs."""
 
