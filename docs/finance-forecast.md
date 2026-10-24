@@ -978,3 +978,80 @@ persistent at the one-year scale, which is exactly the kind of structure the Fit
 "close to next open" horizon should become a target for both markets (noted under Next in the
 second round), with the stock's own trailing overnight return as a feature. The daily-table open
 must not be the fill price in that target for NSE; the minute bars at 09:29 should be.
+
+## The window study: every pair of times, and the weekend question (2026-10-25)
+
+The session study's one window (15:14 to 09:29) generalised to every pair of points on a 15-minute
+grid: 09:29, 09:44, … 15:14 and the 15:29 close, 25 points. Same-day windows are the 300 pairs
+with entry before exit; cross-session windows are all 625 pairs of an entry today and an exit in the
+next session, split into plain **nights** (the next session is the next calendar day) and **breaks**
+(a weekend or holiday in between). Per stock per year: sessions, total, mean, hit rate. 576 liquid
+NSE stocks (₹5 crore a day), Kite minute bars from October 2023, 3.1 million summary rows. The
+`WindowStudy` reaction runs it in ten symbol buckets (the whole universe at once, 420 million
+pairs, ran DuckDB out of its 12 GB).
+
+### Where the day's return lives, market-wide
+
+Median across stocks of the yearly total, per window. The three families each have a clear shape:
+
+- **Same day: the morning falls.** Every one of the twelve most consistently negative windows starts
+  at 09:29 or soon after and ends between 13:14 and 14:29. Short 09:29 → 13:14 made the median
+  stock +6% in 2023, +21% in 2024, +10% in 2025 and +8% so far in 2026 (about 10 bps a day in
+  2023 and 2024, 4 bps a day since). Nothing inside the day is consistently positive: the best
+  same-day long windows are a few minutes around 14:29 to 15:29 at 0 to 5% a year, which is noise.
+- **Into the next session: buy mid-afternoon, not at the close.** The strongest cross-session
+  windows all enter between 13:29 and 14:29 and exit between 09:29 and 11:44 the next morning:
+  14:14 → 09:29 made +16%, +39%, +19%, +14% over 2023 to 2026 for the median stock (36, 21, 10
+  and 10 bps a night). Entering at 15:14 instead of 14:14 gives up the last hour's rise, which is
+  why the earlier session study's +50% in 2024 fell to +13% and +3%: the edge moved earlier in the
+  afternoon and shrank, but did not vanish.
+- **Breaks pay less than nights, and in 2026 they lose.** For the 15:14 → 09:29 window, the median
+  stock made 24 bps on a plain night in 2024 against 11 bps across a weekend or holiday; 5.5 against
+  2.2 bps in 2025; and in 2026, +7 bps on plain nights against **−20 bps** across breaks, with 45%
+  of them positive. Across all 625 cross-session windows in 2026, 82% of break windows were
+  negative for the median stock. The indices agree: Nifty 50 across breaks was +13 bps in 2024
+  and +7 in 2025 (better than its plain nights then), and −14 bps in 2026. Holding a stock over a
+  weekend or holiday is not a better version of the overnight trade; this year it was the worst one.
+
+### Per stock: the best window, picked on 2024 and 2025 and scored on 2026
+
+For each stock, the window with the highest worst-year total over 2024 and 2025, positive in both,
+then that same window's 2026 result. The 2026 column is the only one that counts, since the pick
+had 1,250 windows to choose from.
+
+| family | stocks | picks in 2026 (mean / median / % positive) | all windows that year | top 20 picks in 2026 |
+|---|---|---|---|---|
+| same day, long | 515 | +1.4% / +1.1% / 52% | −2.2% median, 42% | +8.6%, 60% |
+| same day, short | 517 | +7.7% / +5.2% / 65% | +2.2%, 58% | **+33%, 80%** |
+| into next session, long (plain nights) | 501 | +14.7% / +13.1% / 73% | +6.9%, 62% | **+29%, 75%** |
+| across breaks, long | 322 | −10.7% / −10.8% / 19% | −14.0%, 18% | −8.6%, 35% |
+| across breaks, short | 370 | +16.1% / +15.1% / 82% | +14.0%, 82% | +20%, 75% |
+
+Reading it:
+
+- **The same-day short is the stock-specific edge that persists.** Most picks are 09:29 → 14:29 or
+  09:29 → 15:29 on stocks that fell for two years (INOXWIND +50% in 2026, SWSOLAR +35%, ZEEL +47%,
+  SAMMAANCAP +44%, HCC +45%, RAILTEL +56%, SWANCORP +69%; TDPOWERSYS and NIACL went the other way).
+  Hit rates are 35 to 45% because the stock rises on most days and falls hard on the others. This
+  is a cash trade (intraday sell, cover before 15:14, about 5 bps round trip).
+- **The afternoon-to-morning long is the other.** Picks cluster at 14:29 → 09:29 and 15:29 → 09:29
+  on the same small-cap electronics and defence names as before (CUPID +123%, NETWEB +69%, GVT&D
+  +57%, ZENTEC +53%, GRAPHITE +54%, LLOYDSENGG +49%, TDPOWERSYS +42%). Futures only, as before:
+  delivery STT alone exceeds the edge.
+- **Picking the best of 1,250 windows overfits.** The single-window overnight pick of the session
+  study kept +41% out of sample for its top 20; the best-of-all-windows pick keeps +29% for its
+  top 20 and +15% across all stocks. More choice bought more noise, not more edge. For a trader,
+  the lesson is to fix the window by family (the morning short, the afternoon-to-morning long) and
+  pick the stock, not to search the grid per stock.
+- **Breaks: avoid longs, the shorts are the market.** Short across breaks looks good in 2026 only
+  because every stock fell over weekends this year (the universe is +14% too); the picks add
+  nothing over it. There is no stock-specific weekend edge either way.
+
+### What it says for the model
+
+Two features for the Fit, both computable at any decision point: the stock's own trailing return in
+the morning-short window and in the afternoon-to-morning window (say over the last 60 sessions),
+since both are stock-specific and persist across a year. And one target change: the overnight
+horizon should run from 14:14 or 14:29, not the close, with the 09:29 exit; the last hour belongs
+to the long. The break flag (is the next session after a weekend or holiday) is a cheap feature and
+in 2026 it carried a strongly negative return; the model should see it.
