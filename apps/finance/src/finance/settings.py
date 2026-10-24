@@ -29,6 +29,24 @@ CORP_URL = (
 HOLIDAY_URL = "https://www.nseindia.com/api/holiday-master?type=trading"
 SYMBOLCHANGE_URL = "https://nsearchives.nseindia.com/content/equities/symbolchange.csv"
 EQUITY_L_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+INDEX_LIST_URL = "https://nsearchives.nseindia.com/content/indices/{name}.csv"
+INDEX_FILES: dict[str, str] = {
+    "NIFTY 50": "ind_nifty50list",
+    "NIFTY 500": "ind_nifty500list",
+    "NIFTY TOTAL MARKET": "ind_niftytotalmarket_list",
+    "NIFTY MIDCAP 100": "ind_niftymidcap100list",
+    "NIFTY SMALLCAP 250": "ind_niftysmallcap250list",
+    "NIFTY BANK": "ind_niftybanklist",
+    "NIFTY IT": "ind_niftyitlist",
+    "NIFTY AUTO": "ind_niftyautolist",
+    "NIFTY PHARMA": "ind_niftypharmalist",
+    "NIFTY FMCG": "ind_niftyfmcglist",
+    "NIFTY METAL": "ind_niftymetallist",
+    "NIFTY REALTY": "ind_niftyrealtylist",
+    "NIFTY ENERGY": "ind_niftyenergylist",
+}
+"""NSE index constituent files (company, industry, symbol, series, ISIN): the sector labels and the
+Kite universe's index half. A snapshot is stored only when the file's bytes change."""
 LINK_MAX_GAP_DAYS = 15
 """Max gap when linking an ISIN change on the same symbol (a face-value split)."""
 
@@ -50,6 +68,11 @@ KITE_TOKEN = Path("~/.config/ifin/kite_token.json").expanduser()
 KITE_START = date(2023, 10, 1)
 KITE_INTERVAL = "minute"
 KITE_MIN_TURNOVER = 25e7
+KITE_UNIVERSE_INDEX = "NIFTY 500"
+"""Every member of this index is fetched, liquid or not, besides the turnover rule."""
+KITE_STAY_SESSIONS = 250
+"""A stock fetched on any of the last this many sessions stays in the universe: entry is a gate, not
+a nightly vote, so minute histories have no holes from hovering around the turnover bar."""
 KITE_EXTRA = ("NIFTYBEES", "BANKBEES", "JUNIORBEES")
 KITE_INDICES = ("NIFTY 50", "NIFTY BANK", "NIFTY MIDCAP 100")
 KITE_RANGE_DAYS = 60
