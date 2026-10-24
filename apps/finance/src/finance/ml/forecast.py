@@ -922,6 +922,35 @@ def evaluation_params(
     return out
 
 
+def features_from_screen(
+    screen: Path,
+    all_features: list[str],
+    context: set[str],
+    min_ic: float = 0.003,
+) -> list[str]:
+    """The features a Fit keeps after a screen: those whose IC is significant with one sign in every
+    year it is significant and whose mean |IC| over the years is at least ``min_ic``; plus every
+    context and categorical feature, which the screen cannot judge. Order as in ``all_features``."""
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        rows = con.sql(
+            f"""
+            with t as (select feature, ic, ic / nullif(se, 0) as t from read_parquet('{screen.as_posix()}')
+                       where not isnan(ic)),
+            agg as (select feature, avg(ic) as mean_ic,
+                           sum(case when abs(t) >= 2 then sign(ic) else 0 end) as signed,
+                           sum(case when abs(t) >= 2 then 1 else 0 end) as sig
+                    from t group by 1)
+            select feature from agg where sig > 0 and abs(signed) = sig and abs(mean_ic) >= {min_ic}"""
+        ).fetchall()
+    finally:
+        con.close()
+    keep = {r[0] for r in rows} | context | CATEGORICAL
+    return [x for x in all_features if x in keep]
+
+
 # ---- the IC screen ---------------------------------------------------------------------------------
 
 
