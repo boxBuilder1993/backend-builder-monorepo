@@ -208,8 +208,9 @@ row can be requeued from the console.
 
 **Streaming fits (2026-10-25).** The child never holds the matrix. It completes the schema from the
 rows file in one aggregate pass (`data.complete_schema`: the levels of each categorical, the classes of
-a classification target), then hands the adapter a factory of `(X, Y)` float32 chunks read row group by
-row group (`data.iter_batches`, `FINANCE_FIT_BATCH_ROWS` rows each, a million by default). xgboost
+a classification target), then hands the adapter a factory of `(X, Y)` float32 chunks, each a polars slice of
+the scan (`data.iter_batches`, `FINANCE_FIT_BATCH_ROWS` rows each, a million by default; the slice reads
+only its row groups and frees them, where pyarrow's batch reader retained its buffers). xgboost
 builds its `QuantileDMatrix` from the chunks, the 256-bin sketch `hist` uses anyway, about a byte per
 cell; the ridge accumulates the Gram matrix and solves in closed form, identical to scikit-learn's
 `Ridge` on the whole matrix, with medians from a one-pass reservoir sample of a million rows; lightgbm
