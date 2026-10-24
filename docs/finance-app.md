@@ -215,3 +215,19 @@ done: `_schedule` is keyed by (reaction, cron) since #24.
 - The app is written anew; nothing is imported from the old repo. Its quirks become tests here, and the
   byte-for-byte comparison of Parquet files is the acceptance test for each source.
 - `sources/` and `build/` know nothing about the runtime; reactions know nothing about HTTP or Parquet.
+
+## The Kite universe and the sector labels (2026-10-24)
+
+The kite leg fetches a stock if any of three holds: the turnover rule (EQ, median daily turnover over
+the last 250 sessions at least `KITE_MIN_TURNOVER`, 120 sessions present); membership of
+`KITE_UNIVERSE_INDEX` (Nifty 500) in the newest constituent snapshot; or minute bars held on any of
+the last `KITE_STAY_SESSIONS` sessions, so entry is a gate, not a nightly vote, and no history has
+holes from a name hovering at the bar. The leg's notes carry the counts per rule. A long backfill
+ends cleanly at the leg's budget (a range is started only if it can finish) and reports
+`kite_ranges_left`; the next run continues.
+
+The reference leg downloads NSE's index constituent files (`settings.INDEX_FILES`: Nifty 50, 500,
+Total Market, Midcap 100, Smallcap 250 and the sector indices) and stores a dated snapshot under
+`raw/nse_indices/YYYY/` only when a file's bytes change. `parquet/reference/index_constituents.parquet`
+holds every snapshot: index, symbol, isin, company, industry, series, as_of. It is the sector label
+per stock for the forecast features and the index half of the Kite universe.

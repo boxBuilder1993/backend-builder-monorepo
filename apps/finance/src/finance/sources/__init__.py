@@ -79,6 +79,8 @@ SOURCES: dict[str, tuple[str, ...]] = {
         "symbol_changes",
         "equity_master",
         "securities",
+        "nse_indices",
+        "index_constituents",
     ),
     "nse": ("nse_cm", "nse_full", "nse_index", "mcx", "equity", "index", "commodity"),
     "us": ("nasdaq", "yahoo", "us_listings", "us_equity", "us_symbols"),

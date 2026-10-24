@@ -4,8 +4,9 @@ Kite serves about three years of candles, at most 60 days per request, three req
 only with an access token that expires every morning. The login cannot be automated within Zerodha's
 terms; `make kite-login` in the old repo does it by hand, writing ~/.config/ifin/kite_token.json. A
 run without a valid token is an outcome, "login needed", and the days wait for the next run, which
-fills them because Kite serves history. The universe is the liquid stocks of the daily store plus a
-few ETFs and indices; the instrument dump is a reference table.
+fills them because Kite serves history. The universe is the liquid stocks of the daily store, every
+member of the Nifty 500 (sector labels come with them), and every stock fetched in the last year, plus
+a few ETFs and indices; the instrument dump is a reference table.
 
 Raw layout: raw/kite_1m/YYYY/kite_1m_YYYYMMDD.jsonl.gz, one line per instrument,
 {"symbol", "token", "candles": [[ts, o, h, l, c, v], ...]} exactly as returned.
@@ -42,9 +43,11 @@ from finance.settings import (
     KITE_PAUSE,
     KITE_RANGE_DAYS,
     KITE_START,
+    KITE_STAY_SESSIONS,
     KITE_TOKEN,
+    KITE_UNIVERSE_INDEX,
 )
-from finance.sources import Ledger, LegResult, NoData, Written
+from finance.sources import BUDGETS, Ledger, LegResult, NoData, Written
 
 log = logging.getLogger("finance.kite")
 NAME, EXT, TABLE = "kite_1m", "jsonl.gz", "equity_1m"
@@ -105,13 +108,13 @@ def save_instruments(root: Path, kite: Any) -> Written:
     return _written(root, rel, "reference", "kite_instruments", None)
 
 
-def universe(root: Path) -> tuple[list[Instrument], list[str]]:
-    """Liquid stocks as of the daily store's latest session, plus the configured ETFs and indices,
-    mapped to instrument tokens. Returns (instruments, symbols without a token)."""
+def liquid_symbols(root: Path) -> list[str]:
+    """EQ stocks whose median daily turnover over the last 250 sessions (at least 120 of them) is
+    KITE_MIN_TURNOVER or more, as of the daily store's latest session."""
     glob = (root / "parquet" / "equity" / "*" / "*.parquet").as_posix()
     con = duckdb.connect()
     try:
-        liquid = [
+        return [
             r[0]
             for r in con.execute(
                 f"""
@@ -125,6 +128,47 @@ def universe(root: Path) -> tuple[list[Instrument], list[str]]:
         ]
     finally:
         con.close()
+
+
+def index_symbols(root: Path, index: str = KITE_UNIVERSE_INDEX) -> list[str]:
+    """The members of the index in the newest constituent snapshot; empty before the first one."""
+    p = root / reference_rel("index_constituents")
+    if not p.exists():
+        return []
+    df = pl.read_parquet(p).filter(pl.col("index") == index)
+    if df.is_empty():
+        return []
+    latest = df["as_of"].max()
+    return sorted(df.filter(pl.col("as_of") == latest)["symbol"].unique().to_list())
+
+
+def recent_symbols(root: Path, sessions: int = KITE_STAY_SESSIONS) -> list[str]:
+    """Every stock with minute bars on any of the last ``sessions`` days held: once in, a stock stays
+    in the universe for a year, so a name hovering around the turnover bar has no holes."""
+    files = sorted((root / "parquet" / TABLE).glob("year=*/*.parquet"))[-sessions:]
+    if not files:
+        return []
+    con = duckdb.connect()
+    try:
+        paths = ", ".join(f"'{f.as_posix()}'" for f in files)
+        return [
+            r[0]
+            for r in con.execute(
+                f"select distinct symbol from read_parquet([{paths}]) where symbol not like 'NIFTY %' order by 1"
+            ).fetchall()
+        ]
+    finally:
+        con.close()
+
+
+def universe(root: Path) -> tuple[list[Instrument], list[str], dict[str, int]]:
+    """The stocks to fetch: the liquid ones by the turnover rule, every member of KITE_UNIVERSE_INDEX,
+    and every stock fetched in the last KITE_STAY_SESSIONS sessions; plus the configured ETFs and
+    indices; mapped to instrument tokens. Returns (instruments, symbols without a token, counts)."""
+    liquid, members, recent = liquid_symbols(root), index_symbols(root), recent_symbols(root)
+    counts = {"liquid": len(liquid), "index": len(members), "recent": len(recent)}
+    symbols = list(dict.fromkeys(liquid + members + recent + list(KITE_EXTRA)))
+    counts["universe"] = len(symbols)
     inst = pl.read_parquet(root / reference_rel("kite_instruments"))
     eq = {
         r["tradingsymbol"]: r["instrument_token"]
@@ -136,11 +180,11 @@ def universe(root: Path) -> tuple[list[Instrument], list[str]]:
     }
     out: list[Instrument] = []
     missing: list[str] = []
-    for s in list(dict.fromkeys(liquid + list(KITE_EXTRA))):
+    for s in symbols:
         (out.append(Instrument(s, eq[s])) if s in eq else missing.append(s))
     for s in KITE_INDICES:
         (out.append(Instrument(s, idx[s])) if s in idx else missing.append(s))
-    return out, missing
+    return out, missing, counts
 
 
 def ranges(days: list[date]) -> list[tuple[date, date]]:
@@ -223,15 +267,28 @@ def fetch(
     kite: Any,
     insts: list[Instrument],
     fetcher: Fetch = fetch_candles,
+    deadline: float | None = None,
 ) -> tuple[list[Written], list[NoData], dict[str, Any]]:
     """Every missing trading day of candles for the universe, in 60-day ranges. Today is included
-    after 16:00, when the session's candles are complete."""
+    after 16:00, when the session's candles are complete. ``deadline`` is a time.monotonic() value:
+    a range is started only if it is expected to finish before it (one request per instrument at
+    KITE_PAUSE each, with margin), so a long backfill ends cleanly, reports the ranges left, and
+    continues next run; a range cut from outside would be lost."""
     end = today if datetime.now().hour >= 16 else today - timedelta(days=1)
     missing = missing_days(root, today, end, ledger)
     written: list[Written] = []
     no_data: list[NoData] = []
     requests = 0
-    for a, b in ranges(missing):
+    todo = ranges(missing)
+    ranges_left = 0
+    for i, (a, b) in enumerate(todo):
+        if (
+            deadline is not None
+            and time.monotonic() + len(insts) * KITE_PAUSE * 1.5 + 60 > deadline
+        ):
+            ranges_left = len(todo) - i
+            log.info("kite: out of time, %d ranges left for the next run", ranges_left)
+            break
         w = DayWriters(root)
         for inst in insts:
             candles = fetcher(kite, inst, a, b)
@@ -261,7 +318,10 @@ def fetch(
             if a <= d <= b and d not in done:
                 no_data.append(NoData(NAME, d))
         log.info("kite: %s..%s saved %d days, %d requests so far", a, b, len(done), requests)
-    return written, no_data, {"kite_requests": requests, "kite_instruments": len(insts)}
+    counts: dict[str, Any] = {"kite_requests": requests, "kite_instruments": len(insts)}
+    if ranges_left:
+        counts["kite_ranges_left"] = ranges_left
+    return written, no_data, counts
 
 
 def register_existing(root: Path) -> list[Written]:
@@ -294,13 +354,15 @@ def build(root: Path) -> list[Written]:
 
 def leg(root: Path, today: date, ledger: Ledger) -> LegResult:
     result = LegResult()
+    deadline = time.monotonic() + BUDGETS["kite"] * 0.9
     try:
         kite = client()
         result.written.append(save_instruments(root, kite))
-        insts, missing = universe(root)
+        insts, missing, counts = universe(root)
+        result.notes["universe"] = counts
         if missing:
             result.notes["no_token"] = missing[:20]
-        written, no_data, counts = fetch(root, today, ledger, kite, insts)
+        written, no_data, counts = fetch(root, today, ledger, kite, insts, deadline=deadline)
         result.written += written
         result.no_data += no_data
         result.notes.update(counts)

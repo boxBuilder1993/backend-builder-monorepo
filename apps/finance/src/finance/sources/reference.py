@@ -18,12 +18,21 @@ from finance.build import nse as N
 from finance.build import reference as R
 from finance.files import reference_rel, sha256, write_if_changed
 from finance.http import NseApi, NseArchives, Transient, looks_html, retry
-from finance.settings import BACKFILL_START, CORP_URL, EQUITY_L_URL, HOLIDAY_URL, SYMBOLCHANGE_URL
+from finance.settings import (
+    BACKFILL_START,
+    CORP_URL,
+    EQUITY_L_URL,
+    HOLIDAY_URL,
+    INDEX_FILES,
+    INDEX_LIST_URL,
+    SYMBOLCHANGE_URL,
+)
 from finance.sources import Ledger, LegResult, Written
 
 log = logging.getLogger("finance.reference")
 
 META = "raw/nse_meta"
+INDICES = "raw/nse_indices"
 
 
 def _gz(content: bytes) -> bytes:
@@ -73,6 +82,39 @@ def fetch_meta(root: Path, today: date, api: NseApi, arch: NseArchives) -> list[
     return out
 
 
+def fetch_indices(root: Path, today: date, arch: NseArchives) -> list[Written]:
+    """The NSE index constituent files, as dated snapshots under raw/nse_indices/YYYY/: a new
+    snapshot is written only when the file's bytes differ from the newest one held, so the raw
+    history is the sequence of membership changes, never rewritten. Every snapshot is registered."""
+    out: list[Written] = []
+    folder = root / INDICES / f"{today.year}"
+    folder.mkdir(parents=True, exist_ok=True)
+    for index, name in INDEX_FILES.items():
+
+        def _get(n: str = name) -> bytes:
+            r = arch.get(INDEX_LIST_URL.format(name=n))
+            if r.status_code != 200 or looks_html(r.content):
+                raise Transient(f"HTTP {r.status_code}")
+            return r.content
+
+        try:
+            content = retry(_get, what=f"index list {index}")
+        except Transient as exc:  # one list missing from the archive is not the leg's failure
+            log.warning("index list %s: %s", index, exc)
+            continue
+        snaps = sorted((root / INDICES).glob(f"*/nse_indices_*_{name}.csv.gz"))
+        latest = gzip.decompress(snaps[-1].read_bytes()) if snaps else None
+        if latest != content:
+            rel = f"{INDICES}/{today.year}/nse_indices_{today:%Y%m%d}_{name}.csv.gz"
+            write_if_changed(root / rel, _gz(content))
+    for p in sorted((root / INDICES).glob("*/nse_indices_*.csv.gz")):
+        rel = f"{INDICES}/{p.parent.name}/{p.name}"
+        day = date(int(p.name[12:16]), int(p.name[16:18]), int(p.name[18:20]))
+        q = root / rel
+        out.append(Written(rel, "raw", "nse_indices", day, q.stat().st_size, sha256(q)))
+    return out
+
+
 def build_reference(root: Path) -> list[Written]:
     """Whole-table Parquet for every reference table whose raw input exists, plus securities."""
     out: list[Written] = []
@@ -96,12 +138,17 @@ def build_reference(root: Path) -> list[Written]:
     securities = R.build_securities(root)
     if securities is not None:
         write("securities", securities)
+    snaps = sorted((root / INDICES).glob("*/nse_indices_*.csv.gz"))
+    if snaps:
+        write("index_constituents", R.parse_index_constituents(snaps, INDEX_FILES))
     return out
 
 
 def leg(root: Path, today: date, ledger: Ledger) -> LegResult:
     result = LegResult()
-    result.written += fetch_meta(root, today, NseApi(), NseArchives())
+    arch = NseArchives()
+    result.written += fetch_meta(root, today, NseApi(), arch)
+    result.written += fetch_indices(root, today, arch)
     result.written += build_reference(root)
     result.notes["tables"] = [w.source for w in result.written if w.kind == "reference"]
     return result

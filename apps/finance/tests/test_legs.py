@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -329,3 +329,181 @@ def test_kite_login_needed_is_an_outcome(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(K, "KITE_CONFIG", tmp_path / "none.toml")
     r = K.leg(tmp_path, date(2026, 10, 22), Ledger())
     assert r.implemented and r.written == [] and "login needed" in r.notes["kite"]
+
+
+CONSTITUENTS = (
+    b"Company Name,Industry,Symbol,Series,ISIN Code\r\n"
+    b"HDFC Bank Ltd.,Financial Services,HDFCBANK,EQ,INE040A01034\r\n"
+    b"Karur Vysya Bank Ltd.,Financial Services,KARURVYSYA,EQ,INE036D01028\r\n"
+)
+
+
+class _Archives:
+    """NseArchives fake: the same bytes for every list, unless told otherwise per file name."""
+
+    def __init__(self, by_name: dict[str, bytes] | None = None, default: bytes = CONSTITUENTS):
+        self.by_name, self.default, self.calls = by_name or {}, default, 0
+
+    def get(self, url: str, **kw: Any) -> Any:
+        self.calls += 1
+        name = url.rsplit("/", 1)[1].removesuffix(".csv")
+        content = self.by_name.get(name, self.default)
+
+        class R:
+            status_code = 200 if content else 404
+
+        r = R()
+        r.content = content  # type: ignore[attr-defined]
+        return r
+
+
+def test_index_snapshots_are_written_on_change_only_and_build_one_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finance.sources import reference as REF
+
+    monkeypatch.setattr(
+        REF, "INDEX_FILES", {"NIFTY 500": "ind_nifty500list", "NIFTY BANK": "ind_niftybanklist"}
+    )
+    monkeypatch.setattr(REF, "retry", lambda fn, what: fn())
+    day1, day2, day3 = date(2026, 10, 24), date(2026, 10, 25), date(2026, 10, 26)
+    w1 = REF.fetch_indices(tmp_path, day1, _Archives())  # type: ignore[arg-type]
+    assert sorted(w.path for w in w1) == [
+        "raw/nse_indices/2026/nse_indices_20261024_ind_nifty500list.csv.gz",
+        "raw/nse_indices/2026/nse_indices_20261024_ind_niftybanklist.csv.gz",
+    ]
+    assert all(w.source == "nse_indices" and w.day == day1 for w in w1)
+    w2 = REF.fetch_indices(tmp_path, day2, _Archives())  # type: ignore[arg-type]
+    assert [w.path for w in w2] == [w.path for w in w1]  # unchanged bytes: no new snapshot
+    changed = CONSTITUENTS + b"ACC Ltd.,Construction Materials,ACC,EQ,INE012A01025\r\n"
+    w3 = REF.fetch_indices(tmp_path, day3, _Archives({"ind_nifty500list": changed}))  # type: ignore[arg-type]
+    assert len(w3) == 3 and any(w.day == day3 and "nifty500" in w.path for w in w3)
+    built = REF.build_reference(tmp_path)
+    table = pl.read_parquet(
+        tmp_path / [w for w in built if w.source == "index_constituents"][0].path
+    )
+    assert table.columns == ["index", "symbol", "isin", "company", "industry", "series", "as_of"]
+    assert table.filter(pl.col("index") == "NIFTY 500").group_by("as_of").len().sort("as_of")[
+        "len"
+    ].to_list() == [2, 3]
+    assert (
+        table.filter(pl.col("symbol") == "ACC").row(0, named=True)["industry"]
+        == "Construction Materials"
+    )
+    # a list the archive lacks is skipped, not the leg's failure
+    w4 = REF.fetch_indices(tmp_path, day3, _Archives({"ind_niftybanklist": b""}))  # type: ignore[arg-type]
+    assert len(w4) == 3
+
+
+def test_kite_universe_is_liquid_or_index_or_recent(tmp_path: Path) -> None:
+    import duckdb  # noqa: F401 - the universe queries the daily parquet
+
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(130)]
+    rows = []
+    for d in days:
+        rows.append(
+            {"date": d, "isin": "INLIQ", "symbol": "LIQUID", "series": "EQ", "turnover": 30e7}
+        )
+        rows.append(
+            {"date": d, "isin": "INTHIN", "symbol": "THIN", "series": "EQ", "turnover": 1e7}
+        )
+        rows.append(
+            {"date": d, "isin": "INMEM", "symbol": "MEMBER", "series": "EQ", "turnover": 2e7}
+        )
+    eq = pl.DataFrame(rows)
+    out = tmp_path / "parquet/equity/year=2026"
+    out.mkdir(parents=True)
+    eq.write_parquet(out / "equity_all.parquet")
+    ref = tmp_path / "parquet/reference"
+    ref.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "index": ["NIFTY 500", "NIFTY 500", "NIFTY BANK"],
+            "symbol": ["MEMBER", "OLDMEMBER", "THIN"],
+            "isin": ["INMEM", "INOLD", "INTHIN"],
+            "company": ["m", "o", "t"],
+            "industry": ["x", "x", "y"],
+            "series": ["EQ"] * 3,
+            "as_of": [date(2026, 6, 1), date(2026, 1, 1), date(2026, 6, 1)],
+        }
+    ).write_parquet(ref / "index_constituents.parquet")
+    pl.DataFrame(
+        {
+            "instrument_token": [1, 2, 3, 4, 5],
+            "exchange_token": [1, 2, 3, 4, 5],
+            "tradingsymbol": ["LIQUID", "THIN", "MEMBER", "FADED", "NIFTY 50"],
+            "name": [""] * 5,
+            "segment": ["NSE", "NSE", "NSE", "NSE", "INDICES"],
+            "instrument_type": ["EQ"] * 5,
+            "exchange": ["NSE"] * 5,
+            "tick_size": [0.05] * 5,
+            "lot_size": [1] * 5,
+        }
+    ).write_parquet(ref / "kite_instruments.parquet")
+    m = tmp_path / "parquet/equity_1m/year=2026"
+    m.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 5, 4, 9, 15)],
+            "symbol": ["FADED"],
+            "token": [4],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [1],
+        }
+    ).write_parquet(m / "equity_1m_20260504.parquet")
+    insts, missing, counts = K.universe(tmp_path)
+    got = {i.symbol for i in insts}
+    assert {
+        "LIQUID",
+        "MEMBER",
+        "FADED",
+        "NIFTY 50",
+    } <= got  # turnover rule, index member, stayed in
+    assert (
+        "THIN" not in got and "OLDMEMBER" not in got
+    )  # thin and not a member; member of an old snapshot only
+    assert counts == {"liquid": 1, "index": 1, "recent": 1, "universe": 3 + len(K.KITE_EXTRA)}
+    assert set(missing) >= set(K.KITE_EXTRA)  # the ETFs have no token in this fixture
+
+
+def test_kite_fetch_stops_cleanly_at_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(K, "KITE_START", date(2026, 8, 1))
+    monkeypatch.setattr(K, "datetime", _Clock)
+    insts = [K.Instrument("RELIANCE", 1)]
+    calls = 0
+
+    def fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        return []
+
+    import time as _t
+
+    written, no_data, counts = K.fetch(
+        tmp_path,
+        date(2026, 10, 22),
+        Ledger(),
+        object(),
+        insts,
+        fetcher=fetcher,
+        deadline=_t.monotonic(),
+    )
+    assert calls == 0 and written == [] and no_data == []
+    assert counts["kite_ranges_left"] == len(
+        K.ranges(K.missing_days(tmp_path, date(2026, 10, 22), date(2026, 10, 22), Ledger()))
+    )
+    written, no_data, counts = K.fetch(
+        tmp_path,
+        date(2026, 10, 22),
+        Ledger(),
+        object(),
+        insts,
+        fetcher=fetcher,
+        deadline=_t.monotonic() + 10_000,
+    )
+    assert calls > 0 and "kite_ranges_left" not in counts
