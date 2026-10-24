@@ -114,6 +114,7 @@ def synthetic_mirror(
                 {
                     "date": daily_days,
                     "index_name": [forecast.INDEX_DAILY] * len(daily_days),
+                    "open": [19990.0 + i for i in range(len(daily_days))],
                     "close": [20000.0 + i for i in range(len(daily_days))],
                 }
             ),
@@ -121,6 +122,7 @@ def synthetic_mirror(
                 {
                     "date": daily_days,
                     "index_name": ["India VIX"] * len(daily_days),
+                    "open": [12.0 + i / 10 for i in range(len(daily_days))],
                     "close": [12.0 + i / 10 for i in range(len(daily_days))],
                 }
             ),
@@ -697,3 +699,43 @@ def test_features_from_screen_keeps_stable_signal_and_every_context_feature(tmp_
     assert set(forecast.CONTEXT) <= set(kept) and "industry" in kept and "dow" in kept
     assert kept == [f for f in forecast.FEATURES if f in set(kept)]  # order of the feature list
     assert "r15" not in kept  # not in the screen table at all: not kept
+
+
+def test_session_study_variants_and_summary(tmp_path: Path) -> None:
+    from finance.ml import study
+
+    synthetic_mirror(tmp_path)
+    con = data.connect(tmp_path)
+    params = {
+        **study.DEFAULTS["nse"],
+        "start": "2025-04-01",
+        "end": DAYS[-1].isoformat(),
+        "min_turnover": 1.0,
+        "liq_from": "2025-01-01",
+        "min_sessions": 5,
+    }
+    rows = data.run_query(con, study.study_sql("nse"), params)
+    assert set(rows["kind"].to_list()) == {"stock", "index"}
+    a = rows.filter((pl.col("instrument") == "AAA") & (pl.col("y") == 2025)).row(0, named=True)
+    # the fixture: open 100, close 100 + i, so the overnight (close to next open) is negative
+    # and the daytime is positive, so its short is negative; both is their sum
+    assert a["overnight_mean"] < 0 and a["short_day_mean"] < 0
+    assert a["combined_mean"] == pytest.approx(a["overnight_mean"] + a["short_day_mean"])
+    assert a["overnight_hit"] == 0.0 and a["sessions"] >= 5
+    us = data.run_query(
+        con,
+        study.study_sql("us"),
+        {
+            **study.DEFAULTS["us"],
+            "start": "2025-04-01",
+            "end": DAYS[-1].isoformat(),
+            "min_turnover": 1.0,
+            "liq_from": "2025-01-01",
+            "min_sessions": 5,
+        },
+    )
+    assert {"SPY", "QQQ", "IWM"} <= set(
+        us.filter(pl.col("kind") == "index")["instrument"].to_list()
+    )
+    table = study.summary_table(rows.to_dicts(), "overnight", min_years=1)
+    assert table.startswith("| overnight: instrument | kind |") and "2025" in table

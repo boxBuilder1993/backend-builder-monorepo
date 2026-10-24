@@ -23,7 +23,7 @@ from backend_builder import Context, Reaction
 from finance import reactions as poller
 from finance import settings, store
 from finance.entities import DataFile
-from finance.ml import artifacts, data, fitting, forecast, metrics, modelstore, search
+from finance.ml import artifacts, data, fitting, forecast, metrics, modelstore, search, study
 from finance.ml import estimators as E
 from finance.ml import schema as S
 from finance.ml.entities import Evaluation, Fit, FitRun, InferRun, Model
@@ -648,3 +648,40 @@ class ValidateSweep(Reaction):
                 results.append({"fit_run_id": run_id, "error": _err(exc)})
             ctx.save("results", results)
         ctx.save("runs", len(results))
+
+
+class SessionStudy(Reaction):
+    """Overnight, daytime-short and both, per instrument per year, for a market. Input: {"market":
+    "nse" | "us", "params"?: study.DEFAULTS overrides}. The table is written as
+    parquet/studies/session_<market>_<id>.parquet in the mirror and published; the three summary
+    tables (the most consistent instruments per variant) are saved in vars."""
+
+    async def calculate(self, ctx: Context) -> None:
+        market = str(ctx.input.get("market", "nse"))
+        params = {**study.DEFAULTS[market], **dict(ctx.input.get("params") or {})}
+        pull = await ctx.trigger(PullStore, {})
+        assert pull is not None
+        if pull.vars.get("status") == "failed":
+            raise RuntimeError(f"store unavailable: {pull.vars.get('error')}")
+        rel = f"parquet/studies/session_{market}_{uuid.uuid4().hex}.parquet"
+        out = poller.data_root() / rel
+        n = await asyncio.to_thread(
+            _study, poller.data_root(), study.study_sql(market), params, out
+        )
+        rows = pl.read_parquet(out).to_dicts()
+        await ctx.trigger(PublishArtifact, {"paths": [rel], "kind": "parquet", "source": "studies"})
+        ctx.save("market", market)
+        ctx.save("params", params)
+        ctx.save("rows", n)
+        ctx.save("path", rel)
+        for variant in study.VARIANTS:
+            ctx.save(f"table_{variant}", study.summary_table(rows, variant))
+
+
+def _study(root: Path, sql: str, params: dict[str, Any], out: Path) -> int:
+    con = data.connect(root)
+    try:
+        data.tune(con)
+        return data.write_rows(con, sql, params, out, chunk_months=0)
+    finally:
+        con.close()
