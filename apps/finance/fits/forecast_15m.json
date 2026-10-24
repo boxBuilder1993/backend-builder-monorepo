@@ -1,0 +1,225 @@
+{
+  "name": "forecast 15m",
+  "description": "Expected volatility-scaled log return 15 minutes ahead over equity_1m; features per the 2026-10-24 IC screen (gap dropped, sign-flippers held out); docs/finance-forecast.md",
+  "query": "\nwith\nbars as (\n    select distinct symbol, ts, ts::date as day, open, high, low, close, volume, close * volume as turnover\n    from equity_1m\n    where symbol not like 'NIFTY %' and ts::date between :start and :end\n),\nidx0 as (\n    select distinct ts, ts::date as day, open, close from equity_1m where symbol = 'NIFTY 50' and ts::date between :start and :end\n),\nidx as (\n    select ts,\n           ln(close / lag(close, 5) over w) as i_r5, ln(close / lag(close, 15) over w) as i_r15,\n           ln(close / lag(close, 30) over w) as i_r30, ln(close / lag(close, 60) over w) as i_r60,\n           ln(close / first_value(open) over w) as i_r_open\n    from idx0 window w as (partition by day order by ts)\n),\nb1 as (\n    select *,\n           datediff('minute', day::timestamp + interval 9 hour + interval 15 minute, ts) as m,\n           ln(close / lag(close) over w) as ret1,\n           ln(close / lag(close, 5) over w) as r5, ln(close / lag(close, 15) over w) as r15,\n           ln(close / lag(close, 30) over w) as r30, ln(close / lag(close, 60) over w) as r60,\n           first_value(open) over w as day_open,\n           ln(close / first_value(open) over w) as r_open,\n           (close - min(low) over wd) / nullif(max(high) over wd - min(low) over wd, 0) as range_pos,\n           close / nullif(sum(close * volume) over wd / nullif(sum(volume) over wd, 0), 0) - 1 as vwap_dev,\n           sum(volume) over wd as cumvol,\n           volume * ((close - low) - (high - close)) / nullif(high - low, 0) as clv_bar,\n           lead(open, 1) over w as entry,\n           lead(close, :horizon_minutes) over w as exit_h,\n           last_value(close) over (partition by symbol, day order by ts rows between unbounded preceding and unbounded following) as day_close\n    from bars\n    window w as (partition by symbol, day order by ts),\n           wd as (partition by symbol, day order by ts rows between unbounded preceding and current row)\n),\nb2 as (\n    select *,\n           ret1 as r1,\n           stddev_samp(ret1) over w30 as rv30,\n           stddev_samp(ret1) over wd as rv_open,\n           stddev_samp(ret1) over (partition by symbol, day order by ts rows between :vol_minutes - 1 preceding and current row) as sig1,\n           sum(volume) over w5 as vol5, sum(volume) over w15 as vol15,\n           sum(turnover) over w5 as turn5, sum(turnover) over w30 as turn30,\n           sum(turnover) over (partition by symbol, day order by ts rows between :liq_minutes - 1 preceding and current row) as turn_liq,\n           sum(case when ret1 > 0 then volume when ret1 < 0 then -volume end) over w5 / nullif(sum(volume) over w5, 0) as imb5,\n           sum(case when ret1 > 0 then volume when ret1 < 0 then -volume end) over w15 / nullif(sum(volume) over w15, 0) as imb15,\n           sum(case when ret1 > 0 then volume when ret1 < 0 then -volume end) over w30 / nullif(sum(volume) over w30, 0) as imb30,\n           sum(clv_bar) over w5 / nullif(sum(volume) over w5, 0) as clv5,\n           sum(clv_bar) over w15 / nullif(sum(volume) over w15, 0) as clv15,\n           sum(clv_bar) over w30 / nullif(sum(volume) over w30, 0) as clv30,\n           sum(ret1 * volume) over w5 / nullif(sum(volume) over w5, 0) as vwret5,\n           sum(ret1 * volume) over w15 / nullif(sum(volume) over w15, 0) as vwret15,\n           sum(ret1 * volume) over w30 / nullif(sum(volume) over w30, 0) as vwret30,\n           avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w5 as up5,\n           avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w15 as up15,\n           avg(case when ret1 > 0 then 1.0 when ret1 < 0 then 0.0 end) over w30 as up30,\n           abs(r15) / nullif(sum(turnover) over w15, 0) * 1e7 as impact15,\n           abs(r30) / nullif(sum(turnover) over w30, 0) * 1e7 as impact30\n    from b1\n    window w5 as (partition by symbol, day order by ts rows between 4 preceding and current row),\n           w15 as (partition by symbol, day order by ts rows between 14 preceding and current row),\n           w30 as (partition by symbol, day order by ts rows between 29 preceding and current row),\n           wd as (partition by symbol, day order by ts rows between unbounded preceding and current row)\n),\nb3 as (\n    select *,\n           vol5 / nullif(avg(vol5) over wc, 0) as relvol5,\n           vol15 / nullif(avg(vol15) over wc, 0) as relvol15,\n           turn5 / nullif(turn30 / 6, 0) as turn_accel\n    from b2\n    window wc as (partition by symbol, m order by day rows between 20 preceding and 1 preceding)\n),\nd0 as (\n    select symbol, date, close, high, low, turnover, deliv_pct,\n           ln(close / lag(close) over (partition by symbol order by date)) as dret\n    from equity\n    qualify row_number() over (partition by symbol, date order by series) = 1\n),\nd1 as (\n    select symbol, date, close as d_close, deliv_pct,\n           dret as ret_1d,\n           ln(close / lag(close, 5) over w) as ret_5d,\n           ln(close / lag(close, 20) over w) as ret_20d,\n           stddev_samp(dret) over (partition by symbol order by date rows between 19 preceding and current row) as vol_20d,\n           close / nullif(max(high) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_hi,\n           close / nullif(min(low) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_lo,\n           turnover / nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as turn_rel\n    from d0 window w as (partition by symbol order by date)\n),\ni1 as (\n    select date, ln(close / lag(close, 20) over (order by date)) as i_ret_20d\n    from index_daily where index_name = 'Nifty 50'\n),\ndays as (\n    select day, lag(day) over (order by day) as prev_day from (select distinct day from bars)\n),\nrows_ as (\n    select b.symbol, b.ts, b.day, b.close, b.entry, b.sig1,\n           case when :horizon_minutes >= 375 then b.day_close else b.exit_h end as exit_,  -- a session horizon is the close\n           b.r1, b.r5, b.r15, b.r30, b.r60, b.r_open, b.range_pos, b.vwap_dev, b.rv30, b.rv_open,\n           b.relvol5, b.relvol15, b.turn_liq,\n           i.i_r5, i.i_r15, i.i_r30, i.i_r60, i.i_r_open,\n           b.r15 - i.i_r15 as x_r15, b.r60 - i.i_r60 as x_r60,\n           b.imb5, b.imb15, b.imb30, b.clv5, b.clv15, b.clv30, b.vwret5, b.vwret15, b.vwret30,\n           b.up5, b.up15, b.up30, b.impact15, b.impact30, b.turn_accel,\n           d.ret_1d, b.day_open / nullif(d.d_close, 0) - 1 as gap, d.ret_5d, d.ret_20d, d.vol_20d,\n           d.dist_hi, d.dist_lo, d.turn_rel, d.deliv_pct, d.ret_20d - ii.i_ret_20d as rs_20,\n           b.m, 375 - b.m as m_left, isodow(b.day) as dow,\n           (b.day = last_day(b.day) - (((isodow(last_day(b.day)) - (case when b.day < date '2025-09-01' then 4 else 2 end) + 7) % 7))::int) as expiry,\n           (b.day - dy.prev_day > case when isodow(b.day) = 1 then 3 else 1 end)::int as after_holiday\n    from b3 b\n    left join idx i using (ts)\n    asof left join d1 d on b.symbol = d.symbol and b.day > d.date\n    asof left join i1 ii on b.day > ii.date\n    left join days dy using (day)\n    where b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover\n)\nselect *,\n       sig1 * sqrt(least(:horizon_minutes, m_left - 1)) as scale,\n       ln(exit_ / entry) as r,\n       ln(exit_ / entry) / (sig1 * sqrt(least(:horizon_minutes, m_left - 1))) as y\nfrom rows_\nwhere entry is not null and exit_ is not null and sig1 > 0\norder by ts, symbol\n",
+  "params": {
+    "horizon_minutes": 15,
+    "step_minutes": 5,
+    "vol_minutes": 60,
+    "liq_minutes": 60,
+    "min_turnover": 2000000.0,
+    "start": "2023-10-03",
+    "end": "2030-12-31"
+  },
+  "key": [
+    "symbol",
+    "ts"
+  ],
+  "features": [
+    {
+      "name": "r1",
+      "kind": "numeric"
+    },
+    {
+      "name": "r5",
+      "kind": "numeric"
+    },
+    {
+      "name": "r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "r30",
+      "kind": "numeric"
+    },
+    {
+      "name": "r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "r_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "range_pos",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwap_dev",
+      "kind": "numeric"
+    },
+    {
+      "name": "rv_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "relvol5",
+      "kind": "numeric"
+    },
+    {
+      "name": "relvol15",
+      "kind": "numeric"
+    },
+    {
+      "name": "turn_liq",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r5",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r30",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "i_r_open",
+      "kind": "numeric"
+    },
+    {
+      "name": "x_r15",
+      "kind": "numeric"
+    },
+    {
+      "name": "x_r60",
+      "kind": "numeric"
+    },
+    {
+      "name": "imb5",
+      "kind": "numeric"
+    },
+    {
+      "name": "imb15",
+      "kind": "numeric"
+    },
+    {
+      "name": "imb30",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv5",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv15",
+      "kind": "numeric"
+    },
+    {
+      "name": "clv30",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwret5",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwret15",
+      "kind": "numeric"
+    },
+    {
+      "name": "vwret30",
+      "kind": "numeric"
+    },
+    {
+      "name": "up5",
+      "kind": "numeric"
+    },
+    {
+      "name": "up15",
+      "kind": "numeric"
+    },
+    {
+      "name": "up30",
+      "kind": "numeric"
+    },
+    {
+      "name": "impact15",
+      "kind": "numeric"
+    },
+    {
+      "name": "impact30",
+      "kind": "numeric"
+    },
+    {
+      "name": "turn_accel",
+      "kind": "numeric"
+    },
+    {
+      "name": "ret_1d",
+      "kind": "numeric"
+    },
+    {
+      "name": "vol_20d",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_hi",
+      "kind": "numeric"
+    },
+    {
+      "name": "turn_rel",
+      "kind": "numeric"
+    },
+    {
+      "name": "deliv_pct",
+      "kind": "numeric"
+    },
+    {
+      "name": "m",
+      "kind": "numeric"
+    },
+    {
+      "name": "m_left",
+      "kind": "numeric"
+    },
+    {
+      "name": "dow",
+      "kind": "categorical"
+    },
+    {
+      "name": "expiry",
+      "kind": "numeric"
+    },
+    {
+      "name": "after_holiday",
+      "kind": "numeric"
+    }
+  ],
+  "target": {
+    "columns": [
+      "y"
+    ],
+    "task": "regression"
+  },
+  "search": [
+    {
+      "algorithm": "sklearn.linear",
+      "params": {}
+    },
+    {
+      "algorithm": "xgboost",
+      "params": {
+        "max_depth": [
+          4,
+          6
+        ],
+        "learning_rate": 0.1,
+        "n_estimators": [
+          500,
+          1500
+        ],
+        "min_child_weight": 100,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8
+      }
+    }
+  ]
+}
