@@ -177,12 +177,19 @@ def resolve_params(declared: dict[str, Any], given: dict[str, Any] | None) -> di
     return {**declared, **(given or {})}
 
 
-def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> pl.DataFrame:
-    """Run SQL with :name params bound by name. Every param the query uses must be given."""
+def relation(
+    con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]
+) -> duckdb.DuckDBPyRelation:
+    """The query with :name params bound by name, unexecuted. Every param the query uses must be given."""
     missing = [p for p in param_names(sql) if p not in params]
     if missing:
         raise ValueError(f"query uses params without values: {missing}")
-    return con.sql(_PARAM.sub(r"$\1", sql), params=params).pl()
+    return con.sql(_PARAM.sub(r"$\1", sql), params=params)
+
+
+def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> pl.DataFrame:
+    """Run SQL with :name params bound by name, into a frame."""
+    return relation(con, sql, params).pl()
 
 
 def frame_hash(df: pl.DataFrame, key: tuple[str, ...]) -> str:
