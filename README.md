@@ -80,6 +80,7 @@ uv run pytest
 - [Design](docs/design.md): why it is the way it is. The full model, every decision and its reasoning, what is parked for later.
 - [Infrastructure](docs/infrastructure.md): repository layout, environments and the deployment path. Partly a draft.
 - [Running on a host](docs/running.md): `make up APP=<app>`, one shared Postgres in Docker and the app's processes as systemd user units that start at boot.
+- [The trader](docs/finance-trader.md): the finance app's end goal, the first ML problem (expected price Δ minutes ahead) and the order of work.
 
 ## Repository
 
