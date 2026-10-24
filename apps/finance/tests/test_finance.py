@@ -33,6 +33,7 @@ def test_app_scope() -> None:
         "ValidateSweep",
         "SessionStudy",
         "WindowStudy",
+        "RetryModels",
     }
     api = {"RegisterFitApi", "RunFitApi", "GetRunApi", "InferApi", "EvaluateApi"}
     assert {r.__name__ for r in app.reactions} == poller | ml | api

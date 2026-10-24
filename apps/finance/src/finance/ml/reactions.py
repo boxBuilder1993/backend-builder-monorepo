@@ -242,6 +242,41 @@ class FitModel(Reaction):
         return path
 
 
+class RetryModels(Reaction):
+    """Requeue failed models: {"model_ids": [...]} or {"fit_run_id": ...} (all of that run's
+    failed models), "rows_path"? (the run's scratch file, else FitModel rebuilds the rows),
+    "device"? (auto). Each goes back to queued with its error cleared and a deferred FitModel
+    with the algorithm's budget, exactly as RunFit enqueued it. For a failure whose cause is
+    fixed (a GPU out of memory, a killed worker) without a new FitRun."""
+
+    async def calculate(self, ctx: Context) -> None:
+        ids = [str(i) for i in ctx.input.get("model_ids") or []]
+        if run_id := ctx.input.get("fit_run_id"):
+            found = await ctx.query(
+                Model,
+                "select * from model where fit_run_id = :r and status = 'failed'",
+                r=str(run_id),
+            )
+            ids += [m.id for m in found]
+        retried: list[str] = []
+        for mid in ids:
+            model = await ctx.get_by_id(Model, mid)
+            if model is None or model.status != "failed":
+                continue
+            model.status, model.error = "queued", None
+            budget = E.REGISTRY[model.algorithm].budget
+            payload: dict[str, Any] = {
+                "model_id": model.id,
+                "device": str(ctx.input.get("device", "auto")),
+            }
+            if ctx.input.get("rows_path"):  # the run's scratch file when it is still on this host
+                payload["rows_path"] = str(ctx.input["rows_path"])
+            await ctx.trigger(FitModel, payload, deferred=True, timeout=budget)
+            retried.append(model.id)
+        ctx.save("retried", retried)
+        ctx.save("count", len(retried))
+
+
 class UploadModel(Reaction):
     """Input: {"model_id"}. The cached directory to models/<id>/ in the store; records repo, path,
     revision; the model is fitted only then. A store outage leaves it uploading with its cache path,
