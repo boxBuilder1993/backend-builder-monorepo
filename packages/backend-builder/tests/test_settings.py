@@ -51,3 +51,18 @@ def test_http_factory_uses_the_settings(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("BACKEND_BUILDER_APP", "fixture_app")
     monkeypatch.setenv("BACKEND_BUILDER_DATABASE_URL", "postgresql://u:p@localhost:1/none")
     assert http_factory().title == "fixture_app"
+
+
+def test_logs_settings_and_format_follow_the_environment() -> None:
+    s = Settings.from_env({})
+    assert s.logs_url is None and s.grafana_url is None and s.log_format == "human"
+    s = Settings.from_env(
+        {
+            "RUNTIME_ENV": "prod",
+            "BACKEND_BUILDER_DATABASE_URL": "postgresql://u:p@h/db",
+            "BACKEND_BUILDER_LOGS_URL": "http://loki:3100/",
+            "BACKEND_BUILDER_GRAFANA_URL": "http://localhost:3000/ ",
+        }
+    )
+    assert s.logs_url == "http://loki:3100" and s.grafana_url == "http://localhost:3000"
+    assert s.log_format == "json"

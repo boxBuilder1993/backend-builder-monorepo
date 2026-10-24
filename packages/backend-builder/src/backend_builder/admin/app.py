@@ -28,11 +28,21 @@ COOKIE = "backend_builder_admin"
 
 
 def create_admin_app(
-    app: App, store: Store, *, token: str | None = None, records: RecordLevel = "full"
+    app: App,
+    store: Store,
+    *,
+    token: str | None = None,
+    records: RecordLevel = "full",
+    logs_url: str | None = None,
+    grafana_url: str | None = None,
+    logs_retention_hours: float = 24,
+    fetch: queries.Fetch | None = None,
 ) -> FastAPI:
     """The console over ``app`` and ``store``. With ``token`` set, every page
     needs it, entered once on the login page and kept in a cookie. ``records``
-    is the level runs triggered from the console are recorded at."""
+    is the level runs triggered from the console are recorded at. With
+    ``logs_url`` set, run pages show the lines Loki holds for the run;
+    ``grafana_url`` adds a link to the same query there."""
     console = FastAPI(title=f"{app.name} admin", docs_url=None, redoc_url=None, openapi_url=None)
     filters: dict[str, Any] = TEMPLATES.env.filters  # type: ignore[assignment]
     filters["reaction_short"] = _short
@@ -181,7 +191,18 @@ def create_admin_app(
         record = await queries.run_detail(store, run_id)
         if record is None:
             return render(request, "missing.html", what=f"run {run_id}")
-        return render(request, "run.html", record=record)
+        log_panel: dict[str, Any] | None = None
+        if logs_url is not None:
+            log_panel = await queries.logs(
+                logs_url,
+                app.name,
+                record,
+                retention_hours=logs_retention_hours,
+                fetch=fetch or queries._fetch,  # type: ignore[reportPrivateUsage]
+            )
+            if grafana_url:
+                log_panel["grafana"] = _grafana_link(grafana_url, log_panel)
+        return render(request, "run.html", record=record, logs=log_panel, logs_url=logs_url)
 
     @console.get("/outbox", response_class=HTMLResponse)
     async def outbox(request: Request, state: str = "pending") -> HTMLResponse:
@@ -234,6 +255,20 @@ def _short(name: object) -> str:
 
 def _ms(value: object) -> str:
     return f"{float(str(value)):.1f} ms"
+
+
+def _grafana_link(grafana_url: str, panel: dict[str, Any]) -> str:
+    """Grafana's Explore with the same LogQL and window."""
+    import json
+    import urllib.parse
+
+    span: dict[str, Any] = {"queries": [{"expr": panel["query"]}]}
+    if "start" in panel:
+        span["range"] = {
+            "from": str(int(panel["start"].timestamp() * 1000)),
+            "to": str(int(panel["end"].timestamp() * 1000)),
+        }
+    return f"{grafana_url}/explore?" + urllib.parse.urlencode({"left": json.dumps(span)})
 
 
 def _parse_input(text: str) -> dict[str, Any]:

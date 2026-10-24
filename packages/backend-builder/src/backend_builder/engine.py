@@ -88,6 +88,7 @@ async def run(
                 outbox_row_id,
                 triggers,
                 state,
+                source,
             )
     except TimeoutError:
         outcome, error = "timeout", f"TimeoutError: budget of {timeout}s exhausted"
@@ -141,10 +142,11 @@ async def _attempts(
     outbox_row_id: str | None,
     triggers: Sequence[Trigger],
     state: _RunState,
+    source: str,
 ) -> Context:
     for attempt in range(1, attempts + 1):
         session = Session(store, triggers=triggers, default_timeout=timeout)
-        ctx = Context(session, input, reaction_id=reaction_id)
+        ctx = Context(session, input, reaction_id=reaction_id, source=source)
         ctx.trace.attempt = attempt
         state.attempts = attempt
         state.traces.append(ctx.trace)

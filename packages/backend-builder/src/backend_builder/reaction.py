@@ -51,7 +51,25 @@ class Reaction(ABC):
 async def invoke(reaction: type[Reaction], ctx: Context) -> None:
     """Run ``reaction`` in ``ctx``, recording a span and an ``Invocation`` on
     the trace, and logging start, end and failure. Every invocation, seed or
-    triggered, goes through here, so every one is tracked the same way."""
+    triggered, goes through here, so every one is tracked the same way, and
+    every log line written meanwhile carries the run's fields."""
+    from backend_builder import log
+
+    token = log.enter(
+        log.RunFields(
+            root_id=ctx.root_id,
+            reaction_id=ctx.reaction_id,
+            reaction=qualified_name(reaction),
+            source=ctx.source,
+        )
+    )
+    try:
+        await _invoke(reaction, ctx)
+    finally:
+        log.leave(token)
+
+
+async def _invoke(reaction: type[Reaction], ctx: Context) -> None:
     from backend_builder.trace import Invocation
 
     name = reaction.__name__

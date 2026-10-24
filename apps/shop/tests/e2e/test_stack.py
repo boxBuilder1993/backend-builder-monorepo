@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
@@ -119,7 +120,9 @@ async def test_secret_reaches_the_reaction_and_never_the_record_or_logs(
             "and input ->> 'id' = :id",
             id=order["id"],
         ),
-        lambda rows: len(rows) == 1,
+        lambda rows: (
+            len(rows) == 1 and rows[0]["outcome"] != "running"
+        ),  # the row exists while it runs
     )
     assert records[0]["outcome"] == "ok"
     assert records[0]["vars"] == {
@@ -438,3 +441,62 @@ async def test_worker_restart_picks_up_where_it_left_off(stack: Stack, client: A
 
     compose("start", "worker")
     await wait_total(client, order["id"], 25)
+
+
+# --- logs ---------------------------------------------------------------------------------------
+
+
+async def test_logs_are_structured_collected_by_loki_and_shown_per_run(
+    stack: Stack, client: AsyncClient
+) -> None:
+    order = (await create_order(client))["order"]
+    await wait_total(client, order["id"], 25)
+    notify = await wait_for(
+        lambda: stack.sql(
+            "select id, root_id from _run where reaction = 'shop.reactions.NotifyOrder' "
+            "and input ->> 'id' = :id and outcome = 'ok'",
+            id=order["id"],
+        ),
+        lambda rows: len(rows) == 1,
+    )
+    run_id = str(notify[0]["id"])
+
+    # Containers write JSON lines carrying the run's fields.
+    worker_lines = [
+        json.loads(line) for line in stack.logs("worker").splitlines() if line.startswith("{")
+    ]
+    mine = [line for line in worker_lines if line.get("root_id") == run_id]
+    assert any(line["message"].startswith("notify requested order=") for line in mine)
+    assert all(line["app"] == "shop" and line["process"] == "worker" for line in mine)
+    assert all(line["source"] == "outbox" for line in mine)
+    assert not any(NOTIFY_KEY in json.dumps(line) for line in worker_lines)
+
+    # Loki has them, filtered by root_id from inside the line.
+    async with AsyncClient(base_url=stack.loki_url, timeout=10) as loki:
+        found = await wait_for(
+            lambda: loki.get(
+                "/loki/api/v1/query_range",
+                params={
+                    "query": f'{{app="shop"}} | json | root_id="{run_id}"',
+                    "start": str(int((time.time() - 600) * 1e9)),
+                    "limit": "50",
+                },
+            ),
+            lambda r: r.status_code == 200 and r.json()["data"]["result"],
+            timeout=60,
+        )
+        values = [v for stream in found.json()["data"]["result"] for v in stream["values"]]
+        assert any("notify requested" in v[1] for v in values)
+        labels = await loki.get("/loki/api/v1/labels")
+        assert set(labels.json()["data"]) <= {"app", "process", "service_name"}  # never ids
+
+    # The console shows the same lines on the run's page.
+    async with AsyncClient(base_url=stack.admin_url, timeout=10) as admin:
+        page = await wait_for(
+            lambda: admin.get(f"/runs/{run_id}"),
+            lambda r: "notify requested order=" in r.text,
+            timeout=60,
+        )
+        assert "open in Grafana" in page.text and f'root_id="{run_id}"' in page.text.replace(
+            "&#34;", '"'
+        )

@@ -36,6 +36,7 @@ class Context:
         reaction_id: str | None = None,
         parent_reaction_id: str | None = None,
         root_id: str | None = None,
+        source: str = "direct",
         trace: Trace | None = None,
         secrets: _secrets.Secrets | None = None,
     ) -> None:
@@ -46,6 +47,8 @@ class Context:
         self.parent_reaction_id = parent_reaction_id
         self.root_id = root_id or self.reaction_id
         """The run's seed invocation; this id for the seed itself."""
+        self.source = source
+        """Where the run came from; children inherit it. Stamped on log lines."""
         self.trace = trace if trace is not None else Trace()
         self.vars: dict[str, Any] = {}
         """This invocation's saved values, the dict ``save`` and ``load``
@@ -140,6 +143,7 @@ class Context:
             input,
             parent_reaction_id=self.reaction_id,
             root_id=self.root_id,
+            source=self.source,
             trace=self.trace,
             secrets=self._secrets,
         )
