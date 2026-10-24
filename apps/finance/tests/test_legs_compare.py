@@ -13,7 +13,7 @@ from finance.build import kite as BK
 from finance.build import reference as R
 from finance.build import us as BU
 from finance.build.nse import parquet_bytes
-from finance.files import parquet_rel, raw_rel, reference_rel
+from finance.files import parquet_rel, reference_rel
 
 STORE = Path(
     os.environ.get("FINANCE_COMPARE_DIR", "~/Workspaces/indian-finance-data/data")
@@ -84,7 +84,7 @@ def test_us_listings_latest_day() -> None:
 
 
 def test_equity_1m_days() -> None:
-    """A day's Parquet is its raw file plus every supplement (instruments backfilled later), deduped."""
+    """A day's Parquet is its raw file plus every supplement (later backfills), deduped."""
     for day in sorted(set(_days("raw/kite_1m/*/kite_1m_????????*.jsonl.gz", slice(8, 16)))):
         files = sorted((STORE / "raw/kite_1m").glob(f"*/kite_1m_{day:%Y%m%d}*.jsonl.gz"))
         frames = [BK.parse(f.read_bytes(), day) for f in files]
