@@ -538,22 +538,25 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
         asked.append((inst.symbol, a, b))
         return [{"date": datetime(2026, 10, 21, 9, 16), **candle}]
 
-    insts = old + [K.Instrument("TCS", 2)]
+    insts = old + [K.Instrument("TCS", 2), K.Instrument("INFY", 3)]
     written, counts = K.backfill_symbols(
         tmp_path, date(2026, 10, 22), object(), insts, fetcher=hist_fetcher
     )
-    assert [a[0] for a in asked] == ["TCS"] and asked[0][1] == asked[0][2] == date(2026, 10, 21)
+    assert [a[0] for a in asked] == ["TCS", "INFY"] and asked[0][1] == asked[0][2] == date(
+        2026, 10, 21
+    )
     supp = [w for w in written if w.kind == "raw"]
     assert len(supp) == 1 and "_s" in supp[0].path and supp[0].day == date(2026, 10, 21)
-    assert counts == {"backfill_requests": 1, "backfill_symbols": 1}
+    assert counts == {"backfill_requests": 2, "backfill_symbols": 2}
     hist = pl.read_parquet(tmp_path / reference_rel(K.HISTORY))
     assert sorted(hist["symbol"].to_list()) == [
+        "INFY",
         "RELIANCE",
         "TCS",
     ]  # covered from the start, and backfilled
     built = K.build(tmp_path)  # the day is rebuilt from the file and its supplement
     df = pl.read_parquet(tmp_path / built[0].path)
-    assert df["symbol"].to_list() == ["RELIANCE", "TCS"] and df.height == 2
+    assert df["symbol"].to_list() == ["INFY", "RELIANCE", "TCS"] and df.height == 3
     assert (
         len(K.register_existing(tmp_path)) == 2 + 1
     )  # the day's file, the supplement, kite_history
@@ -570,7 +573,7 @@ def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
         tmp_path,
         date(2026, 10, 23),
         object(),
-        insts + [K.Instrument("INFY", 3)],
+        insts + [K.Instrument("WIPRO", 4)],
         fetcher=hist_fetcher,
         deadline=_t.monotonic(),
     )
