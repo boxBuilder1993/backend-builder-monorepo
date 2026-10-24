@@ -16,7 +16,7 @@ import polars as pl
 
 from finance.build.nse import parquet_bytes
 from finance.files import read_raw, write_if_changed
-from finance.settings import LISTING_FILES, US_BENCHMARKS
+from finance.settings import LISTING_FILES, US_BENCHMARKS, US_CAP_BUCKETS
 
 RAW_SCHEMA = {
     "symbol": pl.String, "date": pl.Date, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
@@ -213,3 +213,77 @@ def build_us_listings(root: Path) -> tuple[list[date], pl.DataFrame | None]:
         .sort(["symbol", "first_seen"])
     )
     return written, symbols
+
+
+def screener_rel(day: date) -> str:
+    return f"raw/nasdaq_screener/{day:%Y}/nasdaq_screener_{day:%Y%m%d}.csv.gz"
+
+
+def cap_bucket(market_cap: float | None) -> str | None:
+    if market_cap is None or market_cap <= 0:
+        return None
+    for floor, name in US_CAP_BUCKETS:
+        if market_cap >= floor:
+            return name
+    return None
+
+
+def screener_snapshot(payload: bytes) -> bytes:
+    """The screener's answer reduced to its stable columns, one CSV line per stock, sorted: symbol,
+    name, sector, industry, country, ipo year, cap bucket. Prices and volumes are left out so the
+    snapshot's bytes change only when a classification or a bucket does."""
+    import csv
+    import json
+
+    rows = json.loads(payload)["data"]["rows"]
+    out = io.StringIO()
+    w = csv.writer(out, lineterminator="\n")
+    w.writerow(["symbol", "name", "sector", "industry", "country", "ipo_year", "cap_bucket"])
+    for r in sorted(rows, key=lambda r: r["symbol"]):
+        cap = r.get("marketCap") or ""
+        bucket = cap_bucket(float(cap)) if cap not in ("", "NA") else None
+        w.writerow(
+            [
+                r["symbol"].strip(),
+                r["name"].strip(),
+                r.get("sector") or "",
+                r.get("industry") or "",
+                r.get("country") or "",
+                r.get("ipoyear") or "",
+                bucket or "",
+            ]
+        )
+    return out.getvalue().encode()
+
+
+def parse_screener(paths: list[Path]) -> pl.DataFrame:
+    """Every snapshot into one table with as_of: symbol, name, sector, industry, country, ipo_year,
+    cap_bucket, as_of. Empty strings are null."""
+    frames: list[pl.DataFrame] = []
+    for path in paths:
+        day = date(int(path.name[16:20]), int(path.name[20:22]), int(path.name[22:24]))
+        df = pl.read_csv(io.BytesIO(read_raw(path)), schema_overrides={"ipo_year": pl.Utf8})
+        frames.append(
+            df.with_columns(
+                [
+                    pl.when(pl.col(c) == "").then(None).otherwise(pl.col(c)).alias(c)
+                    for c in df.columns
+                ]
+            ).with_columns(
+                pl.col("ipo_year").cast(pl.Int32, strict=False), pl.lit(day).alias("as_of")
+            )
+        )
+    if not frames:
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "name": pl.Utf8,
+                "sector": pl.Utf8,
+                "industry": pl.Utf8,
+                "country": pl.Utf8,
+                "ipo_year": pl.Int32,
+                "cap_bucket": pl.Utf8,
+                "as_of": pl.Date,
+            }
+        )
+    return pl.concat(frames).sort(["as_of", "symbol"])

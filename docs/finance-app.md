@@ -238,3 +238,13 @@ Total Market, Midcap 100, Smallcap 250 and the sector indices) and stores a date
 `raw/nse_indices/YYYY/` only when a file's bytes change. `parquet/reference/index_constituents.parquet`
 holds every snapshot: index, symbol, isin, company, industry, series, as_of. It is the sector label
 per stock for the forecast features and the index half of the Kite universe.
+
+## The US side (2026-10-24)
+
+Coverage is every listed stock already (Nasdaq Trader listings, Yahoo daily prices); there is no
+US minute data, so the US forecast is daily-grain only. The US leg now also stores Nasdaq's stock
+screener as a dated snapshot of its stable columns (symbol, name, sector, industry, country, IPO
+year, market-cap bucket) under `raw/nasdaq_screener/`, written only on change, and builds the
+reference table `us_sectors` from every snapshot. The SPDR sector ETFs, GLD, SLV and USO are fetched
+beside SPY, QQQ and IWM (`US_BENCHMARKS`), and `^VIX` as an index symbol (`US_INDICES`): the sector,
+commodity and regime context of the US rows.

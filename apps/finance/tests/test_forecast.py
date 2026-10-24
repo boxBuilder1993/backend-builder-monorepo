@@ -169,8 +169,35 @@ def _mirror(root: Path, *, perturb_after: datetime | None = None, muhurat: bool 
             "split": 1.0,
         }
         for i, d in enumerate(daily_days)
-        for sym in ("SPY", "QQQ")
+        for sym in ("SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "XLK", "XLF", "^VIX")
+    ] + [
+        {
+            "date": d,
+            "symbol": sym,
+            "open": 50.0,
+            "high": 51.0,
+            "low": 49.0,
+            "close": 50.0 + i + k,
+            "adj_close": 50.0,
+            "volume": 1000,
+            "dividend": 0.0,
+            "split": 1.0,
+        }
+        for i, d in enumerate(daily_days)
+        for k, sym in enumerate(("UAA", "UBB"))
     ]
+    pl.DataFrame(
+        {
+            "symbol": ["UAA", "UBB"],
+            "name": ["ua", "ub"],
+            "sector": ["Technology", "Finance"],
+            "industry": ["Software", "Banks"],
+            "country": ["United States"] * 2,
+            "ipo_year": [1999, 2005],
+            "cap_bucket": ["mega", "small"],
+            "as_of": [date(2026, 10, 24)] * 2,
+        }
+    ).with_columns(pl.col("ipo_year").cast(pl.Int32)).write_parquet(ref / "us_sectors.parquet")
     for d in daily_days:
         out = root / f"parquet/us_equity/year={d.year}"
         out.mkdir(parents=True, exist_ok=True)
@@ -500,7 +527,8 @@ def test_daily_rows_decide_at_the_close_and_enter_at_the_next_open(tmp_path: Pat
     assert a["ret_1d"] == pytest.approx(math.log(140 / 139)) and a["deliv_pct"] == 80.0
     # the US session dated t is known before the entry at t+1's open: it is the row used
     assert a["spy_cc"] == pytest.approx(math.log((100 + 40 * 0.1) / (100 + 39 * 0.1)))
-    assert a["industry"] == "Financial Services" and a["sector_idx"] == "NIFTY FIN SERVICE"
+    assert a["industry"] == "Financial Services" and a["sector_idx"] == "Nifty Financial Services"
+    assert a["s_ret_1d"] is None  # the fixture's index table has no sector index
     # the session's shape comes from the minute bars held for DAYS[0]
     assert (
         a["rv_day"] is not None and a["vwap_dev_close"] is not None and a["r_first60"] is not None
@@ -513,4 +541,45 @@ def test_daily_rows_decide_at_the_close_and_enter_at_the_next_open(tmp_path: Pat
     assert isinstance(last_h3, date) and last_h3 < DAYS[0]
     body = forecast.daily_fit_definition(21)
     assert body["params"]["horizon_sessions"] == 21
+    assert set(data.param_names(body["query"])) == set(body["params"])
+
+
+def test_us_daily_rows_use_the_screener_sectors_etfs_and_the_nifty_of_the_entry_day(
+    tmp_path: Path,
+) -> None:
+    _mirror(tmp_path)
+    con = data.connect(tmp_path)
+    params = {
+        **forecast.DAILY_PARAMS,
+        "horizon_sessions": 1,
+        "start": "2025-04-01",
+        "end": DAYS[-1].isoformat(),
+        "min_turnover_day": 1.0,
+    }
+    rows = data.run_query(con, forecast.US_DAILY_SQL, params)
+    assert set(rows.columns) >= {*forecast.daily_features("us"), "symbol", "ts", "y", "r", "scale"}
+    assert set(rows["symbol"].to_list()) == {
+        "UAA",
+        "UBB",
+    }  # the ETFs and the VIX are context, not rows
+    a = rows.filter((pl.col("symbol") == "UAA") & (pl.col("day") == DAYS[0])).row(0, named=True)
+    assert a["entry"] == 50.0 and a["exit_"] == 50.0 + 41 and a["entry_date"] == DAYS[1]
+    assert a["industry"] == "Technology" and a["sector_idx"] == "XLK"
+    assert a["in_n50"] == 1 and a["in_small250"] == 0
+    assert a["tick_bps"] == pytest.approx(0.01 / 90 * 1e4)  # a cent on a 90-dollar close
+    assert a["s_ret_1d"] == pytest.approx(
+        math.log((100 + 40 * 0.1) / (100 + 39 * 0.1))
+    )  # XLK's day
+    assert a["vix"] == pytest.approx(100 + 40 * 0.1)  # the fixture's ^VIX series
+    # the Nifty session of the entry day (closing 06:00 ET) is the one used; the ETFs are day t's
+
+    assert a["nifty_cc"] == pytest.approx(math.log(20041 / 20040))
+    assert a["gld_cc"] == pytest.approx(math.log(104.0 / 103.9))
+    assert a["dte"] >= 0 and a["dow"] == 2
+    b = rows.filter((pl.col("symbol") == "UBB") & (pl.col("day") == DAYS[0])).row(0, named=True)
+    assert b["sector_idx"] == "XLF" and b["in_small250"] == 1 and b["in_n500"] == 0
+    us_features = forecast.daily_features("us")
+    assert "deliv_pct" not in us_features and "log_trades" not in us_features
+    body = forecast.daily_fit_definition(21, "us")
+    assert body["name"] == "forecast 21d us" and body["params"]["start"] == "2015-01-01"
     assert set(data.param_names(body["query"])) == set(body["params"])
