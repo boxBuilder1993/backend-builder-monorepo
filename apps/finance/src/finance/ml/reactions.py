@@ -705,7 +705,8 @@ class WindowStudy(Reaction):
             raise RuntimeError(f"store unavailable: {pull.vars.get('error')}")
         rel = f"parquet/studies/windows_nse_{uuid.uuid4().hex}.parquet"
         out = poller.data_root() / rel
-        n = await asyncio.to_thread(_study, poller.data_root(), windows.study_sql(), params, out)
+        buckets = int(ctx.input.get("buckets", windows.BUCKETS))
+        n = await asyncio.to_thread(_windows, poller.data_root(), params, out, buckets)
         rows = pl.read_parquet(out)
         await ctx.trigger(PublishArtifact, {"paths": [rel], "kind": "parquet", "source": "studies"})
         ctx.save("params", params)
@@ -716,6 +717,27 @@ class WindowStudy(Reaction):
             ctx.save(f"table_market_{across}", windows.market_table(rows, across))
         ctx.save("table_weekend", windows.weekend_table(rows))
         ctx.save("table_stocks", windows.stock_table(rows, pick, test_year))
+
+
+def _windows(root: Path, params: dict[str, Any], out: Path, buckets: int) -> int:
+    """The window query once per symbol bucket, parts concatenated into ``out``."""
+    con = data.connect(root)
+    parts = out.with_suffix(".parts")
+    parts.mkdir(parents=True, exist_ok=True)
+    try:
+        data.tune(con)
+        for b in range(buckets):
+            df = data.run_query(
+                con, windows.study_sql(), {**params, "buckets": buckets, "bucket": b}
+            )
+            df.write_parquet(parts / f"part_{b:03d}.parquet")
+        pl.scan_parquet(parts / "part_*.parquet").sink_parquet(out)
+        return data.count_rows(out)
+    finally:
+        con.close()
+        for f in parts.glob("part_*.parquet"):
+            f.unlink()
+        parts.rmdir()
 
 
 def _study(root: Path, sql: str, params: dict[str, Any], out: Path) -> int:

@@ -35,11 +35,13 @@ with g as (
     from equity_1m
     where strftime(ts, '%H:%M') in (__GRID__) and close > 0
       and ts >= :start::timestamp and ts < (:end::date + 1)::timestamp
+      and hash(symbol) % :buckets = :bucket
     qualify row_number() over (partition by symbol, ts order by close) = 1
 ),
 liq as (
     select symbol from (select symbol, ts::date as d, sum(close * volume) as tv from equity_1m
-                        where ts >= :liq_from::timestamp group by 1, 2)
+                        where ts >= :liq_from::timestamp and hash(symbol) % :buckets = :bucket
+                        group by 1, 2)
     group by 1 having median(tv) >= :min_turnover
 ),
 u as (select g.* from g where g.kind = 'index' or g.symbol in (select symbol from liq)),
@@ -83,6 +85,11 @@ DEFAULTS: dict[str, Any] = {
 }
 """Minute bars begin in October 2023; liquidity floor ₹5 crore a day (median since 2024); a
 window-year needs 20 sessions (the break windows have about 50 a year)."""
+
+BUCKETS = 10
+"""The query runs once per bucket of symbols (hash(symbol) % BUCKETS) and the parts are
+concatenated: the whole universe at once, 420 million pairs, ran DuckDB out of its 12 GB on
+2026-10-25; a tenth of the symbols takes 7 seconds and little memory."""
 
 
 def _md(df: pl.DataFrame, pct: tuple[str, ...] = ()) -> str:
