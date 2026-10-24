@@ -226,6 +226,13 @@ holes from a name hovering at the bar. The leg's notes carry the counts per rule
 ends cleanly at the leg's budget (a range is started only if it can finish) and reports
 `kite_ranges_left`; the next run continues.
 
+A stock that joins the universe after the days were fetched gets its history by a per-symbol backfill:
+every held session from `KITE_START` to the day before its first held bar, written as supplement files
+beside the days' files (`kite_1m_YYYYMMDD_s<stamp>.jsonl.gz`; the day's file is never rewritten) and
+merged into the day's Parquet, which is rebuilt when a supplement is newer than it. `kite_history`
+(reference) lists the symbols whose history has been asked for once; the backfill stops between
+symbols at the leg's deadline and reports `backfill_left`.
+
 The reference leg downloads NSE's index constituent files (`settings.INDEX_FILES`: Nifty 50, 500,
 Total Market, Midcap 100, Smallcap 250 and the sector indices) and stores a dated snapshot under
 `raw/nse_indices/YYYY/` only when a file's bytes change. `parquet/reference/index_constituents.parquet`

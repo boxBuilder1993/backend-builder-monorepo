@@ -9,7 +9,10 @@ member of the Nifty 500 (sector labels come with them), and every stock fetched 
 a few ETFs and indices; the instrument dump is a reference table.
 
 Raw layout: raw/kite_1m/YYYY/kite_1m_YYYYMMDD.jsonl.gz, one line per instrument,
-{"symbol", "token", "candles": [[ts, o, h, l, c, v], ...]} exactly as returned.
+{"symbol", "token", "candles": [[ts, o, h, l, c, v], ...]} exactly as returned. An instrument that
+joins the universe later gets its history as supplement files beside the days' files,
+kite_1m_YYYYMMDD_s<stamp>.jsonl.gz, and the day's Parquet is built from all of them; kite_history is
+the reference table of instruments whose history has been asked for once.
 """
 
 # ruff: noqa: E501
@@ -222,16 +225,34 @@ def fetch_candles(kite: Any, inst: Instrument, a: date, b: date) -> list[dict[st
     return []
 
 
-class DayWriters:
-    """One gzip JSON-lines writer per trading day, created on first use, finalised atomically."""
+def supplement_rel(d: date, stamp: str) -> str:
+    """A day's supplement file: candles of instruments that joined the universe after the day's file
+    was written. The day's raw file is never rewritten; a supplement sits beside it, named by the run
+    that wrote it, and the day's Parquet is built from the file and all its supplements."""
+    base = raw_rel(NAME, d, EXT)
+    return base[: -len(EXT) - 1] + f"_s{stamp}.{EXT}"
 
-    def __init__(self, root: Path) -> None:
+
+def day_of_raw(p: Path) -> date:
+    """kite_1m_YYYYMMDD... -> the day, for the day's file and its supplements alike."""
+    return date(int(p.name[8:12]), int(p.name[12:14]), int(p.name[14:16]))
+
+
+class DayWriters:
+    """One gzip JSON-lines writer per trading day, created on first use, finalised atomically. With a
+    ``stamp`` the writers produce the day's supplement files instead of the day's file."""
+
+    def __init__(self, root: Path, stamp: str | None = None) -> None:
         self.root = root
+        self.stamp = stamp
         self.files: dict[date, gzip.GzipFile] = {}
+
+    def _rel(self, d: date) -> str:
+        return supplement_rel(d, self.stamp) if self.stamp else raw_rel(NAME, d, EXT)
 
     def write(self, d: date, line: dict[str, Any]) -> None:
         if d not in self.files:
-            p = self.root / raw_rel(NAME, d, EXT)
+            p = self.root / self._rel(d)
             p.parent.mkdir(parents=True, exist_ok=True)
             self.files[d] = gzip.GzipFile(p.with_name(p.name + ".tmp"), "wb", mtime=0)
         self.files[d].write((json.dumps(line, separators=(",", ":")) + "\n").encode())
@@ -240,7 +261,7 @@ class DayWriters:
         done: set[date] = set()
         for d, f in self.files.items():
             f.close()
-            p = self.root / raw_rel(NAME, d, EXT)
+            p = self.root / self._rel(d)
             Path(str(p) + ".tmp").replace(p)
             done.add(d)
         return done
@@ -324,30 +345,166 @@ def fetch(
     return written, no_data, counts
 
 
+HISTORY = "kite_history"
+"""Reference table: symbol, backfilled_from, done_on. A symbol listed here has had every session from
+``backfilled_from`` to its first held day asked of Kite once; it is not asked again."""
+
+
+def coverage(root: Path) -> dict[str, tuple[date, date]]:
+    """symbol -> (first day, last day) with minute bars held, from the Parquet."""
+    files = sorted((root / "parquet" / TABLE).glob("year=*/*.parquet"))
+    if not files:
+        return {}
+    con = duckdb.connect()
+    try:
+        paths = ", ".join(f"'{f.as_posix()}'" for f in files)
+        rows = con.execute(
+            f"select symbol, min(ts::date), max(ts::date) from read_parquet([{paths}]) group by 1"
+        ).fetchall()
+    finally:
+        con.close()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def history(root: Path) -> set[str]:
+    p = root / reference_rel(HISTORY)
+    return set(pl.read_parquet(p)["symbol"].to_list()) if p.exists() else set()
+
+
+def record_history(root: Path, symbols: list[str], today: date) -> Written:
+    p = root / reference_rel(HISTORY)
+    old = (
+        pl.read_parquet(p)
+        if p.exists()
+        else pl.DataFrame(
+            schema={"symbol": pl.Utf8, "backfilled_from": pl.Date, "done_on": pl.Date}
+        )
+    )
+    add = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "backfilled_from": [KITE_START] * len(symbols),
+            "done_on": [today] * len(symbols),
+        }
+    ).cast({"backfilled_from": pl.Date, "done_on": pl.Date})
+    df = pl.concat([old, add]).unique(subset=["symbol"], keep="first").sort("symbol")
+    write_if_changed(p, parquet_bytes(df))
+    return _written(root, reference_rel(HISTORY), "reference", HISTORY, None)
+
+
+def backfill_symbols(
+    root: Path,
+    today: date,
+    kite: Any,
+    insts: list[Instrument],
+    fetcher: Fetch = fetch_candles,
+    deadline: float | None = None,
+) -> tuple[list[Written], dict[str, Any]]:
+    """History for instruments that joined the universe after the days were fetched: every session
+    held (a day with a raw file) from KITE_START to the day before the instrument's first held bar,
+    asked of Kite in 60-day ranges and written as supplement files. An instrument is done when all
+    its ranges are, and recorded in kite_history; the deadline stops between instruments, so a run
+    cut short resumes with the next instrument next time."""
+    done_before = history(root)
+    cov = coverage(root)
+    sessions = sorted(
+        day_of_raw(p) for p in (root / "raw" / NAME).glob("*/kite_1m_????????.jsonl.gz")
+    )
+    todo: list[tuple[Instrument, list[date]]] = []
+    for inst in insts:
+        if inst.symbol in done_before:
+            continue
+        first = cov.get(inst.symbol, (None, None))[0]
+        days = [d for d in sessions if d >= KITE_START and (first is None or d < first)]
+        if days:
+            todo.append((inst, days))
+        else:
+            done_before.add(inst.symbol)  # covered from the start: nothing to ask
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    written: list[Written] = []
+    finished: list[str] = []
+    requests = 0
+    left = 0
+    for i, (inst, days) in enumerate(todo):
+        rs = ranges(days)
+        if deadline is not None and time.monotonic() + len(rs) * KITE_PAUSE * 1.5 + 30 > deadline:
+            left = len(todo) - i
+            log.info("kite backfill: out of time, %d instruments left for the next run", left)
+            break
+        w = DayWriters(root, stamp=f"{stamp}_{inst.token}")
+        for a, b in rs:
+            candles = fetcher(kite, inst, a, b)
+            requests += 1
+            for c in candles:
+                ts = c["date"]
+                d = ts.date() if hasattr(ts, "date") else datetime.fromisoformat(str(ts)).date()
+                if not (a <= d <= b):
+                    raise ValueError(f"kite returned {d} for {inst.symbol} outside {a}..{b}")
+                w.write(
+                    d,
+                    {
+                        "symbol": inst.symbol,
+                        "token": inst.token,
+                        "candles": [
+                            [
+                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                                c["open"],
+                                c["high"],
+                                c["low"],
+                                c["close"],
+                                c["volume"],
+                            ]
+                        ],
+                    },
+                )
+        for d in w.close():
+            rel = supplement_rel(d, f"{stamp}_{inst.token}")
+            written.append(_written(root, rel, "raw", NAME, d))
+        finished.append(inst.symbol)
+        log.info(
+            "kite backfill: %s done, %d ranges, %d requests so far", inst.symbol, len(rs), requests
+        )
+    new_done = [s for s in done_before if s not in history(root)] + finished
+    if new_done:
+        written.append(record_history(root, sorted(set(new_done)), today))
+    counts: dict[str, Any] = {"backfill_requests": requests, "backfill_symbols": len(finished)}
+    if left:
+        counts["backfill_left"] = left
+    return written, counts
+
+
 def register_existing(root: Path) -> list[Written]:
     out: list[Written] = []
     for p in sorted((root / "raw" / NAME).glob("*/kite_1m_*.jsonl.gz")):
-        day = date(int(p.name[8:12]), int(p.name[12:14]), int(p.name[14:16]))
-        out.append(_written(root, raw_rel(NAME, day, EXT), "raw", NAME, day))
-    inst = root / reference_rel("kite_instruments")
-    if inst.exists():
-        out.append(
-            _written(root, reference_rel("kite_instruments"), "reference", "kite_instruments", None)
-        )
+        day = day_of_raw(p)
+        out.append(_written(root, f"raw/{NAME}/{p.parent.name}/{p.name}", "raw", NAME, day))
+    for name in ("kite_instruments", HISTORY):
+        if (root / reference_rel(name)).exists():
+            out.append(_written(root, reference_rel(name), "reference", name, None))
     return out
 
 
 def build(root: Path) -> list[Written]:
-    """equity_1m per day for every raw day without a Parquet; existing files registered, not rebuilt."""
+    """equity_1m per day from the day's raw file and its supplements. A day is built when it has no
+    Parquet or a supplement newer than its Parquet; otherwise the existing file is registered."""
     out: list[Written] = []
+    by_day: dict[date, list[Path]] = {}
     for p in sorted((root / "raw" / NAME).glob("*/kite_1m_*.jsonl.gz")):
-        day = date(int(p.name[8:12]), int(p.name[12:14]), int(p.name[14:16]))
+        by_day.setdefault(day_of_raw(p), []).append(p)
+    for day, files in sorted(by_day.items()):
         rel = parquet_rel(TABLE, day)
-        if not (root / rel).exists():
-            df = K.parse(p.read_bytes(), day)
+        target = root / rel
+        stale = target.exists() and any(f.stat().st_mtime > target.stat().st_mtime for f in files)
+        if not target.exists() or stale:
+            frames = [K.parse(f.read_bytes(), day) for f in files]
+            df = (
+                pl.concat(frames)
+                .unique(subset=["symbol", "ts"], keep="last")
+                .sort(["symbol", "ts"])
+            )
             if df.is_empty():
                 continue
-            write_if_changed(root / rel, parquet_bytes(df))
+            write_if_changed(target, parquet_bytes(df))
         out.append(_written(root, rel, "parquet", TABLE, day))
     return out
 
@@ -365,6 +522,9 @@ def leg(root: Path, today: date, ledger: Ledger) -> LegResult:
         written, no_data, counts = fetch(root, today, ledger, kite, insts, deadline=deadline)
         result.written += written
         result.no_data += no_data
+        result.notes.update(counts)
+        written, counts = backfill_symbols(root, today, kite, insts, deadline=deadline)
+        result.written += written
         result.notes.update(counts)
     except KiteLoginNeeded as exc:
         result.notes["kite"] = f"login needed: {exc}"
