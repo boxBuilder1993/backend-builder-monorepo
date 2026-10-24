@@ -420,3 +420,80 @@ has the same horizon, so the ranking and the IC are unaffected either way.
   `calibration_slope`, `calibration_monotone`, `net_return_raw`, `trades_raw` (predicted raw move =
   `pred_y × scale` against `threshold`, minus `cost_bps`); and `by: month` on any Evaluation for the
   per-month series. `forecast.evaluation_params(threshold)` builds the params.
+
+## Results: forecast 15m v2 on 2026 (2026-10-24)
+
+Fit `forecast 15m v2` (`apps/finance/fits/forecast_15m.json`): 44 features, fit on 2023-10-03 to
+2025-12-31 (16,004,953 rows after the liquidity floor), five models. `Infer` with the label
+`validation 2026` on 2026-01-02 to 2026-10-08 (6,069,732 rows), `Evaluate` at three thresholds with
+10 bps round-trip cost. Every number below is out of sample. The first attempt (`forecast 15m`) had
+6,295 NaN targets from the Muhurat evening session and was superseded.
+
+| model | fit s | IC (se) | IC by month, min to max | r2 | calibration slope | net/trade at 0.1% (trades) | at 0.2% | at 0.5% |
+|---|---|---|---|---|---|---|---|---|
+| linear (ridge), the baseline | 130 | 0.0384 (0.0007) | 0.033 to 0.043 | +0.0005 | 0.80 | -8.8 bps (11,166) | -5.7 bps (2,941) | +6.3 bps (553) |
+| xgboost depth 4, 500 trees | 104 | 0.0500 (0.0007) | 0.044 to 0.060 | -0.0027 | 0.36 | -8.5 bps (56,783) | -5.2 bps (13,269) | +31.2 bps (2,464) |
+| xgboost depth 4, 1500 trees | 201 | 0.0481 (0.0007) | 0.042 to 0.058 | -0.0116 | 0.20 | -9.0 bps (105,041) | -9.1 bps (26,753) | +11.7 bps (4,373) |
+| xgboost depth 6, 500 trees | 111 | 0.0473 (0.0007) | 0.043 to 0.057 | -0.0088 | 0.23 | -8.7 bps (105,337) | -5.8 bps (24,200) | +21.1 bps (3,025) |
+| xgboost depth 6, 1500 trees | 222 | 0.0463 (0.0007) | 0.041 to 0.055 | -0.0237 | 0.14 | -8.7 bps (188,576) | -7.7 bps (47,295) | +8.5 bps (5,385) |
+Net per trade is the mean raw 15-minute return over the rows whose predicted raw move (prediction ×
+scale) exceeds the threshold, minus 10 bps. Trades are over the ten months.
+
+The best model by IC, xgboost depth 4 with 500 trees, by month at the 0.5 percent threshold:
+
+| month | 2026-01 | 2026-02 | 2026-03 | 2026-04 | 2026-05 | 2026-06 | 2026-07 | 2026-08 | 2026-09 | 2026-10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| net/trade at 0.5%, bps | +17 | +43 | +5 | +8 | -15 | +2 | +4 | +92 | -74 | -63 |
+| trades | 121 | 1739 | 165 | 73 | 134 | 72 | 70 | 37 | 46 | 7 |
+| IC | 0.045 | 0.048 | 0.050 | 0.044 | 0.051 | 0.046 | 0.054 | 0.060 | 0.051 | 0.052 |
+
+### Reading
+
+- **The signal is real and holds every month.** The linear baseline has an IC of 0.038 and every
+  xgboost point beats it, the best at 0.050 with a standard error of 0.0007; the monthly IC of the best
+  model never drops below 0.044 and rises through the year. This is at the top of the 0.02 to 0.05
+  range the design expected, and the within-month stability is the part that was not guaranteed.
+- **Explained variance is nil and that is expected**: r² is zero for the baseline and negative for
+  the trees. Fifteen-minute returns are noise with a thin ordering signal on top; the ordering is what
+  IC measures and what a trader uses.
+- **The trees are badly calibrated and more trees make it worse**: slope 0.36 at 500 trees, 0.14 at
+  1500 for depth 6. They predict moves three to seven times larger than what happens. The ordering
+  survives, the magnitude does not; a consumer must rescale predictions by the recorded slope before
+  comparing them with a cost. Depth 4 with 500 trees is the least overfit and the best on every count,
+  so the next search goes smaller, not larger: fewer trees, lower learning rate, stronger
+  regularisation.
+- **After costs, only the top slice pays.** At 0.1 and 0.2 percent predicted moves every model loses
+  5 to 9 bps a trade: the typical 15-minute move does not clear the cost, as the design said. At 0.5
+  percent the best model makes +31 bps a trade over 2,464 trades, about twelve a day. But 1,739 of those
+  trades are in February 2026, a volatile month, and the months since have tens of trades each with
+  noisy means, two of them negative. The honest statement is: the forecast selects a small set of
+  moments with positive expectancy after costs, concentrated in high-volatility periods, and the
+  sample outside those periods is too thin to put a number on yet.
+- **The threshold is the wrong knob.** Because the trees are uncalibrated, a fixed predicted-move
+  threshold selects different quantiles for different models; February dominating is a symptom. The
+  evaluation should also select by prediction quantile within the decision point (the top k names at
+  each t), which is how a cross-sectional model is used. `top_k` as a metric param is the next change.
+
+### Next
+
+1. Rescale by the calibration slope, and evaluate by within-point quantile as well as by threshold.
+2. A smaller search around depth 3 and 4, 200 to 500 trees, learning rate 0.03 to 0.05, more
+   regularisation; `lightgbm` beside xgboost.
+3. The 60-minute and one-session Fits from the same query: the IC screen says the daily layer earns
+   its place there.
+4. The volatility forecast (σ) as its own Fit, since position sizing needs it and the trailing window
+   is crude around the open.
+5. `make kite-login` so the minute data runs past 2026-10-08 and the validation window grows.
+
+## Operational notes (2026-10-24)
+
+- A fit holds about 7 GB (16 million rows × 44 features as float32, plus the frame while it loads).
+  The worker runs one deferred run at a time (`BACKEND_BUILDER_OUTBOX_CONCURRENCY=1`); four at once
+  reached 30 of 31 GB.
+- A rows build is about 10 minutes and one Postgres transaction; `LoadRows` caps DuckDB at 12 GB.
+  During one build Postgres lost a backend and restarted, which dropped the run's connection; the
+  runtime retried the run and it committed. Postgres now has a memory floor and the lowest OOM
+  priority in `compose.yaml`.
+- `Fit.name` is unique: a corrected definition is a new name (`forecast 15m v2`).
+- Scoring 6 million rows is 9 minutes, almost all of it the rows build; the prediction itself is
+  seconds. Evaluations are 4 seconds each.
