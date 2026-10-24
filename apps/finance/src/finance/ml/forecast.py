@@ -363,7 +363,11 @@ def main(argv: list[str] | None = None) -> None:
     tag = f"h{a.horizon}_s{a.step}_v{a.vol}_l{a.liq}_t{int(a.min_turnover)}_{a.start}_{a.end}"
     out = a.out or data.work_dir() / "forecast" / f"{tag}.parquet"
     con = data.connect(a.root)
-    con.execute(f"set threads={a.threads}; set memory_limit='{a.memory}'")
+    tmp = data.work_dir() / "duckdb_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    con.execute(
+        f"set threads={a.threads}; set memory_limit='{a.memory}'; set temp_directory='{tmp.as_posix()}'"
+    )
     import time
 
     t0 = time.time()
