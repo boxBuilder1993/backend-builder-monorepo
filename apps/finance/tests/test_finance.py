@@ -27,6 +27,7 @@ def test_app_scope() -> None:
         "PublishArtifact",
         "Evaluate",
         "Screen",
+        "ScreenSweep",
         "Validate",
     }
     api = {"RegisterFitApi", "RunFitApi", "GetRunApi", "InferApi", "EvaluateApi"}

@@ -243,3 +243,40 @@ async def test_screen_runs_as_a_reaction_and_records_its_table(
         and ledger[0]["kind"] == "parquet"
         and ledger[0]["published_at"] is not None
     )
+
+
+async def test_screen_sweep_runs_each_spec_and_records_failures(
+    store: PostgresStore, toy_mirror: Path, tmp_path: Path
+) -> None:
+    from finance.ml import forecast
+    from finance.ml.reactions import ScreenSweep
+    from test_forecast import DAYS, synthetic_mirror
+
+    synthetic_mirror(toy_mirror)
+    con = data.connect(toy_mirror)
+    params = {
+        **forecast.PARAMS,
+        "start": DAYS[0].isoformat(),
+        "end": DAYS[-1].isoformat(),
+        "min_turnover": 1.0,
+    }
+    rows = tmp_path / "rows.parquet"
+    data.write_rows(con, forecast.ROWS_SQL, params, rows)
+    ctx = await run(
+        store,
+        ScreenSweep,
+        {
+            "specs": [
+                {"grain": "minute", "horizon": 15, "rows_path": str(rows)},
+                {
+                    "grain": "minute",
+                    "horizon": 60,
+                    "rows_path": str(tmp_path / "missing.parquet"),
+                    "params": {"min_turnover": "not a number"},
+                },
+            ]
+        },
+    )
+    results = ctx.load("results")
+    assert ctx.load("screens") == 2 and results[0]["spec"] == "minute nse 15" and results[0]["path"]
+    assert results[1]["spec"] == "minute nse 60" and "error" in results[1]

@@ -553,3 +553,31 @@ class Validate(Reaction):
             done[m.id] = entry
         ctx.save("label", label)
         ctx.save("models", done)
+
+
+class ScreenSweep(Reaction):
+    """Several screens as one job. Input: {"specs": [{"grain", "market", "horizon", "params"?,
+    "rows_path"?}, ...]}. Triggers a Screen child per spec, in order, and saves each child's path and
+    row count; a child's failure is recorded under its spec and the sweep goes on to the next. One
+    run on the console with its children, instead of a shell loop of unrelated runs."""
+
+    async def calculate(self, ctx: Context) -> None:
+        specs = [dict(s) for s in ctx.input["specs"]]
+        results: list[dict[str, Any]] = []
+        for spec in specs:
+            key = f"{spec.get('grain', 'minute')} {spec.get('market', 'nse')} {spec['horizon']}"
+            try:
+                child = await ctx.trigger(Screen, spec)
+                assert child is not None
+                results.append(
+                    {
+                        "spec": key,
+                        "path": child.vars.get("path"),
+                        "rows": child.vars.get("rows"),
+                        "features_screened": child.vars.get("features_screened"),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - one screen's outcome, not the sweep's
+                results.append({"spec": key, "error": _err(exc)})
+            ctx.save("results", results)
+        ctx.save("screens", len(results))
