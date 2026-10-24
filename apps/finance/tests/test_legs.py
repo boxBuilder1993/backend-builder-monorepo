@@ -17,7 +17,7 @@ import pytest
 from finance.build import kite as BK
 from finance.build import reference as R
 from finance.build import us as BU
-from finance.files import marker_rel, raw_rel
+from finance.files import marker_rel, parquet_rel, raw_rel, reference_rel
 from finance.settings import KITE_EXTRA
 from finance.sources import Ledger
 from finance.sources import kite as K
@@ -511,3 +511,67 @@ def test_kite_fetch_stops_cleanly_at_the_deadline(
         deadline=_t.monotonic() + 10_000,
     )
     assert calls > 0 and "kite_ranges_left" not in counts
+
+
+def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(K, "KITE_START", date(2026, 10, 20))
+    monkeypatch.setattr(K, "datetime", _Clock)
+    old = [K.Instrument("RELIANCE", 1)]
+    candle = {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10}
+
+    def day_fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
+        return [{"date": datetime(2026, 10, 21, 9, 15), **candle}]
+
+    # the day's file and Parquet exist for RELIANCE only
+    K.fetch(tmp_path, date(2026, 10, 22), Ledger(), object(), old, fetcher=day_fetcher)
+    K.build(tmp_path)
+    assert pl.read_parquet(tmp_path / parquet_rel(K.TABLE, date(2026, 10, 21)))[
+        "symbol"
+    ].to_list() == ["RELIANCE"]
+
+    # TCS joins the universe: its history comes as a supplement of the day; RELIANCE is covered already
+    asked: list[tuple[str, date, date]] = []
+
+    def hist_fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
+        asked.append((inst.symbol, a, b))
+        return [{"date": datetime(2026, 10, 21, 9, 16), **candle}]
+
+    insts = old + [K.Instrument("TCS", 2)]
+    written, counts = K.backfill_symbols(
+        tmp_path, date(2026, 10, 22), object(), insts, fetcher=hist_fetcher
+    )
+    assert [a[0] for a in asked] == ["TCS"] and asked[0][1] == asked[0][2] == date(2026, 10, 21)
+    supp = [w for w in written if w.kind == "raw"]
+    assert len(supp) == 1 and "_s" in supp[0].path and supp[0].day == date(2026, 10, 21)
+    assert counts == {"backfill_requests": 1, "backfill_symbols": 1}
+    hist = pl.read_parquet(tmp_path / reference_rel(K.HISTORY))
+    assert sorted(hist["symbol"].to_list()) == [
+        "RELIANCE",
+        "TCS",
+    ]  # covered from the start, and backfilled
+    built = K.build(tmp_path)  # the day is rebuilt from the file and its supplement
+    df = pl.read_parquet(tmp_path / built[0].path)
+    assert df["symbol"].to_list() == ["RELIANCE", "TCS"] and df.height == 2
+    assert (
+        len(K.register_existing(tmp_path)) == 2 + 1
+    )  # the day's file, the supplement, kite_history
+    # a second run asks nothing: both are in the history
+    asked.clear()
+    _, counts = K.backfill_symbols(
+        tmp_path, date(2026, 10, 23), object(), insts, fetcher=hist_fetcher
+    )
+    assert asked == [] and counts["backfill_symbols"] == 0
+    # a deadline already passed leaves the work for the next run
+    import time as _t
+
+    _, counts = K.backfill_symbols(
+        tmp_path,
+        date(2026, 10, 23),
+        object(),
+        insts + [K.Instrument("INFY", 3)],
+        fetcher=hist_fetcher,
+        deadline=_t.monotonic(),
+    )
+    assert asked == [] and counts["backfill_left"] == 1
