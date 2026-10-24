@@ -25,6 +25,8 @@ INDEX = "NIFTY 50"
 INDEX_DAILY = "Nifty 50"
 """Its name in index_daily."""
 SESSION_MINUTES = 375
+"""09:15 to 15:29. The Muhurat session (one evening a year, 18:00 to 19:15) is not part of the rows:
+its minutes fall outside this range and are filtered out."""
 EXPIRY_WEEKDAY_CHANGE = date(2025, 9, 1)
 """NSE index derivatives expire on Thursday before this, Tuesday from it."""
 
@@ -214,7 +216,8 @@ rows_ as (
     asof left join d1 d on b.symbol = d.symbol and b.day > d.date
     asof left join i1 ii on b.day > ii.date
     left join days dy using (day)
-    where b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover
+    where b.m between 0 and {SESSION_MINUTES - 1}  -- the regular session only: Muhurat evening bars run past it
+      and b.m % :step_minutes = 0 and b.turn_liq >= :min_turnover
 )
 select *,
        sig1 * sqrt(least(:horizon_minutes, m_left - 1)) as scale,

@@ -43,12 +43,19 @@ def _bars(day: date, symbol: str, seed: int, thin: bool = False) -> pl.DataFrame
     ).with_columns(pl.col("ts").cast(pl.Datetime("us")), pl.col("volume").cast(pl.Int64))
 
 
-def _mirror(root: Path, *, perturb_after: datetime | None = None) -> None:
+def _mirror(root: Path, *, perturb_after: datetime | None = None, muhurat: bool = False) -> None:
     for day in DAYS:
         frames = [_bars(day, s, i + 1, thin=(s == "CCC")) for i, s in enumerate(SYMBOLS)]
         frames.append(
             _bars(day, forecast.INDEX, 99).with_columns(pl.lit(0).cast(pl.Int64).alias("volume"))
         )
+        if muhurat and day == DAYS[0]:  # an evening session, 18:00 to 19:15, like Diwali's
+            frames = [
+                f.filter(pl.col("ts").dt.hour() < 10).with_columns(
+                    (pl.col("ts") + timedelta(hours=8, minutes=45)).alias("ts")
+                )
+                for f in frames
+            ]
         df = pl.concat(frames)
         df = pl.concat(
             [df, df.filter(pl.col("symbol") == "AAA")]
@@ -298,3 +305,12 @@ def test_table_metrics_ic_calibration_and_raw_net_return() -> None:
         metrics.evaluate(table.drop("scale"), ["y"], ["net_return_raw"], {})
     with pytest.raises(ValueError, match="not a column"):
         metrics.evaluate(table, ["y"], ["ic"], {"by": "sector"})
+
+
+def test_an_evening_session_yields_no_rows_and_no_nan_targets(tmp_path: Path) -> None:
+    _mirror(tmp_path, muhurat=True)
+    rows = _rows(tmp_path, step_minutes=1)
+    assert set(rows["day"].to_list()) == {DAYS[1]}  # the evening session is not a decision point
+    assert rows["y"].is_finite().all()
+    assert float(rows["m"].to_numpy().min()) >= 0 and float(rows["m_left"].to_numpy().min()) >= 1
+    assert float(rows["scale"].to_numpy().min()) > 0
