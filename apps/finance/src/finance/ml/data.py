@@ -16,6 +16,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,9 @@ from finance.ml.schema import Feature, Schema, Target
 
 DEFAULT_SERIES = ("EQ", "BE")
 DUCKDB_MEMORY = os.environ.get("FINANCE_DUCKDB_MEMORY", "12GB")
+DUCKDB_TEMP_MAX = os.environ.get("FINANCE_DUCKDB_TEMP_MAX", "80GB")
+"""The most a rows build may spill to disk before it fails instead of filling the drive: a build that
+needs more has the wrong shape (one did, at 201 GB, on 2026-10-24)."""
 """DuckDB's cap for a rows build; beyond it the build spills to the work dir. DuckDB's own default is
 80% of the box, which leaves Postgres and the worker nothing while twenty million rows are built."""
 ROLL_DAYS = 5
@@ -54,6 +58,24 @@ def _has_days(root: Path, table: str) -> bool:
 
 def _has_ref(root: Path, name: str) -> bool:
     return Path(_ref(root, name)).exists()
+
+
+def tune(
+    con: duckdb.DuckDBPyConnection, threads: int | None = None, memory: str = DUCKDB_MEMORY
+) -> None:
+    """Settings for a rows build: the memory cap, a spill directory under the work dir with a size
+    cap, and no insertion-order preservation (the rows are sorted at the end anyway)."""
+    tmp = work_dir() / "duckdb_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    parts = [
+        f"set memory_limit='{memory}'",
+        f"set temp_directory='{tmp.as_posix()}'",
+        f"set max_temp_directory_size='{DUCKDB_TEMP_MAX}'",
+        "set preserve_insertion_order=false",
+    ]
+    if threads:
+        parts.append(f"set threads={threads}")
+    con.execute("; ".join(parts))
 
 
 def connect(root: Path) -> duckdb.DuckDBPyConnection:
@@ -204,11 +226,69 @@ def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) 
     return relation(con, sql, params).pl()
 
 
-def write_rows(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any], out: Path) -> int:
-    """The query straight to Parquet, never through a Python-side frame: DuckDB streams it. Returns the
+CHUNK_MONTHS = 3
+CHUNK_WARMUP_DAYS = 45
+"""A rows query with ``start`` and ``end`` params is run one quarter at a time, each chunk asked from
+45 calendar days before its start (the longest intraday lookback is 20 sessions of relative volume)
+and kept from its start: the per-minute windows over the whole universe (peers, breadth) sort every
+row of the range, and three years at once ran DuckDB out of 18 GB; a quarter fits in a few."""
+
+
+def chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    out: list[tuple[date, date]] = []
+    a = start
+    while a <= end:
+        y, m = a.year + (a.month - 1 + months) // 12, (a.month - 1 + months) % 12 + 1
+        b = min(date(y, m, 1) - timedelta(days=1), end)
+        out.append((a, b))
+        a = b + timedelta(days=1)
+    return out
+
+
+def _as_date(v: Any) -> date:
+    return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
+
+
+def write_rows(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    params: dict[str, Any],
+    out: Path,
+    chunk_months: int = CHUNK_MONTHS,
+    warmup_days: int = CHUNK_WARMUP_DAYS,
+) -> int:
+    """The query straight to Parquet, never through a Python-side frame: DuckDB streams it. With
+    ``start`` and ``end`` params the range is built in chunks (see CHUNK_MONTHS), each written as a
+    part and the parts concatenated into ``out``; a row's chunk is decided by its ``ts``. Returns the
     row count. The forecast rows are tens of millions; a frame of them would not fit beside the fit."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    relation(con, sql, params).write_parquet(out.as_posix(), compression="zstd")
+    if not ("start" in params and "end" in params) or not chunk_months:
+        relation(con, sql, params).write_parquet(out.as_posix(), compression="zstd")
+        return int(
+            con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0]
+        )
+    start, end = _as_date(params["start"]), min(_as_date(params["end"]), date.today())
+    parts = out.with_suffix(".parts")
+    parts.mkdir(parents=True, exist_ok=True)
+    for q in parts.glob("*.parquet"):
+        q.unlink()
+    for i, (a, b) in enumerate(chunks(start, end, chunk_months)):
+        chunk = {
+            **params,
+            "start": (a - timedelta(days=warmup_days)).isoformat(),
+            "end": b.isoformat(),
+        }
+        rel = relation(con, sql, chunk)
+        if "ts" in rel.columns:
+            rel = rel.filter(f"ts >= TIMESTAMP '{a.isoformat()} 00:00:00'")
+        rel.write_parquet((parts / f"{i:04d}.parquet").as_posix(), compression="zstd")
+    con.sql(
+        f"copy (select * from read_parquet('{parts.as_posix()}/*.parquet')) "
+        f"to '{out.as_posix()}' (format parquet, compression zstd)"
+    )
+    for q in parts.glob("*.parquet"):
+        q.unlink()
+    parts.rmdir()
     return int(con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0])
 
 
