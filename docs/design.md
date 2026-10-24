@@ -273,7 +273,7 @@ Each source is optional on any method. FastAPI validates and documents each one 
 
 Built.
 
-The package logs under `backend_builder` with a `NullHandler`; applications call `configure_logging(level)`. INFO carries identifiers and counts, never payloads. DEBUG carries inputs and rows.
+The package logs under `backend_builder` with a `NullHandler`; processes call `configure_logging(level, format=)`, which attaches one handler to the root logger so an app's own loggers travel with the runtime's. Every record emitted inside a run carries `root_id`, `reaction_id`, `reaction` and `source`, stamped by the log record factory from a context variable `invoke` sets; `app` and `process` identify the process. `dev` writes a readable line to stderr; `test` and `prod` write one JSON object per line to stdout for a collector. Collection, retention and the console's per-run view are in [logs.md](logs.md). INFO carries identifiers and counts, never payloads. DEBUG carries inputs and rows.
 
 | Event | Level |
 | --- | --- |
@@ -338,6 +338,10 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 5. Settings and the store factory. Done.
 
 ## 15. Later
+
+Log collection, retention and the console's per-run log view are designed in [logs.md](logs.md).
+
+Compute pools, service calls and the Kubernetes deployment are designed in [pools.md](pools.md).
 
 Each of these was designed in the earlier draft and is parked, with what has to exist first.
 
@@ -441,7 +445,7 @@ Built.
 | --- | --- |
 | Overview | counts of reactions, entities, endpoints and triggers; runs by outcome in the last 24 hours; outbox depth; recent runs |
 | Graph | entities with their tables and fields; reactions with what reaches them, endpoints, triggers, schedules, and their docstrings; endpoints with their budgets |
-| Reaction | one reaction: what reaches it, runs by outcome with p50 and p95 over the last 24 hours, outbox rows waiting for it, recent runs |
+| Reaction | one reaction: what reaches it, runs by outcome with p50 and p95 over the last 24 hours, outbox rows waiting for it, recent runs; a form to trigger it with a JSON input, run now in the console's process with source `admin`, or enqueued for the worker |
 | Runs | filter by reaction, outcome and source prefix |
 | Run | one invocation: outcome, source, timing, attempt, the error; the tree of invocations beneath it, per attempt for a seed, each linking to its own page; its input; its saved vars; what it created or deleted, or for a seed every change the run wrote; the outbox rows the subtree deferred, linked, with their state |
 | Outbox | pending, claimed and dead rows; a row's input, error and budget; requeue and discard |

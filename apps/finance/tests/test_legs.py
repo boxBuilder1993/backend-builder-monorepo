@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import gzip
 import json
-from datetime import date, datetime
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,8 @@ import pytest
 from finance.build import kite as BK
 from finance.build import reference as R
 from finance.build import us as BU
-from finance.files import marker_rel, raw_rel
+from finance.files import marker_rel, parquet_rel, raw_rel, reference_rel
+from finance.settings import KITE_EXTRA
 from finance.sources import Ledger
 from finance.sources import kite as K
 from finance.sources import us as US
@@ -312,6 +314,12 @@ def test_kite_fetch_writes_days_and_reports_empty_ones(
         tmp_path, date(2026, 10, 22), Ledger(), object(), insts, fetcher=fetcher
     )
     assert [(w.source, w.day) for w in written] == [("kite_1m", date(2026, 10, 21))]
+    # a later run asks 10-20 and 10-22 again as one range spanning the held 10-21: Kite returns
+    # 10-21's candles too, and the held file is not rewritten
+    held = tmp_path / raw_rel(K.NAME, date(2026, 10, 21), K.EXT)
+    before, held_bytes = held.stat().st_mtime_ns, held.read_bytes()
+    K.fetch(tmp_path, date(2026, 10, 22), Ledger(), object(), insts, fetcher=fetcher)
+    assert held.stat().st_mtime_ns == before and held.read_bytes() == held_bytes
     assert sorted(n.day for n in no_data) == [date(2026, 10, 20), date(2026, 10, 22)]
     assert counts == {"kite_requests": 2, "kite_instruments": 2}
     built = K.build(tmp_path)
@@ -329,3 +337,335 @@ def test_kite_login_needed_is_an_outcome(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(K, "KITE_CONFIG", tmp_path / "none.toml")
     r = K.leg(tmp_path, date(2026, 10, 22), Ledger())
     assert r.implemented and r.written == [] and "login needed" in r.notes["kite"]
+
+
+CONSTITUENTS = (
+    b"Company Name,Industry,Symbol,Series,ISIN Code\r\n"
+    b"HDFC Bank Ltd.,Financial Services,HDFCBANK,EQ,INE040A01034\r\n"
+    b"Karur Vysya Bank Ltd.,Financial Services,KARURVYSYA,EQ,INE036D01028\r\n"
+)
+
+
+class _Archives:
+    """NseArchives fake: the same bytes for every list, unless told otherwise per file name."""
+
+    def __init__(self, by_name: dict[str, bytes] | None = None, default: bytes = CONSTITUENTS):
+        self.by_name, self.default, self.calls = by_name or {}, default, 0
+
+    def get(self, url: str, **kw: Any) -> Any:
+        self.calls += 1
+        name = url.rsplit("/", 1)[1].removesuffix(".csv")
+        content = self.by_name.get(name, self.default)
+
+        class R:
+            status_code = 200 if content else 404
+
+        r = R()
+        r.content = content  # type: ignore[attr-defined]
+        return r
+
+
+def test_index_snapshots_are_written_on_change_only_and_build_one_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finance.sources import reference as REF
+
+    monkeypatch.setattr(
+        REF, "INDEX_FILES", {"NIFTY 500": "ind_nifty500list", "NIFTY BANK": "ind_niftybanklist"}
+    )
+
+    def _no_retry(fn: Callable[[], bytes], what: str) -> bytes:
+        return fn()
+
+    monkeypatch.setattr(REF, "retry", _no_retry)
+    day1, day2, day3 = date(2026, 10, 24), date(2026, 10, 25), date(2026, 10, 26)
+    w1 = REF.fetch_indices(tmp_path, day1, _Archives())  # type: ignore[arg-type]
+    assert sorted(w.path for w in w1) == [
+        "raw/nse_indices/2026/nse_indices_20261024_ind_nifty500list.csv.gz",
+        "raw/nse_indices/2026/nse_indices_20261024_ind_niftybanklist.csv.gz",
+    ]
+    assert all(w.source == "nse_indices" and w.day == day1 for w in w1)
+    w2 = REF.fetch_indices(tmp_path, day2, _Archives())  # type: ignore[arg-type]
+    assert [w.path for w in w2] == [w.path for w in w1]  # unchanged bytes: no new snapshot
+    changed = CONSTITUENTS + b"ACC Ltd.,Construction Materials,ACC,EQ,INE012A01025\r\n"
+    w3 = REF.fetch_indices(tmp_path, day3, _Archives({"ind_nifty500list": changed}))  # type: ignore[arg-type]
+    assert len(w3) == 3 and any(w.day == day3 and "nifty500" in w.path for w in w3)
+    built = REF.build_reference(tmp_path)
+    table = pl.read_parquet(
+        tmp_path / [w for w in built if w.source == "index_constituents"][0].path
+    )
+    assert table.columns == ["index", "symbol", "isin", "company", "industry", "series", "as_of"]
+    assert table.filter(pl.col("index") == "NIFTY 500").group_by("as_of").len().sort("as_of")[
+        "len"
+    ].to_list() == [2, 3]
+    assert (
+        table.filter(pl.col("symbol") == "ACC").row(0, named=True)["industry"]
+        == "Construction Materials"
+    )
+    # a list the archive lacks is skipped, not the leg's failure
+    w4 = REF.fetch_indices(tmp_path, day3, _Archives({"ind_niftybanklist": b""}))  # type: ignore[arg-type]
+    assert len(w4) == 3
+
+
+def test_kite_universe_is_liquid_or_index_or_recent(tmp_path: Path) -> None:
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(130)]
+    rows = []
+    for d in days:
+        rows.append(
+            {"date": d, "isin": "INLIQ", "symbol": "LIQUID", "series": "EQ", "turnover": 30e7}
+        )
+        rows.append(
+            {"date": d, "isin": "INTHIN", "symbol": "THIN", "series": "EQ", "turnover": 1e7}
+        )
+        rows.append(
+            {"date": d, "isin": "INMEM", "symbol": "MEMBER", "series": "EQ", "turnover": 2e7}
+        )
+    eq = pl.DataFrame(rows)
+    out = tmp_path / "parquet/equity/year=2026"
+    out.mkdir(parents=True)
+    eq.write_parquet(out / "equity_all.parquet")
+    ref = tmp_path / "parquet/reference"
+    ref.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "index": ["NIFTY 500", "NIFTY 500", "NIFTY BANK"],
+            "symbol": ["MEMBER", "OLDMEMBER", "THIN"],
+            "isin": ["INMEM", "INOLD", "INTHIN"],
+            "company": ["m", "o", "t"],
+            "industry": ["x", "x", "y"],
+            "series": ["EQ"] * 3,
+            "as_of": [date(2026, 6, 1), date(2026, 1, 1), date(2026, 6, 1)],
+        }
+    ).write_parquet(ref / "index_constituents.parquet")
+    pl.DataFrame(
+        {
+            "instrument_token": [1, 2, 3, 4, 5],
+            "exchange_token": [1, 2, 3, 4, 5],
+            "tradingsymbol": ["LIQUID", "THIN", "MEMBER", "FADED", "NIFTY 50"],
+            "name": [""] * 5,
+            "segment": ["NSE", "NSE", "NSE", "NSE", "INDICES"],
+            "instrument_type": ["EQ"] * 5,
+            "exchange": ["NSE"] * 5,
+            "tick_size": [0.05] * 5,
+            "lot_size": [1] * 5,
+        }
+    ).write_parquet(ref / "kite_instruments.parquet")
+    m = tmp_path / "parquet/equity_1m/year=2026"
+    m.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "ts": [datetime(2026, 5, 4, 9, 15)],
+            "symbol": ["FADED"],
+            "token": [4],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [1],
+        }
+    ).write_parquet(m / "equity_1m_20260504.parquet")
+    insts, missing, counts = K.universe(tmp_path)
+    got = {i.symbol for i in insts}
+    assert {
+        "LIQUID",
+        "MEMBER",
+        "FADED",
+        "NIFTY 50",
+    } <= got  # turnover rule, index member, stayed in
+    assert (
+        "THIN" not in got and "OLDMEMBER" not in got
+    )  # thin and not a member; member of an old snapshot only
+    assert counts == {"liquid": 1, "index": 1, "recent": 1, "universe": 3 + len(KITE_EXTRA)}
+    assert set(missing) >= set(KITE_EXTRA)  # the ETFs have no token in this fixture
+
+
+def test_kite_fetch_stops_cleanly_at_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(K, "KITE_START", date(2026, 8, 1))
+    monkeypatch.setattr(K, "datetime", _Clock)
+    insts = [K.Instrument("RELIANCE", 1)]
+    calls = 0
+
+    def fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        return []
+
+    import time as _t
+
+    written, no_data, counts = K.fetch(
+        tmp_path,
+        date(2026, 10, 22),
+        Ledger(),
+        object(),
+        insts,
+        fetcher=fetcher,
+        deadline=_t.monotonic(),
+    )
+    assert calls == 0 and written == [] and no_data == []
+    assert counts["kite_ranges_left"] == len(
+        K.ranges(K.missing_days(tmp_path, date(2026, 10, 22), date(2026, 10, 22), Ledger()))
+    )
+    written, no_data, counts = K.fetch(
+        tmp_path,
+        date(2026, 10, 22),
+        Ledger(),
+        object(),
+        insts,
+        fetcher=fetcher,
+        deadline=_t.monotonic() + 10_000,
+    )
+    assert calls > 0 and "kite_ranges_left" not in counts
+
+
+def test_symbol_backfill_writes_supplements_and_the_build_merges_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(K, "KITE_START", date(2026, 10, 20))
+    monkeypatch.setattr(K, "datetime", _Clock)
+    old = [K.Instrument("RELIANCE", 1)]
+    candle = {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10}
+
+    def day_fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
+        return [{"date": datetime(2026, 10, 21, 9, 15), **candle}]
+
+    # the day's file and Parquet exist for RELIANCE only
+    K.fetch(tmp_path, date(2026, 10, 22), Ledger(), object(), old, fetcher=day_fetcher)
+    K.build(tmp_path)
+    assert pl.read_parquet(tmp_path / parquet_rel(K.TABLE, date(2026, 10, 21)))[
+        "symbol"
+    ].to_list() == ["RELIANCE"]
+
+    # TCS joins the universe: its history comes as a supplement of the day; RELIANCE is covered already
+    asked: list[tuple[str, date, date]] = []
+
+    def hist_fetcher(kite: Any, inst: K.Instrument, a: date, b: date) -> list[dict[str, Any]]:
+        asked.append((inst.symbol, a, b))
+        return [
+            {"date": datetime(2026, 10, 21, 9, 16), **candle},
+            {"date": datetime(2026, 10, 21, 9, 17), **candle},
+        ]
+
+    insts = old + [K.Instrument("TCS", 2), K.Instrument("INFY", 3)]
+    written, counts = K.backfill_symbols(
+        tmp_path, date(2026, 10, 22), object(), insts, fetcher=hist_fetcher
+    )
+    assert [a[0] for a in asked] == ["TCS", "INFY"] and asked[0][1] == asked[0][2] == date(
+        2026, 10, 21
+    )
+    supp = [w for w in written if w.kind == "raw"]
+    assert len(supp) == 1 and "_s" in supp[0].path and supp[0].day == date(2026, 10, 21)
+    assert counts == {"backfill_requests": 2, "backfill_symbols": 2}
+    hist = pl.read_parquet(tmp_path / reference_rel(K.HISTORY))
+    assert sorted(hist["symbol"].to_list()) == [
+        "INFY",
+        "RELIANCE",
+        "TCS",
+    ]  # covered from the start, and backfilled
+    built = K.build(tmp_path)  # the day is rebuilt from the file and its supplement
+    df = pl.read_parquet(tmp_path / built[0].path)
+    assert df["symbol"].to_list() == ["INFY", "INFY", "RELIANCE", "TCS", "TCS"] and df.height == 5
+    lines = gzip.decompress((tmp_path / supp[0].path).read_bytes()).splitlines()
+    assert len(lines) == 2  # one line per instrument per day, two candles each
+    assert (
+        len(K.register_existing(tmp_path)) == 2 + 1
+    )  # the day's file, the supplement, kite_history
+    # a second run asks nothing: both are in the history
+    asked.clear()
+    _, counts = K.backfill_symbols(
+        tmp_path, date(2026, 10, 23), object(), insts, fetcher=hist_fetcher
+    )
+    assert asked == [] and counts["backfill_symbols"] == 0
+    # a deadline already passed leaves the work for the next run
+    import time as _t
+
+    _, counts = K.backfill_symbols(
+        tmp_path,
+        date(2026, 10, 23),
+        object(),
+        insts + [K.Instrument("WIPRO", 4)],
+        fetcher=hist_fetcher,
+        deadline=_t.monotonic(),
+    )
+    assert asked == [] and counts["backfill_left"] == 1
+
+
+SCREENER = (
+    b'{"data": {"rows": ['
+    b'{"symbol": "AAPL", "name": "Apple Inc. Common Stock", "lastsale": "$1.00", "marketCap": "3000000000000.00",'
+    b' "country": "United States", "ipoyear": "1980", "industry": "Computer Manufacturing", "sector": "Technology"},'
+    b'{"symbol": "TINY", "name": "Tiny Corp", "lastsale": "$2.00", "marketCap": "50000000.00",'
+    b' "country": "", "ipoyear": "", "industry": "", "sector": ""}'
+    b"]}}"
+)
+
+
+def test_us_screener_snapshot_is_stable_columns_only_and_builds_us_sectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finance.sources import us as USL
+
+    snap = BU.screener_snapshot(SCREENER)
+    assert (
+        snap.decode().splitlines()[0] == "symbol,name,sector,industry,country,ipo_year,cap_bucket"
+    )
+    assert (
+        "AAPL,Apple Inc. Common Stock,Technology,Computer Manufacturing,United States,1980,mega"
+        in snap.decode()
+    )
+    assert "TINY,Tiny Corp,,,,,micro" in snap.decode()  # the price columns are not in the snapshot
+    assert (
+        BU.cap_bucket(5e9) == "mid" and BU.cap_bucket(None) is None and BU.cap_bucket(0.0) is None
+    )
+
+    class _S:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def get(self, url: str, timeout: int = 0) -> Any:
+            class R:
+                status_code = 200
+                content = SCREENER
+
+            return R()
+
+    import requests as _requests
+
+    def _no_retry(fn: Callable[[], bytes], what: str) -> bytes:
+        return fn()
+
+    monkeypatch.setattr(_requests, "Session", _S)
+    monkeypatch.setattr(USL, "retry", _no_retry)
+    w1 = USL.fetch_screener(tmp_path, date(2026, 10, 24))
+    w2 = USL.fetch_screener(tmp_path, date(2026, 10, 25))  # same bytes: no new snapshot
+    assert (
+        [w.path for w in w1]
+        == [w.path for w in w2]
+        == ["raw/nasdaq_screener/2026/nasdaq_screener_20261024.csv.gz"]
+    )
+    assert w1[0].source == "nasdaq_screener" and w1[0].day == date(2026, 10, 24)
+    table = BU.parse_screener([tmp_path / w1[0].path])
+    aapl = table.filter(pl.col("symbol") == "AAPL").row(0, named=True)
+    assert (
+        aapl["sector"] == "Technology" and aapl["cap_bucket"] == "mega" and aapl["ipo_year"] == 1980
+    )
+    tiny = table.filter(pl.col("symbol") == "TINY").row(0, named=True)
+    assert (
+        tiny["sector"] is None and tiny["ipo_year"] is None and tiny["as_of"] == date(2026, 10, 24)
+    )
+    uni = USL.with_indices(
+        pl.DataFrame(
+            {
+                "symbol": ["AAPL"],
+                "yahoo": ["AAPL"],
+                "name": ["a"],
+                "exchange": ["Q"],
+                "kind": ["stock"],
+            }
+        )
+    )
+    assert uni["symbol"].to_list() == ["AAPL", "^VIX"] and uni["kind"].to_list() == [
+        "stock",
+        "index",
+    ]

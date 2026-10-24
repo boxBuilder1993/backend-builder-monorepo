@@ -35,9 +35,11 @@ from finance.files import reference_rel, sha256, write_if_changed
 from finance.http import HEADERS, Transient, retry
 from finance.settings import (
     LISTING_FILES,
+    NASDAQ_SCREENER_URL,
     NASDAQ_TRADER,
     US_BATCH,
     US_DORMANT_AFTER,
+    US_INDICES,
     US_MIN_HIT_RATE,
     US_PAUSE,
 )
@@ -134,6 +136,47 @@ def gaps(
     return full, tail, latest
 
 
+def fetch_screener(root: Path, today: date) -> list[Written]:
+    """Nasdaq's stock screener, reduced to its stable columns and stored as a dated snapshot only
+    when those bytes change. Every snapshot held is registered. A screener outage is a note, not the
+    leg's failure: the newest snapshot keeps serving."""
+    s = requests.Session()
+    s.headers.update(HEADERS | {"Accept": "application/json"})
+
+    def _get() -> bytes:
+        r = s.get(NASDAQ_SCREENER_URL, timeout=60)
+        if r.status_code != 200 or not r.content.startswith(b"{"):
+            raise Transient(f"HTTP {r.status_code}")
+        return r.content
+
+    content = U.screener_snapshot(retry(_get, what="nasdaq screener"))
+    snaps = sorted((root / "raw" / "nasdaq_screener").glob("*/nasdaq_screener_*.csv.gz"))
+    latest = gzip.decompress(snaps[-1].read_bytes()) if snaps else None
+    if latest != content:
+        rel = U.screener_rel(today)
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        write_if_changed(root / rel, gzip.compress(content, mtime=0))
+    out: list[Written] = []
+    for q in sorted((root / "raw" / "nasdaq_screener").glob("*/nasdaq_screener_*.csv.gz")):
+        day = date(int(q.name[16:20]), int(q.name[20:22]), int(q.name[22:24]))
+        out.append(_written(root, q.relative_to(root).as_posix(), "raw", "nasdaq_screener", day))
+    return out
+
+
+def with_indices(universe: pl.DataFrame) -> pl.DataFrame:
+    """The index symbols (not in the listings) appended to the price universe."""
+    extra = pl.DataFrame(
+        {
+            "symbol": list(US_INDICES),
+            "yahoo": list(US_INDICES),
+            "name": list(US_INDICES.values()),
+            "exchange": ["INDEX"] * len(US_INDICES),
+            "kind": ["index"] * len(US_INDICES),
+        }
+    )
+    return pl.concat([universe, extra.filter(~pl.col("symbol").is_in(universe["symbol"]))])
+
+
 def fetch_prices(
     root: Path,
     today: date,
@@ -159,6 +202,7 @@ def fetch_prices(
     written: list[Written] = []
     fetched: set[str] = set()
     n_fail = n_rows = 0
+    stamp = time.strftime("%H%M%S")  # a day may see several runs; a batch file is never rewritten
     for n, (syms, start) in enumerate(jobs, 1):
         try:
             df = retry(
@@ -191,7 +235,7 @@ def fetch_prices(
                 dormant[s] = rec
         fetched |= got
         if df.height:
-            rel = f"raw/yahoo/{today:%Y}/yahoo_{today:%Y%m%d}_b{n:03d}.parquet"
+            rel = f"raw/yahoo/{today:%Y}/yahoo_{today:%Y%m%d}_{stamp}_b{n:03d}.parquet"
             buf = io.BytesIO()
             df.sort(["symbol", "date"]).write_parquet(buf, compression="zstd")
             write_if_changed(root / rel, buf.getvalue())
@@ -221,6 +265,9 @@ def register_existing(root: Path) -> list[Written]:
             rel = U.listing_rel(d, f)
             if (root / rel).exists():
                 out.append(_written(root, rel, "raw", "nasdaq", d))
+    for q in sorted((root / "raw" / "nasdaq_screener").glob("*/nasdaq_screener_*.csv.gz")):
+        day = date(int(q.name[16:20]), int(q.name[20:22]), int(q.name[22:24]))
+        out.append(_written(root, q.relative_to(root).as_posix(), "raw", "nasdaq_screener", day))
     return out
 
 
@@ -242,6 +289,16 @@ def build(root: Path) -> list[Written]:
             __import__("finance.build.nse", fromlist=["parquet_bytes"]).parquet_bytes(symbols),
         )
         out.append(_written(root, rel, "reference", "us_symbols", None))
+    snaps = sorted((root / "raw" / "nasdaq_screener").glob("*/nasdaq_screener_*.csv.gz"))
+    if snaps:
+        rel = reference_rel("us_sectors")
+        write_if_changed(
+            root / rel,
+            __import__("finance.build.nse", fromlist=["parquet_bytes"]).parquet_bytes(
+                U.parse_screener(snaps)
+            ),
+        )
+        out.append(_written(root, rel, "reference", "us_sectors", None))
     return out
 
 
@@ -257,7 +314,12 @@ def leg(root: Path, today: date, ledger: Ledger) -> LegResult:
         listing_day = days[-1]
         log.warning("us: listings fetch failed (%s); using the %s snapshot", exc, listing_day)
         result.notes["listings_error"] = str(exc)
-    universe = U.price_universe(root, listing_day)
+    try:
+        result.written += fetch_screener(root, today)
+    except Exception as exc:  # the sector labels are not worth a failed night
+        log.warning("us: screener fetch failed (%s)", exc)
+        result.notes["screener_error"] = str(exc)
+    universe = with_indices(U.price_universe(root, listing_day))
     prices, counts = fetch_prices(root, today, universe)
     result.notes.update(counts)
     seen = {w.path for w in result.written} | {w.path for w in prices}

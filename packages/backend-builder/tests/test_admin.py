@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from uuid import uuid4
 
 import pytest
@@ -191,3 +191,121 @@ def test_in_memory_store_still_serves_the_graph() -> None:
     client = TestClient(create_admin_app(App(package="fixture_app"), InMemoryStore()))
     assert "keeps no run records" in client.get("/").text
     assert client.get("/graph").status_code == 200
+
+
+async def test_reactions_can_be_triggered_from_the_console(
+    app: App, pg: PostgresStore, console: TestClient
+) -> None:
+    page = console.get(f"/reactions/{qualified_name(Open)}").text
+    assert "Run now" in page and "Enqueue for the worker" in page
+
+    ran = console.post(
+        f"/reactions/{qualified_name(Open)}/trigger",
+        data={"input": '{"owner": "console"}', "mode": "run"},
+        follow_redirects=False,
+    )
+    assert ran.status_code == 303 and ran.headers["location"].startswith("/runs/")
+    run_page = console.get(ran.headers["location"]).text
+    assert "admin" in run_page and '"owner": "console"' in run_page and "ok" in run_page
+    assert await pg.query_raw("select owner from account") == [{"owner": "console"}]
+
+    failed = console.post(
+        f"/reactions/{qualified_name(Boom)}/trigger", data={"input": "{}"}, follow_redirects=False
+    )
+    assert "ValueError: boom" in console.get(failed.headers["location"]).text
+
+    bad = console.post(
+        f"/reactions/{qualified_name(Open)}/trigger", data={"input": "[1, 2]", "mode": "run"}
+    )
+    assert bad.status_code == 200 and "must be a JSON object" in bad.text
+    broken = console.post(
+        f"/reactions/{qualified_name(Open)}/trigger", data={"input": "{nope", "mode": "run"}
+    )
+    assert "not valid JSON" in broken.text
+
+    queued = console.post(
+        f"/reactions/{qualified_name(Audit)}/trigger",
+        data={"input": '{"note": "later"}', "mode": "enqueue"},
+        follow_redirects=False,
+    )
+    assert queued.headers["location"].startswith("/outbox/")
+    row_id = queued.headers["location"].rsplit("/", 1)[-1]
+    rows = await pg.query_raw("select reaction, input from _outbox where id = :id", id=row_id)
+    assert rows == [{"reaction": qualified_name(Audit), "input": {"note": "later"}}]
+    assert "pending" in console.get(queued.headers["location"]).text
+
+    assert "No such reaction" in console.post("/reactions/nowhere.X/trigger", data={}).text
+
+
+# --- logs panel, against a stub Loki ---------------------------------------------------
+
+
+class _Loki:
+    """A fetch that answers like Loki and remembers the URLs it was asked."""
+
+    def __init__(self, lines: Sequence[tuple[str, dict[str, str]]]) -> None:
+        self.lines = lines
+        self.asked: list[str] = []
+
+    def __call__(self, url: str) -> bytes:
+        import json
+
+        self.asked.append(url)
+        values = [[ts, json.dumps(line)] for ts, line in self.lines]
+        return json.dumps({"data": {"result": [{"values": values}]}}).encode()
+
+
+async def test_run_page_shows_the_runs_log_lines_from_loki(app: App, pg: PostgresStore) -> None:
+    ok_id, _ = await _seed(app, pg)
+    lines = [
+        (
+            "1700000000000000000",
+            {
+                "level": "INFO",
+                "logger": "backend_builder.reaction",
+                "message": "reaction started",
+                "reaction_id": ok_id,
+            },
+        ),
+        (
+            "1700000000100000000",
+            {
+                "level": "WARNING",
+                "logger": "fixture_app.reactions",
+                "message": "low stock",
+                "reaction_id": "child-1",
+            },
+        ),
+    ]
+    fetch = _Loki(lines)
+    console = TestClient(
+        create_admin_app(
+            app, pg, logs_url="http://loki:3100", grafana_url="http://grafana", fetch=fetch
+        )
+    )
+    page = console.get(f"/runs/{ok_id}").text
+    assert "low stock" in page and "reaction started" in page and "fixture_app.reactions" in page
+    assert f"root_id=&#34;{ok_id}&#34;" in page or f'root_id="{ok_id}"' in page
+    assert "open in Grafana" in page and "http://grafana/explore?" in page
+    assert fetch.asked and "/loki/api/v1/query_range?" in fetch.asked[0]
+    assert "direction=forward" in fetch.asked[0]
+
+
+async def test_logs_panel_states(app: App, pg: PostgresStore) -> None:
+    ok_id, _ = await _seed(app, pg)
+
+    unset = TestClient(create_admin_app(app, pg)).get(f"/runs/{ok_id}").text
+    assert "Logs are not wired" in unset and "BACKEND_BUILDER_LOGS_URL" in unset
+
+    def down(url: str) -> bytes:
+        raise OSError("connection refused")
+
+    unreachable = TestClient(create_admin_app(app, pg, logs_url="http://loki:3100", fetch=down))
+    assert "did not answer" in unreachable.get(f"/runs/{ok_id}").text
+
+    await pg.query_raw(
+        "update _run set started_at = now() - interval '2 days' where id = :id returning id",
+        id=ok_id,
+    )
+    expired = TestClient(create_admin_app(app, pg, logs_url="http://loki:3100", fetch=down))
+    assert "Logs expired" in expired.get(f"/runs/{ok_id}").text

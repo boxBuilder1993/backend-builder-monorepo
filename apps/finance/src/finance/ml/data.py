@@ -16,6 +16,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,12 @@ import polars as pl
 from finance.ml.schema import Feature, Schema, Target
 
 DEFAULT_SERIES = ("EQ", "BE")
+DUCKDB_MEMORY = os.environ.get("FINANCE_DUCKDB_MEMORY", "12GB")
+DUCKDB_TEMP_MAX = os.environ.get("FINANCE_DUCKDB_TEMP_MAX", "80GB")
+"""The most a rows build may spill to disk before it fails instead of filling the drive: a build that
+needs more has the wrong shape (one did, at 201 GB, on 2026-10-24)."""
+"""DuckDB's cap for a rows build; beyond it the build spills to the work dir. DuckDB's own default is
+80% of the box, which leaves Postgres and the worker nothing while twenty million rows are built."""
 ROLL_DAYS = 5
 
 
@@ -53,6 +60,24 @@ def _has_ref(root: Path, name: str) -> bool:
     return Path(_ref(root, name)).exists()
 
 
+def tune(
+    con: duckdb.DuckDBPyConnection, threads: int | None = None, memory: str = DUCKDB_MEMORY
+) -> None:
+    """Settings for a rows build: the memory cap, a spill directory under the work dir with a size
+    cap, and no insertion-order preservation (the rows are sorted at the end anyway)."""
+    tmp = work_dir() / "duckdb_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    parts = [
+        f"set memory_limit='{memory}'",
+        f"set temp_directory='{tmp.as_posix()}'",
+        f"set max_temp_directory_size='{DUCKDB_TEMP_MAX}'",
+        "set preserve_insertion_order=false",
+    ]
+    if threads:
+        parts.append(f"set threads={threads}")
+    con.execute("; ".join(parts))
+
+
 def connect(root: Path) -> duckdb.DuckDBPyConnection:
     """An in-memory DuckDB with every view the mirror can support."""
     con = duckdb.connect()
@@ -67,7 +92,16 @@ def install_views(con: duckdb.DuckDBPyConnection, root: Path) -> list[str]:
         con.execute(f"create or replace view {name} as {sql}")
         made.append(name)
 
-    for ref in ("corp_actions", "holidays", "symbol_changes", "equity_master", "securities"):
+    for ref in (
+        "corp_actions",
+        "holidays",
+        "symbol_changes",
+        "equity_master",
+        "securities",
+        "index_constituents",
+        "kite_instruments",
+        "us_sectors",
+    ):
         if _has_ref(root, ref):
             view(ref, f"select * from read_parquet('{_ref(root, ref)}')")
     if _has_days(root, "equity"):
@@ -177,12 +211,114 @@ def resolve_params(declared: dict[str, Any], given: dict[str, Any] | None) -> di
     return {**declared, **(given or {})}
 
 
-def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> pl.DataFrame:
-    """Run SQL with :name params bound by name. Every param the query uses must be given."""
+def relation(
+    con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]
+) -> duckdb.DuckDBPyRelation:
+    """The query with :name params bound by name, unexecuted. Every param the query uses must be given."""
     missing = [p for p in param_names(sql) if p not in params]
     if missing:
         raise ValueError(f"query uses params without values: {missing}")
-    return con.sql(_PARAM.sub(r"$\1", sql), params=params).pl()
+    return con.sql(_PARAM.sub(r"$\1", sql), params=params)
+
+
+def run_query(con: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> pl.DataFrame:
+    """Run SQL with :name params bound by name, into a frame."""
+    return relation(con, sql, params).pl()
+
+
+CHUNK_MONTHS = 3
+CHUNK_WARMUP_DAYS = 45
+"""A rows query with ``start`` and ``end`` params is run one quarter at a time, each chunk asked from
+45 calendar days before its start (the longest intraday lookback is 20 sessions of relative volume)
+and kept from its start: the per-minute windows over the whole universe (peers, breadth) sort every
+row of the range, and three years at once ran DuckDB out of 18 GB; a quarter fits in a few."""
+
+
+def chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    out: list[tuple[date, date]] = []
+    a = start
+    while a <= end:
+        y, m = a.year + (a.month - 1 + months) // 12, (a.month - 1 + months) % 12 + 1
+        b = min(date(y, m, 1) - timedelta(days=1), end)
+        out.append((a, b))
+        a = b + timedelta(days=1)
+    return out
+
+
+def _as_date(v: Any) -> date:
+    return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
+
+
+def write_rows(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    params: dict[str, Any],
+    out: Path,
+    chunk_months: int = CHUNK_MONTHS,
+    warmup_days: int = CHUNK_WARMUP_DAYS,
+) -> int:
+    """The query straight to Parquet, never through a Python-side frame: DuckDB streams it. With
+    ``start`` and ``end`` params the range is built in chunks (see CHUNK_MONTHS), each written as a
+    part and the parts concatenated into ``out``; a row's chunk is decided by its ``ts``. Returns the
+    row count. The forecast rows are tens of millions; a frame of them would not fit beside the fit."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not ("start" in params and "end" in params) or not chunk_months:
+        relation(con, sql, params).write_parquet(out.as_posix(), compression="zstd")
+        return int(
+            con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0]
+        )
+    start, end = _as_date(params["start"]), min(_as_date(params["end"]), date.today())
+    parts = out.with_suffix(".parts")
+    parts.mkdir(parents=True, exist_ok=True)
+    for q in parts.glob("*.parquet"):
+        q.unlink()
+    for i, (a, b) in enumerate(chunks(start, end, chunk_months)):
+        chunk = {
+            **params,
+            "start": (a - timedelta(days=warmup_days)).isoformat(),
+            "end": b.isoformat(),
+        }
+        rel = relation(con, sql, chunk)
+        if "ts" in rel.columns:
+            rel = rel.filter(f"ts >= TIMESTAMP '{a.isoformat()} 00:00:00'")
+        rel.write_parquet((parts / f"{i:04d}.parquet").as_posix(), compression="zstd")
+    con.sql(
+        f"copy (select * from read_parquet('{parts.as_posix()}/*.parquet')) "
+        f"to '{out.as_posix()}' (format parquet, compression zstd)"
+    )
+    for q in parts.glob("*.parquet"):
+        q.unlink()
+    parts.rmdir()
+    return int(con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0])
+
+
+def file_hash(path: Path) -> str:
+    """A stable, order-independent hash of a Parquet file's content and column types: the record of
+    what a fit read, computed by DuckDB without loading the file into Python."""
+    con = duckdb.connect()
+    try:
+        src = f"read_parquet('{path.as_posix()}')"
+        cols = con.sql(f"describe select * from {src}").fetchall()
+        n, x = con.sql(f"select count(*), bit_xor(hash(*COLUMNS(*))) from {src}").fetchall()[0]
+    finally:
+        con.close()
+    h = hashlib.sha256()
+    h.update(",".join(f"{c[0]}:{c[1]}" for c in cols).encode())
+    h.update(f"{n}:{x}".encode())
+    return h.hexdigest()
+
+
+def read_rows(path: Path, schema: Schema, fitting: bool) -> pl.DataFrame:
+    """The rows for a schema: numeric features and regression targets as Float32 while reading, the
+    key, categoricals and any extra columns as they are. Half the memory of reading everything as
+    Float64 and casting after."""
+    lf = pl.scan_parquet(path)
+    names = set(lf.collect_schema().names())
+    numeric = {f.name for f in schema.features if f.kind == "numeric"}
+    if schema.target.task == "regression":
+        numeric |= set(schema.target.columns)
+    casts = [pl.col(c).cast(pl.Float32) for c in sorted(numeric & names)]
+    return lf.with_columns(casts).collect()
 
 
 def frame_hash(df: pl.DataFrame, key: tuple[str, ...]) -> str:
@@ -208,6 +344,9 @@ class Prepared:
     truth: pl.DataFrame | None
     schema: Schema
     unknown_levels: dict[str, int] = field(default_factory=dict[str, int])
+    extra: pl.DataFrame | None = None
+    """Columns the query yielded that are neither key, feature nor target: carried into the
+    inference table for the metrics (the forecast's raw return and its scale, for instance)."""
 
 
 def check_columns(df: pl.DataFrame, schema: Schema, need_target: bool) -> None:
@@ -234,7 +373,7 @@ def prepare(df: pl.DataFrame, schema: Schema, fitting: bool) -> Prepared:
         s = df[f.name]
         if f.kind == "numeric":
             try:
-                arr = s.cast(pl.Float64, strict=True).to_numpy().astype("float32")
+                arr = s.cast(pl.Float32, strict=True).to_numpy()
             except Exception as exc:
                 raise ValueError(f"feature {f.name!r} is not numeric: {exc}") from None
             feats.append(f)
@@ -265,10 +404,7 @@ def prepare(df: pl.DataFrame, schema: Schema, fitting: bool) -> Prepared:
         truth = df.select(list(target.columns))
         if target.task == "regression":
             y_mat = np.column_stack(
-                [
-                    truth[c].cast(pl.Float64, strict=True).to_numpy().astype("float32")
-                    for c in target.columns
-                ]
+                [truth[c].cast(pl.Float32, strict=True).to_numpy() for c in target.columns]
             )
         else:
             labels = truth.select([pl.col(c).cast(pl.String) for c in target.columns])
@@ -293,4 +429,7 @@ def prepare(df: pl.DataFrame, schema: Schema, fitting: bool) -> Prepared:
             if fitting and (y_mat < 0).any():
                 raise ValueError("target has null labels")
     out = Schema(schema.key, tuple(feats), target, schema.version)
-    return Prepared(X, y_mat, df.select(list(schema.key)), truth, out, unknown)
+    used = set(schema.key) | set(schema.feature_names) | set(schema.target.columns)
+    rest = [c for c in df.columns if c not in used]
+    extra = df.select(rest) if rest else None
+    return Prepared(X, y_mat, df.select(list(schema.key)), truth, out, unknown, extra)

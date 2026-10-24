@@ -152,6 +152,47 @@ def parse_equity_master(path: Path) -> pl.DataFrame:
     ).sort(["symbol", "series", "isin"])
 
 
+INDEX_SNAPSHOT = re.compile(r"nse_indices_(\d{8})_(.+)\.csv\.gz$")
+
+
+def parse_index_constituents(paths: list[Path], files: dict[str, str]) -> pl.DataFrame:
+    """Every snapshot of every index file into one table: index, symbol, isin, company, industry,
+    series, as_of (the snapshot's day). ``files`` maps the index name to the archive file name, as
+    settings.INDEX_FILES; a snapshot of a file not in the map is skipped."""
+    by_file = {v: k for k, v in files.items()}
+    frames: list[pl.DataFrame] = []
+    for path in paths:
+        m = INDEX_SNAPSHOT.search(path.name)
+        if not m or m.group(2) not in by_file:
+            continue
+        as_of = date(int(m.group(1)[:4]), int(m.group(1)[4:6]), int(m.group(1)[6:]))
+        df = csv_frame(read_raw(path))
+        frames.append(
+            df.select(
+                pl.lit(by_file[m.group(2)]).alias("index"),
+                as_str("Symbol", "symbol"),
+                as_str("ISIN Code", "isin"),
+                as_str("Company Name", "company"),
+                as_str("Industry", "industry"),
+                as_str("Series", "series"),
+                pl.lit(as_of).alias("as_of"),
+            )
+        )
+    if not frames:
+        return pl.DataFrame(
+            schema={
+                "index": pl.Utf8,
+                "symbol": pl.Utf8,
+                "isin": pl.Utf8,
+                "company": pl.Utf8,
+                "industry": pl.Utf8,
+                "series": pl.Utf8,
+                "as_of": pl.Date,
+            }
+        )
+    return pl.concat(frames).sort(["index", "as_of", "symbol", "isin"])
+
+
 def build_securities(root: Path) -> pl.DataFrame | None:
     """ISINs that belong to the same security get one stable sid, the earliest ISIN in the chain. NSE
     issues a new ISIN on a face-value split, so the same symbol switches ISIN from one day to the

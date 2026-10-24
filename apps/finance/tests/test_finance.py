@@ -26,6 +26,8 @@ def test_app_scope() -> None:
         "Infer",
         "PublishArtifact",
         "Evaluate",
+        "Screen",
+        "Validate",
     }
     api = {"RegisterFitApi", "RunFitApi", "GetRunApi", "InferApi", "EvaluateApi"}
     assert {r.__name__ for r in app.reactions} == poller | ml | api

@@ -61,3 +61,13 @@ port, bound to localhost, behind the token in the env file. Metrics and `/health
 
 Docker with the user in the `docker` group (`sudo usermod -aG docker $USER`, then log in again), `uv`,
 and systemd with user sessions. Linger is enabled by `make up` if it is not already.
+
+## Memory on a shared host
+
+Postgres has no memory ceiling in `compose.yaml` and needs none: it uses tens of megabytes here. It
+has a floor instead (`mem_reservation: 1g`), the lowest priority for the kernel's out-of-memory
+killer (`oom_score_adj: -900`), and a 1 GB `/dev/shm`. The processes that fill the box are the apps':
+the finance worker runs one deferred run at a time (`BACKEND_BUILDER_OUTBOX_CONCURRENCY=1` in its env
+file; a fit holds several GB), and its row builds cap DuckDB at `FINANCE_DUCKDB_MEMORY` (12 GB). A
+change to the postgres service takes effect on `docker compose up -d postgres`, which recreates the
+container: do it when no app run is mid-transaction, since every connection drops.

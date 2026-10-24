@@ -196,3 +196,50 @@ async def test_infer_refuses_a_schema_mismatch(store: PostgresStore, toy_mirror:
         {"model_id": model_id, "label": "bad", "query": "select index_name as symbol, date, close from toy", "params": {}},
     )  # fmt: skip
     assert ctx.load("status") == "failed" and "lag_close" in ctx.load("error")
+
+
+async def test_screen_runs_as_a_reaction_and_records_its_table(
+    store: PostgresStore, toy_mirror: Path, tmp_path: Path
+) -> None:
+    from finance.ml import forecast
+    from finance.ml.reactions import Screen
+    from test_forecast import (
+        DAYS,
+        synthetic_mirror,
+    )  # the tests directory is on the path under pytest
+
+    synthetic_mirror(toy_mirror)  # the synthetic minute, daily, reference, US and commodity tables
+    con = data.connect(toy_mirror)
+    params = {
+        **forecast.PARAMS,
+        "start": DAYS[0].isoformat(),
+        "end": DAYS[-1].isoformat(),
+        "min_turnover": 1.0,
+    }
+    rows = tmp_path / "rows.parquet"
+    assert data.write_rows(con, forecast.ROWS_SQL, params, rows) > 0
+    ctx = await run(store, Screen, {"grain": "minute", "horizon": 15, "rows_path": str(rows)})
+    table = ctx.load("table")
+    assert table.startswith("| feature |") and "| r5 |" in table and "| dow |" in table
+    assert ctx.load("rows_path") == str(rows) and ctx.load("horizon") == 15
+    path = ctx.load("path")
+    assert path.startswith("parquet/screens/") and (toy_mirror / path).exists()
+    df = pl.read_parquet(toy_mirror / path)
+    assert set(df.columns) >= {
+        "feature",
+        "year",
+        "ic",
+        "se",
+        "points",
+        "grain",
+        "market",
+        "horizon",
+    }
+    ledger = await store.query_raw(
+        "select source, kind, published_at from data_file where source = 'screens'"
+    )
+    assert (
+        len(ledger) == 1
+        and ledger[0]["kind"] == "parquet"
+        and ledger[0]["published_at"] is not None
+    )

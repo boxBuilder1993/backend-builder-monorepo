@@ -1,10 +1,13 @@
 """Domain reactions. They never see HTTP shapes."""
 
+import logging
+
 from backend_builder import Context, Reaction
 
 from shop.entities import Order, OrderLine
 
 UNPAID_EXPIRY = "1 hour"
+logger = logging.getLogger(__name__)
 
 
 class OrderTotal(Reaction):
@@ -83,4 +86,5 @@ class NotifyOrder(Reaction):
         if order is None:
             return
         key = ctx.secret("notify_api_key")
+        logger.info("notify requested order=%s tenant=%s", order.id, order.tenant)
         ctx.save("request", {"authorization": f"Bearer {key}", "order": order.id})

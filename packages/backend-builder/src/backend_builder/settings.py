@@ -29,6 +29,8 @@ RUN_RETENTION_DAYS = "BACKEND_BUILDER_RUN_RETENTION_DAYS"
 METRICS_PORT = "BACKEND_BUILDER_METRICS_PORT"
 ADMIN_PORT = "BACKEND_BUILDER_ADMIN_PORT"
 ADMIN_TOKEN = "BACKEND_BUILDER_ADMIN_TOKEN"
+LOGS_URL = "BACKEND_BUILDER_LOGS_URL"
+GRAFANA_URL = "BACKEND_BUILDER_GRAFANA_URL"
 
 
 class RuntimeEnv(StrEnum):
@@ -64,6 +66,15 @@ class Settings:
     admin_port: int = 9200
     admin_token: str | None = None
     """When set, the console asks for it once and keeps it in a cookie."""
+    logs_url: str | None = None
+    """Loki base URL the console queries for a run's log lines; unset disables the panel."""
+    grafana_url: str | None = None
+    """Grafana base URL for the console's "open in Grafana" links."""
+
+    @property
+    def log_format(self) -> str:
+        """``human`` in dev, ``json`` elsewhere; see docs/logs.md."""
+        return "human" if self.runtime_env is RuntimeEnv.DEV else "json"
 
     @property
     def store_name(self) -> str:
@@ -97,6 +108,8 @@ class Settings:
             metrics_port=int(_number(env, METRICS_PORT, 9100)),
             admin_port=int(_number(env, ADMIN_PORT, 9200)),
             admin_token=env.get(ADMIN_TOKEN, "").strip() or None,
+            logs_url=env.get(LOGS_URL, "").strip().rstrip("/") or None,
+            grafana_url=env.get(GRAFANA_URL, "").strip().rstrip("/") or None,
         )
 
 

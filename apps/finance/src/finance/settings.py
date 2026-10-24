@@ -29,13 +29,57 @@ CORP_URL = (
 HOLIDAY_URL = "https://www.nseindia.com/api/holiday-master?type=trading"
 SYMBOLCHANGE_URL = "https://nsearchives.nseindia.com/content/equities/symbolchange.csv"
 EQUITY_L_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+INDEX_LIST_URL = "https://nsearchives.nseindia.com/content/indices/{name}.csv"
+INDEX_FILES: dict[str, str] = {
+    "NIFTY 50": "ind_nifty50list",
+    "NIFTY 500": "ind_nifty500list",
+    "NIFTY TOTAL MARKET": "ind_niftytotalmarket_list",
+    "NIFTY MIDCAP 100": "ind_niftymidcap100list",
+    "NIFTY SMALLCAP 250": "ind_niftysmallcap250list",
+    "NIFTY BANK": "ind_niftybanklist",
+    "NIFTY IT": "ind_niftyitlist",
+    "NIFTY AUTO": "ind_niftyautolist",
+    "NIFTY PHARMA": "ind_niftypharmalist",
+    "NIFTY FMCG": "ind_niftyfmcglist",
+    "NIFTY METAL": "ind_niftymetallist",
+    "NIFTY REALTY": "ind_niftyrealtylist",
+    "NIFTY ENERGY": "ind_niftyenergylist",
+}
+"""NSE index constituent files (company, industry, symbol, series, ISIN): the sector labels and the
+Kite universe's index half. A snapshot is stored only when the file's bytes change."""
 LINK_MAX_GAP_DAYS = 15
 """Max gap when linking an ISIN change on the same symbol (a face-value split)."""
 
 # US equities (Nasdaq Trader listings, Yahoo prices)
 NASDAQ_TRADER = "https://www.nasdaqtrader.com/dynamic/SymDir/{f}"
 LISTING_FILES = ("nasdaqlisted.txt", "otherlisted.txt")
-US_BENCHMARKS = ("SPY", "QQQ", "IWM")
+US_BENCHMARKS = (
+    "SPY",
+    "QQQ",
+    "IWM",
+    "XLK",
+    "XLF",
+    "XLV",
+    "XLY",
+    "XLP",
+    "XLE",
+    "XLI",
+    "XLB",
+    "XLU",
+    "XLRE",
+    "XLC",  # SPDR sectors
+    "GLD",
+    "SLV",
+    "USO",  # gold, silver, crude, as the US side's commodity read
+)
+"""Listed ETFs fetched beside the stocks: the market, size and sector context of the US rows."""
+US_INDICES = {"^VIX": "CBOE Volatility Index"}
+"""Yahoo index symbols that are not in the listings, fetched like the benchmarks."""
+NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
+"""Every US-listed stock with sector, industry, country, IPO year and market cap, in one answer: the
+sector labels and size buckets of the US rows; only the stable columns are kept, on change."""
+US_CAP_BUCKETS = ((100e9, "mega"), (10e9, "large"), (2e9, "mid"), (300e6, "small"), (0, "micro"))
+"""Market-cap floors, in dollars, for the size bucket of a US stock."""
 US_DORMANT_AFTER = 3
 """Consecutive empty Yahoo answers before a symbol is parked."""
 US_BATCH = 25
@@ -50,7 +94,38 @@ KITE_TOKEN = Path("~/.config/ifin/kite_token.json").expanduser()
 KITE_START = date(2023, 10, 1)
 KITE_INTERVAL = "minute"
 KITE_MIN_TURNOVER = 25e7
+KITE_UNIVERSE_INDEX = "NIFTY 500"
+"""Every member of this index is fetched, liquid or not, besides the turnover rule."""
+KITE_STAY_SESSIONS = 250
+"""A stock fetched on any of the last this many sessions stays in the universe: entry is a gate, not
+a nightly vote, so minute histories have no holes from hovering around the turnover bar."""
 KITE_EXTRA = ("NIFTYBEES", "BANKBEES", "JUNIORBEES")
-KITE_INDICES = ("NIFTY 50", "NIFTY BANK", "NIFTY MIDCAP 100")
+KITE_INDICES = (
+    "NIFTY 50",
+    "NIFTY BANK",
+    "NIFTY MIDCAP 100",
+    "NIFTY 500",
+    "NIFTY NEXT 50",
+    "NIFTY MIDCAP 150",
+    "NIFTY AUTO",
+    "NIFTY IT",
+    "NIFTY PHARMA",
+    "NIFTY FMCG",
+    "NIFTY METAL",
+    "NIFTY REALTY",
+    "NIFTY ENERGY",
+    "NIFTY FIN SERVICE",
+    "NIFTY PSU BANK",
+    "NIFTY PVT BANK",
+    "NIFTY INFRA",
+    "NIFTY OIL AND GAS",
+    "NIFTY HEALTHCARE",
+    "NIFTY CONSUMPTION",
+    "NIFTY MEDIA",
+    "NIFTY COMMODITIES",
+    "INDIA VIX",
+)
+"""Minute bars of the market, size and sector indices, as context features: a stock's move against
+its sector is a different signal from its move against the market. Kite's INDICES segment names."""
 KITE_RANGE_DAYS = 60
 KITE_PAUSE = 0.35

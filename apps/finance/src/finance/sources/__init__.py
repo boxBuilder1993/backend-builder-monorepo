@@ -79,10 +79,20 @@ SOURCES: dict[str, tuple[str, ...]] = {
         "symbol_changes",
         "equity_master",
         "securities",
+        "nse_indices",
+        "index_constituents",
     ),
     "nse": ("nse_cm", "nse_full", "nse_index", "mcx", "equity", "index", "commodity"),
-    "us": ("nasdaq", "yahoo", "us_listings", "us_equity", "us_symbols"),
-    "kite": ("kite_1m", "equity_1m", "kite_instruments"),
+    "us": (
+        "nasdaq",
+        "yahoo",
+        "us_listings",
+        "us_equity",
+        "us_symbols",
+        "nasdaq_screener",
+        "us_sectors",
+    ),
+    "kite": ("kite_1m", "equity_1m", "kite_instruments", "kite_history"),
 }
 """The DataFile sources each leg owns; the ledger handed to a leg covers these."""
 

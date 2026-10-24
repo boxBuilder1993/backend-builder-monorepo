@@ -439,6 +439,8 @@ Configuration is environment variables:
 | `BACKEND_BUILDER_METRICS_PORT` | `9100` | `/metrics` and `/health` on every process |
 | `BACKEND_BUILDER_ADMIN_PORT` | `9200` | |
 | `BACKEND_BUILDER_ADMIN_TOKEN` | unset | when set, the console asks for it once |
+| `BACKEND_BUILDER_LOGS_URL` | unset | Loki base URL; the console's run page shows the run's log lines |
+| `BACKEND_BUILDER_GRAFANA_URL` | unset | Grafana base URL for the console's "open in Grafana" links |
 | `SECRET_<NAME>` | | app secrets, read by `ctx.secret` |
 
 Locally, `compose.yaml` runs all of it for the shop under the `shop` profile; copy that block for a new app, changing the `APP` build argument. The `Dockerfile` builds any app with `--build-arg APP=myshop`.
@@ -447,11 +449,11 @@ Locally, `compose.yaml` runs all of it for the shop under the `shop` profile; co
 
 **Run records.** Every reaction invocation, the seed of a run or a child triggered from another reaction, leaves its own row in `_run`: the reaction, its input, what it saved, what it created or deleted, what it deferred, its duration and outcome, and its parent, so the tree of a run is a query on `root_id`. The seed's row adds what only exists at commit: the attempt count, the flush time, every field change the run wrote, and whether it committed; a child's row says whether the run it belonged to did. The seed's row is written as `running` when the run starts and replaced, with every child's row, when it ends, so the console shows what is executing right now. A `running` row whose deadline has passed is marked `lost` by the scheduler: the process died mid-run, and Postgres rolled its transaction back. The retention window is purged by the scheduler, whole runs at a time.
 
-**The admin console** (`backend-builder admin myshop`, port 9200) reads those tables: an overview of recent runs and outbox depth, the app's graph, a page per reaction with its stats and recent runs, a page per run with its span tree, inputs, vars and changes, the outbox with requeue and discard for dead rows, and the schedules. Set `BACKEND_BUILDER_ADMIN_TOKEN` anywhere it isn't on a private network.
+**The admin console** (`backend-builder admin myshop`, port 9200) reads those tables: an overview of recent runs and outbox depth, the app's graph, a page per reaction with its stats, recent invocations and a form to trigger it with a JSON input, run now or enqueued for the worker, a page per run with its span tree, inputs, vars and changes, the outbox with requeue and discard for dead rows, and the schedules. Set `BACKEND_BUILDER_ADMIN_TOKEN` anywhere it isn't on a private network.
 
 **Metrics.** Every process serves Prometheus metrics on its metrics port: runs by reaction, source and outcome; run and span durations; HTTP requests by route and status; outbox deliveries and depth; schedule seeds and purges. Labels are bounded; there is no per-id metric. `/health` on the same port pings the store.
 
-**Logs** go to stderr, one line per lifecycle event at INFO with identifiers only (reaction name, reaction id, parent id, counts, durations) and payloads only at DEBUG. Every line of a run carries its `reaction_id`, which is also the `X-Reaction-Id` response header and the run record's id, so an error report, a log search and a console page meet at one string.
+**Logs.** Use `logging.getLogger(__name__)` in a reaction like anywhere else. Every line written inside a run, yours or the runtime's, carries the run's `root_id`, the invocation's `reaction_id`, the reaction and the source, so one id finds everything a run said. In `dev` lines are readable text on stderr; elsewhere they are JSON on stdout for a collector. The compose `logs` profile runs Loki, Alloy and Grafana with one day of retention, and with `BACKEND_BUILDER_LOGS_URL` set the console's run page shows the run's lines and links to Grafana. The runtime stores no log lines itself; the design is in [logs.md](logs.md). The `reaction_id` is also the `X-Reaction-Id` response header and the run record's id, so an error report, a log search and a console page meet at one string. Never log a secret; `ctx.secret` values are redacted, but only by exact match.
 
 ## 16. Checklist
 
