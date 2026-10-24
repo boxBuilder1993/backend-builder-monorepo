@@ -476,7 +476,6 @@ The best model by IC, xgboost depth 4 with 500 trees, by month at the 0.5 percen
 
 ### Next
 
-0. The drift check above: is the −0.5 bps mean a 2026 fact or an entry/exit bias in the target.
 1. Rescale by the calibration slope, and evaluate by within-point quantile as well as by threshold.
 2. A smaller search around depth 3 and 4, 200 to 500 trees, learning rate 0.03 to 0.05, more
    regularisation; `lightgbm` beside xgboost.
@@ -519,9 +518,27 @@ Realised return by prediction decile within each decision point, 2026:
 - **Every decile has a negative mean and under half up-moves**: the average 15-minute return over all
   6 million rows of 2026 is about −0.5 bps. Either 2026 to date drifted down intraday, or entering at
   the next bar's open and exiting at a later close carries a small systematic bias (an open printing
-  on the ask side would do it). It is the size of most deciles, so it is checked before any rule is
-  built on these predictions: the same statistic on 2024 and 2025 rows, and with exit at the next
-  bar's open instead of a close.
+  on the ask side would do it). Checked the same day: close to next open averages −0.02 bps, so the
+  entry is clean; a single minute bar's return averages −0.01 to −0.03 bps in every year 2023 to 2026,
+  which over 15 bars is the −0.3 bps seen. Liquid NSE names drift slightly down inside the session,
+  equal-weighted, and the positive drift is overnight. A fact of the market, not of the target; a
+  long-only intraday consumer fights it, a long-short use of the ranking nets it out.
+
+### In plain words
+
+At a given minute, for each liquid stock, the model guesses whether it will be higher or lower 15
+minutes later and by roughly how much, trained on 2023 to 2025 and tested on 2026, which it never saw.
+It guesses better than a coin flip, modestly and in every month. The stocks it is most confident about
+rise about 1.5 basis points (0.015 percent) over the next 15 minutes and the ones it is most negative
+about fall about 2.3; the gap, around 4 basis points, is less than the roughly 10 basis points a
+round trip costs on NSE, so acting on a typical call loses money. Only its rare large calls, half a
+percent or more, made money after costs in 2026, and most of those were in one volatile month. It
+exaggerates the size of moves by three to seven times, which a scaling factor corrects. It relies most
+on how the market has moved since the open, on whether recent minutes closed near their highs on
+heavy volume, and on how active the stock is versus its norm. Stocks drift slightly down during the
+session every year, with the gains overnight, so a day-only buyer fights a small headwind. The signal
+is real; at 15 minutes it is too small to trade on its own. Longer horizons and using the ranking to
+choose what to hold, rather than to time 15-minute trades, are the two directions worth trying.
 
 ## Operational notes (2026-10-24)
 
