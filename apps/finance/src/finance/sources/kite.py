@@ -450,28 +450,24 @@ def backfill_symbols(
         for a, b in rs:
             candles = fetcher(kite, inst, a, b)
             requests += 1
+            by_day: dict[date, list[list[Any]]] = {}
             for c in candles:
                 ts = c["date"]
                 d = ts.date() if hasattr(ts, "date") else datetime.fromisoformat(str(ts)).date()
                 if not (a <= d <= b):
                     raise ValueError(f"kite returned {d} for {inst.symbol} outside {a}..{b}")
-                w.write(
-                    d,
-                    {
-                        "symbol": inst.symbol,
-                        "token": inst.token,
-                        "candles": [
-                            [
-                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-                                c["open"],
-                                c["high"],
-                                c["low"],
-                                c["close"],
-                                c["volume"],
-                            ]
-                        ],
-                    },
+                by_day.setdefault(d, []).append(
+                    [
+                        ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                        c["open"],
+                        c["high"],
+                        c["low"],
+                        c["close"],
+                        c["volume"],
+                    ]
                 )
+            for d, rows in by_day.items():  # one line per instrument per day, as the day files
+                w.write(d, {"symbol": inst.symbol, "token": inst.token, "candles": rows})
         days_touched.update(w.close())
         finished.append(inst.symbol)
         log.info(
