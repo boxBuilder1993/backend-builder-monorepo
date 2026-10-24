@@ -441,6 +441,256 @@ order by ts, symbol
 """
 
 
+# ---- the daily grain -------------------------------------------------------------------------------
+
+DAILY_PARAMS: dict[str, Any] = {
+    "horizon_sessions": 1,
+    "vol_sessions": 20,
+    "min_turnover_day": 1e7,
+    "start": "2021-09-01",
+    "end": "2030-12-31",
+}
+"""One row per (symbol, session t), decided at t's close, entered at the next session's open, exited at
+the close of the ``horizon_sessions``-th session after t (1 = the entry session's own close). The 1-session and 21-session Fits run on
+these rows: five years of every EQ stock, where the minute rows have three years of the liquid ones.
+A row needs the stock's 20-session median turnover at or above ``min_turnover_day`` rupees."""
+
+D_PRICE = [
+    "ret_1d",
+    "ret_5d",
+    "ret_20d",
+    "ret_60d",
+    "vol_20d",
+    "vol_60d",
+    "dist_hi",
+    "dist_lo",
+    "turn_rel",
+    "deliv_pct",
+    "rs_20",
+    "rs_60",
+    "gap_d",
+    "range_pos_d",
+    "clv_d",
+]
+D_SHAPE = ["rv_day", "vwap_dev_close", "r_first60", "r_last60", "relvol_day"]
+"""The session's own shape from its minute bars where held (2023-10 on, liquid names; null before):
+realised volatility, the close against the day's VWAP, the first and last hour's returns, the day's
+volume against the stock's 20-session norm."""
+D_ATTRIBUTES = [
+    "industry",
+    "sector_idx",
+    "in_n50",
+    "in_n500",
+    "in_mid100",
+    "in_small250",
+    "log_px",
+    "tick_bps",
+    "log_turn20",
+]
+D_PEERS = ["p_ret_1d", "p_ret_5d", "p_ret_20d", "pw_ret_20d", "sp_5d", "sp_20d", "sp_60d"]
+D_BREADTH = ["breadth_d", "disp_d"]
+D_REGIME = ["mkt_ret_1d", "mkt_ret60", "mkt_vol20", "mkt_vol60", "vix"]
+D_OVERSEAS = [
+    "spy_oc",
+    "spy_cc",
+    "qqq_oc",
+    "qqq_cc",
+    "spy_5d",
+    "spy_range",
+    "gold_cc",
+    "silver_cc",
+    "crude_cc",
+]
+D_CLOCK = ["dow", "dom", "moy", "dte", "after_holiday"]
+DAILY_FEATURES: list[str] = (
+    D_PRICE
+    + D_SHAPE
+    + PARTICIPATION
+    + D_ATTRIBUTES
+    + D_PEERS
+    + D_BREADTH
+    + D_REGIME
+    + D_OVERSEAS
+    + D_CLOCK
+)
+DAILY_CONTEXT = {*D_BREADTH, *D_REGIME, *D_OVERSEAS, *D_CLOCK}
+
+DAILY_SQL = f"""
+with
+e as (
+    select symbol, date, open, high, low, close, prev_close, turnover, trades, deliv_pct
+    from equity where date between :start::date - interval 400 day and :end::date + interval 60 day
+    qualify row_number() over (partition by symbol, date order by series) = 1
+),
+d1 as (
+    select *,
+           ln(close / lag(close) over w) as ret_1d,
+           ln(close / lag(close, 5) over w) as ret_5d,
+           ln(close / lag(close, 20) over w) as ret_20d,
+           ln(close / lag(close, 60) over w) as ret_60d,
+           open / nullif(lag(close) over w, 0) - 1 as gap_d,
+           (close - low) / nullif(high - low, 0) as range_pos_d,
+           ((close - low) - (high - close)) / nullif(high - low, 0) as clv_d,
+           ln(nullif(trades, 0)) as log_trades,
+           ln(nullif(turnover / nullif(trades, 0), 0)) as avg_trade,
+           ln(close) as log_px,
+           lead(open) over w as entry,
+           lead(close, :horizon_sessions) over w as exit_,
+           lead(date) over w as entry_date
+    from e window w as (partition by symbol order by date)
+),
+d2 as (
+    select *,
+           stddev_samp(ret_1d) over (partition by symbol order by date rows between 19 preceding and current row) as vol_20d,
+           stddev_samp(ret_1d) over (partition by symbol order by date rows between 59 preceding and current row) as vol_60d,
+           stddev_samp(ret_1d) over (partition by symbol order by date rows between :vol_sessions - 1 preceding and current row) as sig_d,
+           close / nullif(max(high) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_hi,
+           close / nullif(min(low) over (partition by symbol order by date rows between 251 preceding and current row), 0) as dist_lo,
+           turnover / nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as turn_rel,
+           quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 19 preceding and current row) as turn20,
+           trades / nullif(quantile_cont(trades, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as trades_rel
+    from d1
+),
+shape as (  -- the session's shape from its minute bars, where held
+    select symbol, day,
+           stddev_samp(ret1) as rv_day,
+           max(close) filter (where rn_desc = 1) / nullif(sum(close * volume) / nullif(sum(volume), 0), 0) - 1 as vwap_dev_close,
+           ln(max(close) filter (where m = 59) / nullif(max(open) filter (where m = 0), 0)) as r_first60,
+           ln(max(close) filter (where rn_desc = 1) / nullif(max(close) filter (where m = 314), 0)) as r_last60,
+           sum(volume) as vol_day
+    from (select symbol, ts::date as day, close, open, volume,
+                 datediff('minute', ts::date::timestamp + interval 9 hour + interval 15 minute, ts) as m,
+                 ln(close / lag(close) over (partition by symbol, ts::date order by ts)) as ret1,
+                 row_number() over (partition by symbol, ts::date order by ts desc) as rn_desc
+          from (select distinct symbol, ts, open, close, volume from equity_1m
+                where symbol not like 'NIFTY%' and symbol <> 'INDIA VIX' and ts::date between :start and :end))
+    where m between 0 and {SESSION_MINUTES - 1}
+    group by symbol, day
+),
+shape2 as (
+    select *, vol_day / nullif(avg(vol_day) over (partition by symbol order by day rows between 20 preceding and 1 preceding), 0) as relvol_day
+    from shape
+),
+i0 as (select date, close, ln(close / lag(close) over (order by date)) as iret from index_daily where index_name = '{INDEX_DAILY}'),
+i1 as (
+    select date, iret as mkt_ret_1d,
+           ln(close / lag(close, 20) over (order by date)) as i_ret_20d,
+           ln(close / lag(close, 60) over (order by date)) as mkt_ret60,
+           stddev_samp(iret) over (order by date rows between 19 preceding and current row) as mkt_vol20,
+           stddev_samp(iret) over (order by date rows between 59 preceding and current row) as mkt_vol60
+    from i0
+),
+vix as (select date, close as vix from index_daily where index_name = 'India VIX'),
+us as (
+    select date,
+           max(case when symbol = 'SPY' then ln(close / open) end) as spy_oc,
+           max(case when symbol = 'SPY' then ln(close / lag_close) end) as spy_cc,
+           max(case when symbol = 'QQQ' then ln(close / open) end) as qqq_oc,
+           max(case when symbol = 'QQQ' then ln(close / lag_close) end) as qqq_cc,
+           max(case when symbol = 'SPY' then ln(close / lag_close5) end) as spy_5d,
+           max(case when symbol = 'SPY' then (high - low) / nullif(close, 0) end) as spy_range
+    from (select symbol, date, open, high, low, close,
+                 lag(close) over (partition by symbol order by date) as lag_close,
+                 lag(close, 5) over (partition by symbol order by date) as lag_close5
+          from us_equity where symbol in ('SPY', 'QQQ'))
+    group by date
+),
+mcx as (
+    select date,
+           max(case when symbol = 'GOLD' then ln(close / lag_close) end) as gold_cc,
+           max(case when symbol = 'SILVER' then ln(close / lag_close) end) as silver_cc,
+           max(case when symbol = 'CRUDEOIL' then ln(close / lag_close) end) as crude_cc
+    from (select symbol, date, close, lag(close) over (partition by symbol order by date) as lag_close
+          from commodity_continuous where symbol in ('GOLD', 'SILVER', 'CRUDEOIL'))
+    group by date
+),
+cons as (
+    select symbol, as_of, any_value(industry) as industry,
+           max(case when index = 'NIFTY 50' then 1 else 0 end) as in_n50,
+           max(case when index = 'NIFTY 500' then 1 else 0 end) as in_n500,
+           max(case when index = 'NIFTY MIDCAP 100' then 1 else 0 end) as in_mid100,
+           max(case when index = 'NIFTY SMALLCAP 250' then 1 else 0 end) as in_small250
+    from index_constituents group by symbol, as_of
+),
+cons_first as (select * from cons qualify row_number() over (partition by symbol order by as_of) = 1),
+ticks as (select tradingsymbol as symbol, any_value(tick_size) as tick from kite_instruments where segment = 'NSE' group by 1),
+sessions as (select date, lag(date) over (order by date) as prev_date from (select distinct date from e)),
+r1 as (
+    select d.*,
+           coalesce(c.industry, f.industry) as industry,
+           coalesce(c.in_n50, f.in_n50, 0) as in_n50, coalesce(c.in_n500, f.in_n500, 0) as in_n500,
+           coalesce(c.in_mid100, f.in_mid100, 0) as in_mid100, coalesce(c.in_small250, f.in_small250, 0) as in_small250,
+           t.tick / nullif(d.close, 0) * 1e4 as tick_bps,
+           ln(nullif(d.turn20, 0)) as log_turn20,
+           s.rv_day, s.vwap_dev_close, s.r_first60, s.r_last60, s.relvol_day,
+           ii.mkt_ret_1d, ii.i_ret_20d, ii.mkt_ret60, ii.mkt_vol20, ii.mkt_vol60, v.vix,
+           u.spy_oc, u.spy_cc, u.qqq_oc, u.qqq_cc, u.spy_5d, u.spy_range, x.gold_cc, x.silver_cc, x.crude_cc,
+           ss.prev_date
+    from d2 d
+    asof left join cons c on d.symbol = c.symbol and d.date >= c.as_of
+    left join cons_first f on d.symbol = f.symbol
+    left join ticks t on t.symbol = d.symbol
+    left join shape2 s on s.symbol = d.symbol and s.day = d.date
+    left join i1 ii on ii.date = d.date
+    left join vix v on v.date = d.date
+    asof left join us u on d.date >= u.date       -- the US session dated t closes before the entry at t+1's open
+    asof left join mcx x on d.date >= x.date
+    left join sessions ss on ss.date = d.date
+    where d.date between :start and :end and d.turn20 >= :min_turnover_day
+),
+r2 as (
+    select r.*,
+           {_SECTOR_CASE.replace("a.industry", "r.industry")} as sector_idx,
+           avg(ret_1d) over wp as p_ret_1d, avg(ret_5d) over wp as p_ret_5d, avg(ret_20d) over wp as p_ret_20d,
+           sum(ret_20d * turn20) over wp / nullif(sum(turn20) over wp, 0) as pw_ret_20d,
+           ret_5d - avg(ret_5d) over wp as sp_5d, ret_20d - avg(ret_20d) over wp as sp_20d, ret_60d - avg(ret_60d) over wp as sp_60d,
+           avg(case when ret_1d > 0 then 1.0 else 0.0 end) over wt as breadth_d,
+           stddev_samp(ret_1d) over wt as disp_d
+    from r1 r
+    window wp as (partition by coalesce(r.industry, 'none'), r.date), wt as (partition by r.date)
+)
+select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, date as day, close, entry, entry_date, exit_, sig_d,
+       ret_1d, ret_5d, ret_20d, ret_60d, vol_20d, vol_60d, dist_hi, dist_lo, turn_rel, deliv_pct,
+       ret_20d - i_ret_20d as rs_20, ret_60d - mkt_ret60 as rs_60, gap_d, range_pos_d, clv_d,
+       rv_day, vwap_dev_close, r_first60, r_last60, relvol_day,
+       log_trades, avg_trade, trades_rel,
+       industry, sector_idx, in_n50, in_n500, in_mid100, in_small250, log_px, tick_bps, log_turn20,
+       p_ret_1d, p_ret_5d, p_ret_20d, pw_ret_20d, sp_5d, sp_20d, sp_60d,
+       breadth_d, disp_d,
+       mkt_ret_1d, mkt_ret60, mkt_vol20, mkt_vol60, vix,
+       spy_oc, spy_cc, qqq_oc, qqq_cc, spy_5d, spy_range, gold_cc, silver_cc, crude_cc,
+       isodow(entry_date) as dow, dayofmonth(entry_date) as dom, month(entry_date) as moy,
+       greatest(0, {_EXPIRY_DAY.replace("(day)", "(entry_date)").replace(" day <", " entry_date <")} - entry_date) as dte,
+       (entry_date - date > case when isodow(entry_date) = 1 then 3 else 1 end)::int as after_holiday,
+       sig_d * sqrt(:horizon_sessions) as scale,
+       ln(exit_ / entry) as r,
+       ln(exit_ / entry) / (sig_d * sqrt(:horizon_sessions)) as y
+from r2
+where entry is not null and exit_ is not null and sig_d > 0 and entry > 0 and exit_ > 0
+order by date, symbol
+"""
+
+
+def daily_fit_definition(horizon_sessions: int, **overrides: Any) -> dict[str, Any]:
+    """The Fit body for a daily-grain horizon: DAILY_SQL, its params, the daily features, the target."""
+    params = {**DAILY_PARAMS, "horizon_sessions": horizon_sessions, **overrides}
+    return {
+        "name": f"forecast {horizon_sessions}d",
+        "description": (
+            f"Expected volatility-scaled log return over {horizon_sessions} session(s), decided at the "
+            "close, entered at the next open; docs/finance-forecast.md"
+        ),
+        "query": DAILY_SQL,
+        "params": params,
+        "key": KEY,
+        "features": [
+            {"name": f, "kind": "categorical" if f in CATEGORICAL else "numeric"}
+            for f in DAILY_FEATURES
+        ],
+        "target": {"columns": ["y"], "task": "regression"},
+    }
+
+
 def fit_definition(horizon_minutes: int, **overrides: Any) -> dict[str, Any]:
     """The Fit body for one horizon: the query above, its params, features with kinds, the target."""
     params = {**PARAMS, "horizon_minutes": horizon_minutes, **overrides}
@@ -502,20 +752,27 @@ class IC:
 MIN_CROSS_SECTION = 20
 
 
-def materialise(con: duckdb.DuckDBPyConnection, params: dict[str, Any], out: Path) -> int:
-    """Run ROWS_SQL once and write the frame to Parquet; the screen reads three columns at a time from it."""
+def materialise(
+    con: duckdb.DuckDBPyConnection, params: dict[str, Any], out: Path, sql: str = ROWS_SQL
+) -> int:
+    """Run the rows query once and write the frame to Parquet; the screen reads three columns at a
+    time from it."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    data.relation(con, ROWS_SQL, params).write_parquet(out.as_posix(), compression="zstd")
+    data.relation(con, sql, params).write_parquet(out.as_posix(), compression="zstd")
     return int(con.sql(f"select count(*) from read_parquet('{out.as_posix()}')").fetchall()[0][0])
 
 
 def screen(
-    con: duckdb.DuckDBPyConnection, rows: Path, features: list[str] | None = None
+    con: duckdb.DuckDBPyConnection,
+    rows: Path,
+    features: list[str] | None = None,
+    all_features: list[str] = FEATURES,
+    context: set[str] = CONTEXT,
 ) -> list[IC]:
     """Per feature, per year: the Spearman correlation with y within each decision point, averaged over
     decision points, with the standard error of that mean."""
     out: list[IC] = []
-    for f in features or [f for f in FEATURES if f not in CONTEXT and f not in CATEGORICAL]:
+    for f in features or [f for f in all_features if f not in context and f not in CATEGORICAL]:
         got = con.sql(
             f"""
             with ranked as (
@@ -531,7 +788,9 @@ def screen(
     return out
 
 
-def screen_table(ics: list[IC]) -> str:
+def screen_table(
+    ics: list[IC], all_features: list[str] = FEATURES, context: set[str] = CONTEXT
+) -> str:
     """Markdown: one row per feature, one column per year with IC and its t-statistic, for the design doc."""
     years = sorted({i.year for i in ics})
     by: dict[str, dict[int, IC]] = {}
@@ -541,9 +800,9 @@ def screen_table(ics: list[IC]) -> str:
         "| feature | " + " | ".join(str(y) for y in years) + " | verdict |",
         "|---|" + "---|" * (len(years) + 1),
     ]
-    for f in FEATURES:
-        if f in CONTEXT or f in CATEGORICAL:
-            kind = "context" if f in CONTEXT else "categorical"
+    for f in all_features:
+        if f in context or f in CATEGORICAL:
+            kind = "context" if f in context else "categorical"
             lines.append(f"| {f} | " + " | ".join("" for _ in years) + f" | {kind} |")
             continue
         cells = by.get(f, {})
@@ -574,7 +833,14 @@ def main(argv: list[str] | None = None) -> None:
     import argparse
 
     ap = argparse.ArgumentParser(description="materialise the forecast rows and run the IC screen")
-    ap.add_argument("--horizon", type=int, default=PARAMS["horizon_minutes"])
+    ap.add_argument("--grain", choices=["minute", "daily"], default="minute")
+    ap.add_argument(
+        "--horizon",
+        type=int,
+        default=PARAMS["horizon_minutes"],
+        help="minutes; sessions for --grain daily",
+    )
+    ap.add_argument("--min-turnover-day", type=float, default=DAILY_PARAMS["min_turnover_day"])
     ap.add_argument("--step", type=int, default=PARAMS["step_minutes"])
     ap.add_argument("--vol", type=int, default=PARAMS["vol_minutes"])
     ap.add_argument("--liq", type=int, default=PARAMS["liq_minutes"])
@@ -597,16 +863,29 @@ def main(argv: list[str] | None = None) -> None:
         from finance import mirror, settings
 
         a.root = mirror.mirror_dir(settings.HF_REPO)
-    params = {
-        "horizon_minutes": a.horizon,
-        "step_minutes": a.step,
-        "vol_minutes": a.vol,
-        "liq_minutes": a.liq,
-        "min_turnover": a.min_turnover,
-        "start": a.start,
-        "end": a.end,
-    }
-    tag = f"h{a.horizon}_s{a.step}_v{a.vol}_l{a.liq}_t{int(a.min_turnover)}_{a.start}_{a.end}"
+    if a.grain == "daily":
+        sql, all_features, context = DAILY_SQL, DAILY_FEATURES, DAILY_CONTEXT
+        start = a.start if a.start != PARAMS["start"] else DAILY_PARAMS["start"]
+        params: dict[str, Any] = {
+            "horizon_sessions": a.horizon,
+            "vol_sessions": DAILY_PARAMS["vol_sessions"],
+            "min_turnover_day": a.min_turnover_day,
+            "start": start,
+            "end": a.end,
+        }
+        tag = f"daily_h{a.horizon}_t{int(a.min_turnover_day)}_{start}_{a.end}"
+    else:
+        sql, all_features, context = ROWS_SQL, FEATURES, CONTEXT
+        params = {
+            "horizon_minutes": a.horizon,
+            "step_minutes": a.step,
+            "vol_minutes": a.vol,
+            "liq_minutes": a.liq,
+            "min_turnover": a.min_turnover,
+            "start": a.start,
+            "end": a.end,
+        }
+        tag = f"h{a.horizon}_s{a.step}_v{a.vol}_l{a.liq}_t{int(a.min_turnover)}_{a.start}_{a.end}"
     out = a.out or data.work_dir() / "forecast" / f"{tag}.parquet"
     con = data.connect(a.root)
     tmp = data.work_dir() / "duckdb_tmp"
@@ -617,12 +896,12 @@ def main(argv: list[str] | None = None) -> None:
     import time
 
     t0 = time.time()
-    n = materialise(con, params, out)
+    n = materialise(con, params, out, sql)
     print(f"rows: {n:,} in {time.time() - t0:.0f}s -> {out}")
     t0 = time.time()
-    ics = screen(con, out)
+    ics = screen(con, out, all_features=all_features, context=context)
     print(f"screen in {time.time() - t0:.0f}s\n")
-    print(screen_table(ics))
+    print(screen_table(ics, all_features, context))
 
 
 if __name__ == "__main__":
