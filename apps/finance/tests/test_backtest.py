@@ -295,3 +295,16 @@ async def test_grid_reactions_end_to_end(
     assert one.vars["summary"]["index_return_pct"] == {"Nifty 50": 1.0}
     trades = pl.read_parquet(faked_prices / str(runs[0].trades_path))
     assert set(trades["side"].to_list()) <= {"buy", "sell"} and trades.height > 0
+
+
+def test_an_account_eaten_by_charges_stops_at_zero() -> None:
+    n = 40
+    syms = [f"S{i:02d}" for i in range(40)]
+    # ₹5 stocks in ₹50 positions: each sale's fixed ₹18 DP charge is a third of the position
+    m = market(n, {s: [5.0] * n for s in syms})
+    rng = np.random.default_rng(3)
+    sc = rng.random((n, 40))  # a new random ranking of 40 stocks every day: maximum churn
+    rules = B.Rules(top_n=20, rebalance=1, exit="fixed", slippage_bps=0)
+    r = B.simulate(m, sc, rules, 1_000, C.DELIVERY, 0, n - 1)
+    assert r.ruined and r.equity.min() >= 0 and r.equity[-1] == 0
+    assert B.summarise(r, 1_000)["ruined"] is True

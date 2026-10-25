@@ -138,6 +138,8 @@ class Result:
     affordable: list[float]
     """At each decision, the share of scored stocks whose single share fit the allocation."""
     log: list[dict[str, Any]]
+    ruined: bool = False
+    """True when the account reached zero and stopped trading."""
 
 
 def simulate(
@@ -167,6 +169,7 @@ def simulate(
     equity = np.zeros(n_days)
     cash_series = np.zeros(n_days)
     keep_rank = rules.keep_rank()
+    ruined = False
     buy_rate = schedule.stt_buy + schedule.stamp_buy + schedule.exchange * (1 + schedule.gst)
 
     def sell(s: int, t: int, price: float, why: str) -> None:
@@ -278,8 +281,15 @@ def simulate(
                 last_px[s] = c_t
         equity[k] = cash + sum(h.shares * last_px.get(s, h.cost) for s, h in held.items())
         cash_series[k] = cash
+        if equity[k] <= 0:
+            # ruined: charges on positions too small to carry them (a fixed ₹18 DP charge on a
+            # ₹500 sale) have taken everything; a real account stops here at zero
+            equity[k:] = 0.0
+            cash_series[k:] = 0.0
+            ruined = True
+            break
     return Result(market.dates[start : end + 1], equity, cash_series, charges, traded, trades,
-                  hold_days, affordable, log)  # fmt: skip
+                  hold_days, affordable, log, ruined)  # fmt: skip
 
 
 def _trade(
@@ -317,10 +327,13 @@ def summarise(result: Result, capital: float) -> dict[str, Any]:
     n = len(eq)
     if n == 0:
         return {}
-    rets = np.diff(np.r_[capital, eq]) / np.r_[capital, eq][:-1]
+    prev = np.r_[capital, eq][:-1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rets = np.where(prev > 0, np.diff(np.r_[capital, eq]) / np.where(prev > 0, prev, 1), 0.0)
     years = n / TRADING_DAYS
     end = float(eq[-1])
     cagr = (end / capital) ** (1 / years) - 1 if end > 0 and years > 0 else -1.0
+    rets = np.nan_to_num(rets, nan=0.0, posinf=0.0, neginf=-1.0)
     vol = float(np.std(rets, ddof=1) * math.sqrt(TRADING_DAYS)) if n > 1 else 0.0
     peak = np.maximum.accumulate(np.r_[capital, eq])[1:]
     dd = float((eq / peak - 1).min())
@@ -350,6 +363,7 @@ def summarise(result: Result, capital: float) -> dict[str, Any]:
         "avg_hold_days": round(hold, 1),
         "affordable_pct": round(afford * 100, 1),
         "days": n,
+        "ruined": result.ruined,
         "by_year": by_year,
     }
 
@@ -390,6 +404,7 @@ def run_grid(
             sums.append(summarise(res, capital))
         row: dict[str, Any] = {k: v for k, v in asdict(rules).items()}
         row["draws"] = len(sums)
+        row["ruined_share"] = float(np.mean([s["ruined"] for s in sums]))
         for key in ("end_value", "return_pct", "cagr_pct", "vol_pct", "sharpe", "max_drawdown_pct",
                     "charges", "charges_pct_per_year", "turnover_per_year", "cash_drag_pct",
                     "trades", "avg_hold_days", "affordable_pct"):  # fmt: skip
