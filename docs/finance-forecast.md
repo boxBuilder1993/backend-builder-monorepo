@@ -1,6 +1,7 @@
 # The forecast model: expected price Δ minutes ahead
 
 Status: design, 2026-10-24. Agreed in discussion; this is the written form to argue with before code.
+Consolidated results of the October 2026 work: [finance-research-2026-10.md](finance-research-2026-10.md).
 Builds on [finance-ml.md](finance-ml.md) (Fit, FitRun, Model, InferRun, Evaluation) and the data in
 [finance-app.md](finance-app.md). Supersedes [finance-modelling.md](finance-modelling.md) as the first
 thing we fit.
