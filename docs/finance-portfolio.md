@@ -1,8 +1,8 @@
 # Holding portfolios for a small account: forecasts for days to a quarter, and a backtest that trades them
 
-Status: **design for review**, 2026-10-25, revision 2 (after the owner's first review: no dividends,
-no shorting, search the space as widely as possible, study capital first, target ₹10,000).
-Nothing here is built yet.
+Status: **reviewed and agreed**, 2026-10-25, revision 3. Owner's decisions: no dividends, no shorting,
+search the space as widely as possible, study capital first, target ₹10,000, capitals from ₹10,000
+up, about a day of overnight compute is fine, the affordability tilt is accepted, the US later.
 Builds on [finance-ml.md](finance-ml.md) (Fit, FitRun, Model, InferRun, Evaluation),
 [finance-forecast.md](finance-forecast.md) (the daily rows and their features) and the results in
 [finance-research-2026-10.md](finance-research-2026-10.md).
@@ -30,7 +30,7 @@ percentage charges. So the question has two halves, studied in this order:
 | Decision | Choice | Why |
 |---|---|---|
 | Instrument | NSE cash equity, delivery (CNC), long only. **No shorting, no dividends** | Owner's decision. Delivery has zero brokerage and holds overnight; dividends are ignored on every side, benchmarks included, so comparisons stay like for like |
-| Capital | **₹10,000** is the target. The capital study covers ₹2,000 to ₹10 lakh to show where the costs stop mattering | Owner's decision |
+| Capital | **₹10,000** is the target. The capital study covers ₹10,000 to ₹10 lakh to show where the costs stop mattering | Owner's decision |
 | Horizons | 5, 10, 21, 42, 63 and 126 sessions (a week to half a year) | Wide, per the owner; each pays its cost once per hold |
 | Signal | Daily-grain Fits, one per horizon and target, on split-adjusted rows | §5 |
 | Training | Walk-forward: retrain each quarter on all history up to an embargo, predict only the next quarter | 16 quarters of out-of-sample forecasts, rising and falling markets |
@@ -70,7 +70,7 @@ and `CloseFitRun` already work. No parent holds one transaction for hours (issue
 No model. It answers what a small account can afford before any forecast is involved, using the
 model-free baselines of §6 under the full portfolio grid.
 
-**Grid:** capital {₹2,000, ₹5,000, ₹10,000, ₹25,000, ₹50,000, ₹1 lakh, ₹10 lakh} × stocks held N
+**Grid:** capital {₹10,000, ₹25,000, ₹50,000, ₹1 lakh, ₹10 lakh} × stocks held N
 {1, 2, 3, 4, 5, 6, 8, 10, 15, 20} × rebalance every {5, 10, 21, 42, 63, 126} sessions × exit {band,
 fixed} × sources {equal-weight affordable, 12-1 momentum, low volatility}, 2023-01 to 2026-10.
 
@@ -359,13 +359,9 @@ Order of PRs:
 3. Walk-forward and model search; stages 1 to 3 run overnight.
 4. Portfolio grid, selection, confirmation; the results document.
 
-## 11. Open questions for review
+## 11. Review decisions (2026-10-25)
 
-1. **Capitals in the study.** ₹2,000 to ₹10 lakh, focused on ₹10,000. Anything else to include?
-2. **Compute.** About a day of worker time for the model search, run overnight, one fit at a time;
-   the portfolio grid a few hours. Acceptable, or narrower?
-3. **Affordability bias.** At ₹10,000 the portfolio can only hold stocks priced under capital ÷ N,
-   so it leans to low-priced stocks. The baselines carry the same restriction, so the comparison is
-   fair; the result will not generalise to large accounts.
-4. **The US.** The same machinery runs on US daily rows with a US cost schedule; proposed as a
-   later step, not part of this build.
+1. **Capitals:** ₹10,000 and up; smaller accounts are out of scope.
+2. **Compute:** about a day of overnight worker time for the model search is acceptable.
+3. **Affordability tilt:** accepted; the baselines carry the same restriction.
+4. **The US:** later, as a separate step.
