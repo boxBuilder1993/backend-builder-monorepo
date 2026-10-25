@@ -365,3 +365,70 @@ Order of PRs:
 2. **Compute:** about a day of overnight worker time for the model search is acceptable.
 3. **Affordability tilt:** accepted; the baselines carry the same restriction.
 4. **The US:** later, as a separate step.
+
+## 12. Phase 1 results: the capital study (2026-10-25)
+
+Label `capital study 2026-10-25 v3`: 20 `BacktestGrid` rows (4 sources × 5 capitals), 120 rule
+combinations each (N {1, 2, 3, 4, 5, 6, 8, 10, 15, 20} × rebalance every {5, 10, 21, 42, 63, 126}
+sessions × exit {band 2N, fixed}), random picks averaged over 20 draws; 2023-01-02 to 2026-10-23,
+944 trading days; Zerodha delivery charges and 5 bps slippage. `SummarizeBacktestGrids` holds the
+tables. Two bugs were found and fixed on the way (#82, #83): an account eaten by charges went below
+zero, and a ruined account broke the following years' returns.
+
+### What it costs to run a ₹10,000 account
+
+Charges per year as % of capital, random picks, band exit (rows: stocks held; columns: sessions
+between rebalances):
+
+| N | 5 (weekly) | 10 | 21 (monthly) | 42 | 63 (quarterly) | 126 (half-yearly) |
+|---|---|---|---|---|---|---|
+| 1 | 20.6 | 9.4 | 4.4 | 2.0 | 1.4 | 0.7 |
+| 2 | 35.0 | 14.0 | 5.9 | 2.6 | 1.8 | 0.8 |
+| 3 | 51.9 | 18.6 | 7.5 | 3.5 | 2.4 | 1.1 |
+| 5 | 87.7 | 31.8 | 11.1 | 5.0 | 3.3 | 1.5 |
+| 10 | 183.8 | 74.4 | 23.3 | 9.4 | 5.8 | 2.5 |
+| 20 | 365.7 | 169.4 | 63.2 | 19.6 | 11.3 | 5.0 |
+
+At ₹1 lakh the same grid costs 0.5 to 2.6 % a year for anything rebalanced monthly or slower; the
+difference is the fixed ₹18 DP charge per sale. **For ₹10,000: rebalance every two to six months;
+up to 3 stocks monthly, 5 every two months, 10 quarterly or half-yearly.** Weekly trading ruins
+the account (18.5 % of the random-pick setups at ₹10,000 reached zero).
+
+### What the simple strategies earned at ₹10,000
+
+NIFTYBEES bought once: ₹12,790 (+31.5 % in 2023–24, −2.7 % in 2025–26).
+
+| Source | Median end value over 120 setups | 10th percentile | Best | Setups beating NIFTYBEES |
+|---|---|---|---|---|
+| Momentum 12-1 | ₹11,594 | ₹2,423 | ₹53,734 (N 10, monthly, band) | 42 % |
+| Low volatility | ₹10,528 | ₹9,835 | ₹16,518 | 19 % |
+| Random picks | ₹11,063 | ₹0 | ₹20,341 | 42 % |
+
+### Chosen on 2023–24, judged on 2025–26 (₹10,000)
+
+| Source | Best setup on 2023–24 | Its 2023–24 | Its 2025–26 | Top 20 setups of 2023–24, median 2025–26 | Of those, beating NIFTYBEES | Rank correlation 2023–24 vs 2025–26 |
+|---|---|---|---|---|---|---|
+| Momentum 12-1 | N 1, every 10 sessions, fixed | +269 % | **−88 %** | +9 % | 60 % | +0.45 |
+| Low volatility | N 20, half-yearly, band | +54 % | +2 % | +5 % | 70 % | +0.55 |
+| Random picks | N 1, every 42 sessions, band | +101 % | −3 % | −5 % | 20 % | +0.84 |
+
+Momentum by number of stocks at ₹10,000 (median over rebalance and exit):
+
+| N | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 10 | 15 | 20 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2023–24 | +38 % | +17 % | +18 % | +44 % | +53 % | +66 % | +72 % | +61 % | +74 % | +83 % |
+| 2025–26 | −79 % | −78 % | −42 % | −32 % | −28 % | −15 % | −1 % | +81 % | +58 % | +18 % |
+| Max drawdown | −85 % | −83 % | −60 % | −53 % | −45 % | −43 % | −39 % | −38 % | −35 % | −40 % |
+
+### Reading
+
+- **Picking the single best setup from history is a trap.** The best momentum setup of 2023–24 lost
+  88 % in 2025–26. The selection protocol of §7 (commit to the top configurations, judge the
+  group) is needed, not optional.
+- **Concentration is what kills a small account, not charges.** Momentum with 1 to 5 stocks lost
+  28 to 79 % in 2025–26; with 10 to 15 it gained 58 to 81 %. At ₹10,000, 10 stocks is affordable
+  only quarterly or slower (5.8 % or 2.5 % a year in charges).
+- **Low volatility is steady and modest.** Rarely the best, almost never a disaster; its 2023–24
+  ranking carries into 2025–26 best of the three.
+- **The bar for the model (phase 2):** beat NIFTYBEES and 12-1 momentum with about 10 stocks,
+  rebalanced quarterly or half-yearly, at ₹10,000, out of sample.
