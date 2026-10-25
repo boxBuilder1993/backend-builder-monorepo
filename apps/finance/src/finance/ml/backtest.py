@@ -342,9 +342,10 @@ def summarise(result: Result, capital: float) -> dict[str, Any]:
     years_seen = sorted({d.year for d in result.dates})
     for y in years_seen:
         last = max(i for i, d in enumerate(result.dates) if d.year == y)
-        by_year[str(y)] = round((float(eq[last]) / prev - 1) * 100, 2)
+        # after a ruin the account is zero and stays zero: no further loss to report
+        by_year[str(y)] = round((float(eq[last]) / prev - 1) * 100, 2) if prev > 0 else 0.0
         prev = float(eq[last])
-    avg_equity = float(np.mean(eq))
+    avg_equity = max(float(np.mean(eq)), 1e-9)
     per_year = 1 / years if years > 0 else 0.0
     hold = float(np.mean(result.hold_days)) if result.hold_days else 0.0
     afford = float(np.mean(result.affordable)) if result.affordable else 0.0
