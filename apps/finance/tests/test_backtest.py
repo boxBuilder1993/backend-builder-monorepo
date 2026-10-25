@@ -308,3 +308,27 @@ def test_an_account_eaten_by_charges_stops_at_zero() -> None:
     r = B.simulate(m, sc, rules, 1_000, C.DELIVERY, 0, n - 1)
     assert r.ruined and r.equity.min() >= 0 and r.equity[-1] == 0
     assert B.summarise(r, 1_000)["ruined"] is True
+
+
+def test_a_ruin_early_in_one_year_summarises_the_years_after() -> None:
+    days = [date(2024, 12, 20) + timedelta(days=i) for i in range(30)]
+    syms = [f"S{i:02d}" for i in range(40)]
+    rows = [
+        dict(date=d, symbol=s, open=5.0, close=5.0, adj_factor=1.0, med20=1e12)
+        for d in days
+        for s in syms
+    ]
+    m = B.Market.from_frame(pl.DataFrame(rows))
+    sc = np.random.default_rng(3).random((len(days), 40))
+    r = B.simulate(
+        m,
+        sc,
+        B.Rules(top_n=20, rebalance=1, exit="fixed", slippage_bps=0),
+        1_000,
+        C.DELIVERY,
+        0,
+        len(days) - 1,
+    )
+    assert r.ruined and r.dates[0].year == 2024 and r.dates[-1].year == 2025
+    s = B.summarise(r, 1_000)
+    assert s["ruined"] and s["end_value"] == 0 and s["by_year"]["2025"] in (0.0, -100.0)
