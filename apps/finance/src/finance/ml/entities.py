@@ -4,7 +4,7 @@ lives on the Fit or the Model."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from backend_builder import Entity
@@ -93,4 +93,50 @@ class Evaluation(Entity):
     results: dict[str, Any] | None = None
     status: str = "done"
     """``done`` | ``failed``."""
+    error: str | None = None
+
+
+class BacktestGrid(Entity):
+    """Every rule combination for one source and capital over one period, evaluated in one run.
+    See docs/finance-portfolio.md §6."""
+
+    label: str
+    source: dict[str, Any]
+    """{"baseline": "momentum_12_1" | "low_vol" | "equal_weight" | "niftybees"} or, later,
+    {"walk_forward_id": ...}."""
+    capital: float
+    costs: str
+    """A schedule name in finance.ml.costs.SCHEDULES."""
+    start_date: date
+    end_date: date
+    grid: dict[str, Any]
+    """{rule name: [values]} for finance.ml.backtest.Rules."""
+    draws: int = 1
+    status: str = "running"
+    """``running`` | ``done`` | ``failed``."""
+    combinations: int = 0
+    results_path: str | None = None
+    """parquet/backtests/grid_<id>.parquet in the mirror: one row per combination."""
+    best: dict[str, Any] | None = None
+    """The combination with the highest end value, and its numbers."""
+    error: str | None = None
+
+
+class BacktestRun(Entity):
+    """One account kept in full: its trades and its daily equity."""
+
+    label: str
+    source: dict[str, Any]
+    rules: dict[str, Any]
+    costs: str
+    capital: float
+    start_date: date
+    end_date: date
+    status: str = "running"
+    equity_path: str | None = None
+    """parquet/backtests/run_<id>_equity.parquet: date, equity, cash."""
+    trades_path: str | None = None
+    """parquet/backtests/run_<id>_trades.parquet: date, symbol, side, shares, price, value,
+    charges, why."""
+    summary: dict[str, Any] | None = None
     error: str | None = None

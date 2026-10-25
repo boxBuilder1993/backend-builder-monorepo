@@ -310,3 +310,35 @@ existing rows file, writes the per-feature IC table as `parquet/screens/<id>.par
 saves the markdown table. `Validate` (input: fit_run_id, label, params, thresholds, cost_bps, top_k,
 rescale) scores every fitted model of a run on the validation range and evaluates each, skipping
 models already scored under the label. Both are triggered by hand with `backend-builder trigger`.
+
+## Backtests (2026-10-25)
+
+Design: [finance-portfolio.md](finance-portfolio.md). Built so far: phase 1, which needs no model.
+
+- `finance/ml/costs.py`: Zerodha's 2026 schedules (delivery, intraday, futures) as `Schedule`s;
+  `order_charges(schedule, side, value)` per executed order, `dp_charge` per stock per sale day.
+- `finance/ml/backtest.py`: the account as a pure function. `Market` holds dense (date × symbol)
+  arrays of unadjusted open and close, the adjustment factor and the position cap; `simulate` runs
+  one account (next-open fills, whole shares, affordability, splits scaling shares, delistings sold at
+  the last close, band / fixed / score / stop exits, minimum hold); `summarise` gives CAGR,
+  drawdown, charges, turnover, cash drag and per-year returns; `rules_grid` and `run_grid` evaluate
+  every rule combination for one source.
+- `finance/ml/portfolio.py`: EQ prices from `equity_adj` with the 20-session median turnover, and the
+  model-free baselines (`momentum_12_1`, `low_vol`, `equal_weight` as random draws, `niftybees`
+  bought once).
+- Entities `BacktestGrid` (one source × capital × period, every combination in one results file under
+  `parquet/backtests/`) and `BacktestRun` (one account with its trades and daily equity).
+- Reactions in `finance/ml/portfolio_reactions.py`: `RunBacktestGrid` (pulls the store once, then
+  defers one `BacktestGridSource` per source × capital), `BacktestGridSource`, `RunBacktest`,
+  `SummarizeBacktestGrids` (markdown tables in vars for a label).
+
+```bash
+backend-builder trigger finance finance.ml.portfolio_reactions.RunBacktestGrid --input '{
+  "label": "capital study", "start": "2023-01-01", "end": "2026-10-23",
+  "sources": [{"baseline": "momentum_12_1"}, {"baseline": "low_vol"},
+              {"baseline": "equal_weight"}, {"baseline": "niftybees"}],
+  "capitals": [10000, 25000, 50000, 100000, 1000000],
+  "grid": {"top_n": [1, 2, 3, 4, 5, 6, 8, 10, 15, 20], "rebalance": [5, 10, 21, 42, 63, 126],
+           "exit": ["band", "fixed"], "band": [2.0]}}'
+backend-builder trigger finance finance.ml.portfolio_reactions.SummarizeBacktestGrids --input '{"label": "capital study"}'
+```
