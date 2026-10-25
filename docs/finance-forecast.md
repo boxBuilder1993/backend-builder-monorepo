@@ -1055,3 +1055,73 @@ since both are stock-specific and persist across a year. And one target change: 
 horizon should run from 14:14 or 14:29, not the close, with the 09:29 exit; the last hour belongs
 to the long. The break flag (is the next session after a weekend or holiday) is a cheap feature and
 in 2026 it carried a strongly negative return; the model should see it.
+
+## Second round: the fits, validated on 2026 H2 (2026-10-25)
+
+Seven Fits, each fitted twice (through 2025-12-31; and on 2026-01-01 to 2026-06-30 alone), five
+models each (ridge baseline; xgboost depth 3 and 4, 300 and 600 trees, learning rate 0.05, min child
+weight 200, subsample 0.8, colsample 0.7, lambda 5). All 70 fitted; the two 20-million-row minute
+runs went through the streaming path on the CPU (about 13 minutes each). Every FitRun was scored on
+2026-07-01 to 2026-10-23 (label `validation 2026 H2`), thresholds 0.1 / 0.2 / 0.5 %, 10 bps cost,
+top-5 per decision point. Best xgboost per Fit and split; IC is the within-decision-point Spearman,
+×1000.
+
+| Fit | split | best model | IC ×1000 (se) | IC by month Jul / Aug / Sep / Oct | calibration slope | top-5 spread, bps | top-5 net, bps | ridge IC |
+|---|---|---|---|---|---|---|---|---|
+| 15m | to 2025 | d4 n600 | **70 (0.9)** | 73 / 77 / 69 / 61 | 0.31 | 8.4 | −5.9 | 53 |
+| 15m | 2026 H1 | d3 n600 | 62 (0.8) | 69 / 71 / 60 / 52 | 0.13 | 5.6 | −7.2 | 47 |
+| 60m | to 2025 | d4 n600 | 40 (1.1) | 34 / 50 / 42 / 39 | 0.16 | 7.8 | −7.9 | 33 |
+| 60m | 2026 H1 | d4 n600 | 23 (1.0) | 27 / 26 / 22 / 21 | −0.03 | 6.0 | −8.0 | 17 |
+| 375m (session) | to 2025 | d3 n600 | **76 (0.9)** | 76 / 84 / 75 / 64 | 0.41 | 23.7 | −9.3 | 61 |
+| 375m | 2026 H1 | d4 n600 | 51 (1.0) | 63 / 66 / 55 / 18 | 0.10 | 25.2 | −10.3 | 36 |
+| 1d NSE | to 2025 | d4 n600 | 49 (7.0) | 29 / 59 / 56 / 41 | 0.28 | 25.3 | +3.4 | 27 |
+| 1d NSE | 2026 H1 | d4 n300 | 50 (4.7) | 40 / 53 / 58 / 46 | 1.44 | 4.1 | −10.1 | 14 |
+| 1d US | to 2025 | d3 n600 | 35 (12) | 56 / 11 / 44 / 91 | −0.13 | 69 | −6.4 | 30 |
+| 1d US | 2026 H1 | linear | 11 (13) | 32 / −26 / 20 / 78 | 0.13 | 17 | −38 | 11 |
+| 21d NSE | to 2025 | d4 n300 | 61 (5.3) | 51 / 89 / 50 / – | 0.16 | −226 | −561 | −107 |
+| 21d NSE | 2026 H1 | linear | 4 (5.0); trees −34 to −99 | | | | | |
+| 21d US | to 2025 | d3 n600 | **100 (8.2)** | 102 / 65 / 142 / – | 1.13 | 221 | +203 | 69 |
+| 21d US | 2026 H1 | linear | −12 (15); trees −15 to −42 | | | | | |
+
+### Reading
+
+- **The new features raised the 15-minute IC from 0.050 to 0.070**, with the ridge baseline from
+  0.038 to 0.053, and the monthly ICs barely move (0.061 to 0.077). The round-one review's
+  importances said time-of-day, the stock's recent returns and delivery would carry it; they did.
+  Calibration is still poor (slope 0.31: the trees predict four times too large), which is what
+  the rescale knob is for before any threshold means anything.
+- **The session horizon is the best signal in the data: IC 0.076.** It is also the only minute
+  horizon with a thresholded result above costs: predictions over 0.5 % made +21 bps a trade after
+  10 bps cost over 60,863 trades, −17 / +15 / +21 / +51 bps by month. The top-5 long is still
+  negative (−9 bps) because the daytime drifts down for everyone (the window study's morning
+  fall); the spread between the top and bottom quintile is 24 bps. The signal says which stock
+  falls least, and a long-only trade pays for the market's drift. A long-short reading of the
+  same model, or the model applied to the daytime short, is the next thing to measure.
+- **Fitting through 2025 beats fitting on 2026 H1 alone, every time.** 70 vs 62 at 15 minutes, 40
+  vs 23 at 60, 76 vs 51 for the session; for the 21-session horizons the H1-only trees flip sign
+  (−0.07 to −0.10 on NSE). Six months is not enough history for 99 features; recency does not
+  compensate. The question the owner asked is answered: more data wins, and the 2026-only fit
+  should not be used.
+- **60 minutes is the weak horizon** (0.040, nothing above costs), as the screens predicted: the
+  minute reversals have faded and the daily features have not yet taken over.
+- **One session on NSE at the daily grain** holds its 0.05 but on 79 sessions and 128k rows the
+  standard error is 0.007 and the top-5 net of +3.4 bps is within noise. Two more quarters before
+  it is believed.
+- **21 sessions is not a result yet.** NSE: a positive IC in July and August and −100 to −560 bps
+  per trade, because 2026 H2 fell 15% and every threshold trade is a 21-day long. US: IC 0.10 and
+  +203 bps net per top-5 trade looks like the best line in the table, but it is three overlapping
+  months of 21-day windows, roughly three independent observations, and the same Fit trained on
+  2026 H1 scores −0.015 to −0.04. The standard errors in the table assume independent points and
+  understate this badly. Not actionable until a year of non-overlapping windows exists.
+- **US daily is weak and noisy**, as the screens said: IC 0.035 with se 0.012, month to month from
+  0.01 to 0.09.
+
+### What comes next
+
+1. Rescale by the calibration slope and re-evaluate the 15m and 375m models (the `rescale`
+   knob exists), so the thresholds are in return units that mean something.
+2. A long-short reading: `net_return_topk` minus the bottom-k, and the session model applied as a
+   daytime short on the bottom quintile.
+3. The overnight horizon as a Fit target (14:14 or 14:29 to 09:29, both markets) with the window
+   study's two stock-specific features and the break flag.
+4. Keep fitting through the latest full year; drop the 2026-only split.
