@@ -1,6 +1,8 @@
-# Holding portfolios: forecasts for weeks to a quarter, and a backtest that trades them
+# Holding portfolios for a small account: forecasts for days to a quarter, and a backtest that trades them
 
-Status: **design for review**, 2026-10-25. Nothing here is built yet.
+Status: **design for review**, 2026-10-25, revision 2 (after the owner's first review: no dividends,
+no shorting, search the space as widely as possible, study capital first, target ₹10,000).
+Nothing here is built yet.
 Builds on [finance-ml.md](finance-ml.md) (Fit, FitRun, Model, InferRun, Evaluation),
 [finance-forecast.md](finance-forecast.md) (the daily rows and their features) and the results in
 [finance-research-2026-10.md](finance-research-2026-10.md).
@@ -9,241 +11,297 @@ Builds on [finance-ml.md](finance-ml.md) (Fit, FitRun, Model, InferRun, Evaluati
 
 The October work found one real signal, the session model's daily ranking, and showed that Indian
 retail costs consume it: an intraday round trip costs about 10.6 bps a stock at Zerodha below
-₹66,667 an order, a delivery round trip about 22 bps plus a ₹18 depository charge per sale. Every
-strategy that traded every day lost to those costs, and every stock list that looked good had been
-chosen with hindsight.
+₹66,667 an order, a delivery round trip about 22 bps plus a depository charge of about ₹18 per stock
+sold. Every strategy that traded every day lost to those costs, and every stock list that looked good
+had been chosen with hindsight.
 
-The way out is to trade less often. A stock held for a month pays its delivery cost once against
-moves of several percent. This document designs the work to answer one question honestly:
+The way out is to trade less often: a stock held for a month pays its delivery cost once against moves
+of several percent. But the account is small. **The target is at most ₹10,000.** At that size the
+fixed depository charge dominates: ₹18 on a ₹2,000 position is 0.9 % per sale, four times the
+percentage charges. So the question has two halves, studied in this order:
 
-> Does a portfolio of stocks chosen by a forecast of the next week, month or quarter, rebalanced
-> at that pace and charged Zerodha's real delivery costs, beat buying the index, out of sample,
-> from 2023 to 2026?
+1. **Capital:** for an account of a given size, how many stocks, how often traded, before charges eat
+   the return? (§4)
+2. **Signal:** within what that allows, does a forecast of the next days, weeks, months or quarter pick
+   a portfolio that beats simply buying the index, out of sample, 2023 to 2026? (§5 to §7)
 
 ## 2. What is decided here
 
 | Decision | Choice | Why |
 |---|---|---|
-| Instrument | NSE cash equity, delivery (CNC), long only | Delivery has zero brokerage and holds overnight; shorts cannot be held past the day in cash |
-| Horizons | 5, 21 and 63 sessions (a week, a month, a quarter) | The owner's range; each pays its cost once per hold |
-| Signal | A daily-grain Fit per horizon, predicting the volatility-scaled return to the close of the h-th session | The existing daily rows, extended (§4) |
-| Training | Walk-forward: retrain each quarter on all history up to an embargo, predict only the next quarter | One test of 3.75 years instead of one test of 4 months; covers rising and falling markets |
-| Portfolio rule | Hold the top N by forecast; keep a holding while it ranks within the top B; sell when it falls below B | Separates entry from exit so costs are paid only when a stock clearly loses its rank |
-| Costs | Zerodha's published 2026 schedule, per order, plus slippage | The schedule the owner pasted on 2026-10-25 (§6) |
-| Benchmarks | Nifty 50, Nifty 500, equal-weight universe, and two model-free strategies (12-1 momentum, low volatility) | The model has to beat simple ideas, not only the index |
-| Selection | Settings chosen on 2023-01 to 2024-12, confirmed untouched on 2025-01 to 2026-10 | 72 configurations would otherwise find a lucky one |
-| Execution | Everything as reactions with entities, deferred children, tests | The standing rule; no result comes from a script |
+| Instrument | NSE cash equity, delivery (CNC), long only. **No shorting, no dividends** | Owner's decision. Delivery has zero brokerage and holds overnight; dividends are ignored on every side, benchmarks included, so comparisons stay like for like |
+| Capital | **₹10,000** is the target. The capital study covers ₹2,000 to ₹10 lakh to show where the costs stop mattering | Owner's decision |
+| Horizons | 5, 10, 21, 42, 63 and 126 sessions (a week to half a year) | Wide, per the owner; each pays its cost once per hold |
+| Signal | Daily-grain Fits, one per horizon and target, on split-adjusted rows | §5 |
+| Training | Walk-forward: retrain each quarter on all history up to an embargo, predict only the next quarter | 16 quarters of out-of-sample forecasts, rising and falling markets |
+| Model search | As wide as the box allows: 3 algorithms, ~50 settings, 2 feature sets, 2 targets, 6 horizons, in two stages | Owner's decision; nested so the search cannot leak into the test |
+| Portfolio search | Every combination of stocks held, rebalance pace, hold band and exit rule that a ₹10,000 account can run | §6 |
+| Costs | Zerodha's published 2026 schedule per order, depository charge per stock sold, slippage | §8 |
+| Benchmarks | NIFTYBEES bought once with ₹10,000; Nifty 50 and 500; equal-weight portfolios of affordable stocks; 12-1 momentum; low volatility | The model must beat what a ₹10,000 investor could do instead |
+| Selection | Everything chosen on 2023-01 to 2024-12; one choice confirmed untouched on 2025-01 to 2026-10 | Thousands of configurations will find lucky ones (§7) |
+| Execution | Everything as entities and reactions, long jobs as deferred children closed by OnChange, tests | The standing rule; no result comes from a script |
 
 ## 3. The pieces
 
 ```
-RegisterFit (×3: forecast 5d/21d/63d nse r3)
-      │
-RunWalkForward ──creates──► WalkForward + WalkForwardWindow ×16
-      │                         │
-      └─defers─► RunWindow ×16  (one per window, one at a time on the worker)
-                    ├─ RunFit {inline: true} ─► FitModel (in the same run) ─► UploadModel
-                    └─ Infer on the window's test range
-                         │
-      OnChange(WalkForwardWindow.status) ─► CloseWalkForward
-                    └─ when all windows are done: one predictions file, per-window IC, status done
+Phase 1  capital study (no model)
+  RunBacktestGrid {source: baselines, capitals, grid} ──► BacktestGrid rows ──► cost-drag tables
 
-RunBacktest  (input: a WalkForward, or a model-free baseline, and the portfolio rules)
-      └─ BacktestRun: daily equity, trades, holdings files; summary in the row
-RunBacktestSweep ──defers─► RunBacktest ×N  (a grid; one BacktestSweep row collects them)
-      OnChange(BacktestRun.status) ─► CloseBacktestSweep ─► the comparison table, split by period
+Phase 2  forecasts
+  RegisterFit ×12 (6 horizons × 2 targets)
+  RunModelSearch ──creates──► ModelSearch, and one WalkForward per (Fit × spec × feature set)
+        └─defers─► RunWindow per window (one at a time on the worker)
+                      ├─ RunFit {inline: true, specs: [one]} ─► FitModel ─► UploadModel
+                      └─ Infer on the window's test range (rows without a target kept)
+        OnChange(WalkForwardWindow.status) ─► CloseWalkForward ─► predictions file, IC per window
+        OnChange(WalkForward.status)       ─► CloseModelSearch ─► leaderboard, stage-2 shortlist
+
+Phase 3  portfolios
+  RunBacktestGrid {source: each shortlisted WalkForward + baselines, capital ₹10,000, grid}
+        └─ one BacktestGrid row per source: every rule combination evaluated, results file
+  SelectPortfolio ─► the chosen configuration (selection period only) ─► BacktestRun (confirmation)
 ```
 
-Long orchestrations defer their children and close on a status change, the way `RunFit`,
-`FitModel` and `CloseFitRun` already work. No parent holds one transaction for an hour; that is
-what lost the first FitSweep on 2026-10-24 (issue #69).
+Long orchestrations defer their children and close on a status change, the way `RunFit`, `FitModel`
+and `CloseFitRun` already work. No parent holds one transaction for hours (issue #69).
 
-## 4. The forecasts
+## 4. Phase 1: the capital study
+
+No model. It answers what a small account can afford before any forecast is involved, using the
+model-free baselines of §6 under the full portfolio grid.
+
+**Grid:** capital {₹2,000, ₹5,000, ₹10,000, ₹25,000, ₹50,000, ₹1 lakh, ₹10 lakh} × stocks held N
+{1, 2, 3, 4, 5, 6, 8, 10, 15, 20} × rebalance every {5, 10, 21, 42, 63, 126} sessions × exit {band,
+fixed} × sources {equal-weight affordable, 12-1 momentum, low volatility}, 2023-01 to 2026-10.
+
+**Output, per capital (a `BacktestGrid` table and a markdown summary in the run's vars):**
+
+| Measure | Meaning |
+|---|---|
+| Charges per year, % of capital | What the account pays to run the rule |
+| Break-even gross return | The yearly return before charges needed just to cover them |
+| Affordable universe | Share of liquid stocks whose single share costs no more than capital ÷ N (at ₹10,000 with N = 5, a stock must cost under ₹2,000) |
+| Cash drag | Average share of capital left uninvested because of whole shares |
+| Realised net return of each baseline | What the rule actually earned after charges |
+
+This phase fixes, before any model exists, the region of N and rebalance pace a ₹10,000 account can
+live in. It is also where the plain answer may already sit: if no baseline at ₹10,000 beats buying
+NIFTYBEES once, the model has to carry the whole difference.
+
+## 5. Phase 2: the forecasts
 
 ### Fits
 
-Three new Fits, registered from JSON under `apps/finance/fits/round3/`, on the existing
+Twelve Fits under `apps/finance/fits/round3/`: horizons {5, 10, 21, 42, 63, 126} × targets
+{volatility-scaled return, raw return}, on the existing
 [`daily_sql("nse")`](../apps/finance/src/finance/ml/forecast.py) with these changes:
 
 | Change | Detail | Why |
 |---|---|---|
-| Adjusted prices | Returns, features and targets from `equity_adj` (`adj_open`, `adj_close`, …) instead of `equity` | A split or bonus inside a 63-session hold reads as a −50 % or −90 % return on unadjusted prices. Today's daily rows read `equity` |
-| Horizons | `horizon_sessions` 5, 21, 63 | One Fit each |
-| Slow features | `ret_120d`, `ret_250d`, `mom_12_1` (250-session return less the last 21), `vol_120d`, `max_dd_60d` (worst fall from a 60-session high), `deliv_pct_20d` (20-session mean delivery %), `turn_trend` (20-session turnover over 120-session), `s_ret_60d` (sector index, 60 sessions), `rs_120` (stock minus Nifty 50 over 120 sessions) | What the literature and our screens say matters at weeks to months: momentum, its reversal at a month, volatility, accumulation |
-| Warm-up | Rows start 2022-09-01 so the 250-session features are complete; queries read from 2021-09-01 | |
-| Liquidity | 20-session median turnover ≥ ₹1 crore (unchanged) | Enough for ₹1 lakh positions without moving the price |
-| Universe | `series = 'EQ'` only | BE (trade-for-trade) stocks cannot be bought and sold freely |
+| Adjusted prices | Returns, features and targets from `equity_adj` (`adj_open`, `adj_close`, …) instead of `equity` | A split or bonus inside a long hold reads as a −50 % or −90 % return on unadjusted prices. Today's daily rows read `equity` |
+| Raw-return target | `y = ln(exit / entry)` as a second target | The scaled target ranks well on risk-adjusted moves; a portfolio earns raw returns. Both are searched |
+| Slow features | `ret_120d`, `ret_250d`, `mom_12_1` (250-session return less the last 21), `vol_120d`, `max_dd_60d`, `deliv_pct_20d`, `turn_trend` (20-session turnover over 120-session), `s_ret_60d`, `rs_120`, `px_level` (log price, for affordability effects) | What matters at weeks to months: momentum and its one-month reversal, volatility, accumulation |
+| Rows without a target | Query parameter `:need_target` (default true). False keeps the last h sessions with a null target, so `Infer` forecasts every day including today | Today's rows drop any row whose exit lies beyond the data |
+| Warm-up | Rows from 2022-09-01 so the 250-session features are complete; queries read from 2021-09-01 | |
+| Liquidity | 20-session median turnover ≥ ₹1 crore | A ₹10,000 order never moves these |
+| Universe | `series = 'EQ'` only | BE (trade-for-trade) stocks cannot be traded freely |
 
-Each Fit keeps the screen rule of the October round: the new features go through `Screen` on
-2022-09 to 2024-12 first, and the Fit's feature list is what `features_from_screen` keeps.
+**Feature sets**, both searched: `screened` (what `Screen` and `features_from_screen` keep on
+2022-09 to 2024-12) and `all` (every candidate).
 
-Search: one spec per Fit, chosen before the walk-forward and fixed for it: xgboost depth 3,
-600 trees, learning rate 0.05, min child weight 200, subsample 0.8, colsample 0.7, lambda 5, and
-the ridge as the baseline. Two specs × 16 windows × 3 horizons = 96 fits; daily rows are about
-1.4 million, so a fit takes under a minute.
+### The model search space
 
-### Walk-forward
+| Algorithm | Settings | Count |
+|---|---|---|
+| Ridge | alpha {0.1, 1, 10, 100} | 4 |
+| xgboost | max_depth {2, 3, 4, 6} × n_estimators {300, 800} × learning_rate {0.03, 0.1} × min_child_weight {50, 500}; subsample 0.8, colsample 0.7, lambda 5 | 32 |
+| lightgbm | num_leaves {15, 63} × n_estimators {300, 800} × learning_rate {0.03, 0.1} × min_child_samples {100, 1000} | 16 |
+| **Total** | | **52 specs** |
 
-New entities in `finance/ml/entities.py`:
+52 specs × 2 feature sets × 12 Fits = 1,248 candidate models, each walked forward.
+
+### The search, in two stages, inside the selection period only
+
+Fitting all 1,248 on 16 quarterly windows is about 20,000 fits. Instead:
+
+| Stage | Windows | Models | Fits | Picks by |
+|---|---|---|---|---|
+| 1. Coarse | 2 yearly windows: test 2023, test 2024 | all 1,248 | 2,496 | Mean IC over the two years, with a minimum in each year |
+| 2. Fine | 8 quarterly windows, 2023-Q1 to 2024-Q4 | top 5 per (horizon, target) from stage 1 = 60 | 480 | Mean quarterly IC and its t-statistic |
+| 3. Forward | 7 quarterly windows, 2025-Q1 to 2026-Q4 | the stage-2 top 5 per (horizon, target), fixed | 420 | Nothing: these forecasts feed the confirmation only |
+
+Daily rows are about 1.4 million; a fit takes 10 to 60 seconds, so the three stages are roughly a day
+of worker time, run overnight, one fit at a time. Models are chosen by **forecast quality (IC)**, not
+by backtest profit, so the model choice and the portfolio choice cannot overfit each other.
+
+### Entities
 
 ```python
+class ModelSearch(Entity):
+    """A grid of walk-forwards judged together."""
+    label: str
+    fit_ids: list[str]
+    specs: list[dict[str, Any]]            # algorithm + params
+    feature_sets: list[str]                # "screened", "all"
+    windows: dict[str, Any]                # {"kind": "yearly"|"quarterly", "first_test", "last_test_end"}
+    stage: int
+    status: str = "running"
+    leaderboard: dict[str, Any] | None = None
+
 class WalkForward(Entity):
-    """One walk-forward evaluation of a Fit and one model spec."""
+    """One Fit, one spec, one feature set, walked over windows."""
+    search_id: str | None = None
     fit_id: str
     algorithm: str
-    params: dict[str, Any]          # the model spec
-    query_params: dict[str, Any]    # the Fit's query parameters, minus start/end
-    train_start: date               # first row date used in training
-    first_test: date                # start of the first test window
-    last_test_end: date
-    step_months: int = 3            # test window length
-    embargo_sessions: int           # = horizon_sessions: no training target ends inside a test window
+    params: dict[str, Any]
+    features: list[str]
+    query_params: dict[str, Any]
+    train_start: date
+    embargo_sessions: int                  # = horizon: no training target ends inside a test window
     label: str
-    status: str = "running"         # running | done | failed
+    status: str = "running"
     windows: int = 0
-    predictions_path: str | None = None   # parquet/walkforward/<id>.parquet
-    summary: dict[str, Any] | None = None # IC per window, overall IC, rows
+    predictions_path: str | None = None    # parquet/walkforward/<id>.parquet
+    summary: dict[str, Any] | None = None  # IC per window, overall, rows
     error: str | None = None
 
 class WalkForwardWindow(Entity):
     walk_forward_id: str
     index: int
-    train_end: date                 # last row date with a target; = test_start minus embargo sessions
+    train_end: date                        # test_start minus embargo sessions
     test_start: date
     test_end: date
-    status: str = "queued"          # queued | running | done | failed
+    status: str = "queued"                 # queued | running | done | failed
     fit_run_id: str | None = None
     model_id: str | None = None
     infer_run_id: str | None = None
     error: str | None = None
 ```
 
-Windows for each horizon: test quarters 2023-Q1 … 2026-Q4 (the last one ends at the data's end),
-16 in all. Training is expanding: always from 2022-09-01 to `train_end`. The embargo makes the last
-training row's target end before the first test day: for 63 sessions, a quarter's gap.
-
-Reactions in `finance/ml/reactions.py`:
+### Reactions
 
 | Reaction | Input | What it does |
 |---|---|---|
-| `RunWalkForward` | `{fit_id, algorithm, params, first_test, last_test_end?, step_months?, label}` | Creates the WalkForward and its windows (status `queued`), defers one `RunWindow` per window with a budget of 30 minutes. Returns in seconds |
-| `RunWindow` | `{window_id}` | `RunFit` with `{"inline": true, "params": {"end": train_end}, "specs": [the one spec]}`, then `Infer` with `{"start": test_start, "end": test_end}` and label `wf <walk_forward_id> w<index>`; records the ids, status `done` or `failed` with the error |
-| `CloseWalkForward` | on `WalkForwardWindow.status` | When no window is `queued` or `running`: concatenates the windows' inference tables (key, `pred_y`, `y`, `r`, `scale`, `entry`, `exit_`, window index) into `parquet/walkforward/<id>.parquet`, publishes it, computes IC per window and overall, sets the WalkForward `done` (or `failed` if any window failed) |
+| `RunModelSearch` | `{label, fit_ids, specs, feature_sets, windows, stage}` | Creates the ModelSearch and one WalkForward per (Fit × spec × feature set) with its windows, defers one `RunWindow` per window. Returns in seconds |
+| `RunWindow` | `{window_id}` | `RunFit` with `{"inline": true, "params": {"end": train_end}, "specs": [one], "features": [...]}`, then `Infer` on the test range with `need_target` false; records ids; status `done` or `failed` |
+| `CloseWalkForward` | OnChange `WalkForwardWindow.status` | When its windows are all finished: one predictions file (key, `pred_y`, `y`, `r`, `scale`, `entry`, `exit_`, window), IC per window and overall, status |
+| `CloseModelSearch` | OnChange `WalkForward.status` | When the search's walk-forwards are all finished: the leaderboard (per horizon and target: IC, its t, worst window) and the shortlist for the next stage |
 
-Two small changes to existing reactions:
+Changes to existing reactions: `RunFit` gains `inline` (FitModel inside the run, so the window can
+score the model it just made), `specs` (fit a subset of the search) and `features` (a subset of the
+Fit's features).
 
-- `RunFit` gains `inline` (default false): `FitModel` is triggered immediately inside the run
-  instead of deferred, so `RunWindow` can score the model it just made. It also gains `specs` to
-  fit a subset of the Fit's search.
-- The daily rows drop every row whose exit lies beyond the data (`where entry is not null and exit_
-  is not null`), so the last h sessions of data get no forecast. A query parameter
-  `:need_target` (default true) keeps those rows with a null target when false; windows' `Infer`
-  sets it false, so the backtest has a forecast for every day it trades, including today. The
-  daily rows already carry `entry`, `exit_`, `r` and `scale`, which the backtest uses to check its
-  own fills.
+## 6. Phase 3: the portfolios
 
-### Evaluate per window
+### The account
 
-Each window's InferRun is evaluated with the existing metrics (`ic`, `ic_se`, `calibration_slope`,
-`spread_topk` with `group = ts`), and `CloseWalkForward` stores the per-window IC table in the
-WalkForward's `summary`. This answers "is there a signal at this horizon, and is it stable across 16
-quarters" before any money is simulated.
+A pure function in `finance/ml/backtest.py`: scores by date and stock, prices, rules and a cost
+schedule in; daily equity, trades and holdings out. No runtime, fully tested.
 
-## 5. The backtest
+- **Decision and fills.** A rebalance is decided after day t's close from forecasts made with data
+  to t's close; orders fill at t+1's open, sells first, then buys with the cash.
+- **Prices.** Unadjusted fills, what one actually pays. A split or bonus during a hold multiplies the
+  shares by the factor from `adj_factors`; value is unchanged on the ex-date. No dividends.
+- **Whole shares and affordability.** Shares = floor(allocation ÷ (price × (1 + slippage))). On a
+  rebalance the ranking is taken over affordable stocks only (one share within the allocation);
+  leftover cash stays as cash and earns nothing.
+- **Charges.** Every order through the cost module; the depository charge once per stock per sale day.
+- **Missing prices and delistings.** Held until it trades; sold at the last close if it never does.
+- **Survivorship.** Each day's universe is the stocks with rows that day; nothing from today is
+  applied to the past.
+
+### Rules and the grid at ₹10,000
+
+| Rule | Values searched | Meaning |
+|---|---|---|
+| `top_n` | 1, 2, 3, 4, 5, 6, 8, 10 | Stocks held when full. Phase 1 may narrow this |
+| `rebalance` | every 5, 10, 21, 42, 63, 126 sessions | When the portfolio may change |
+| `exit` | `band`, `fixed`, `score`, `stop` | `band`: keep while rank ≤ B, sell below. `fixed`: sell all and re-pick each rebalance. `score`: sell when the calibrated forecast turns negative. `stop`: band plus a sell after a close 8 % below cost or 20 % above, checked daily |
+| `band` | B = N, 1.5N, 2N, 3N | Only for `band` and `stop` |
+| `min_hold` | 0, 1 rebalance | A new holding cannot be sold at the next rebalance |
+| `slippage_bps` | 5 (selection); 0, 5, 10 (confirmation) | Against the trader on every fill |
+
+8 × 6 × (1 + 1 + 4 + 4) × 2 = 960 rule combinations per source. Sources: the 60 stage-2 forecasts
+(their 2023–2024 predictions) and the 4 baselines, so about 61,000 account simulations. Each is a
+pass over about 500 trading days; the grid runs in-process per source, not one run per combination.
+
+### Baselines (no model)
+
+| Baseline | Ranking | Purpose |
+|---|---|---|
+| `niftybees` | NIFTYBEES bought once with all the capital, held | What a ₹10,000 investor does instead |
+| `index` | Nifty 50 and Nifty 500 price indices | The market itself, without costs |
+| `equal_weight` | Random draw of N affordable stocks each rebalance, averaged over 50 draws | What picking without skill earns under the same rules and costs |
+| `momentum_12_1` | `mom_12_1` | The best-known simple rule |
+| `low_vol` | −`vol_120d` | The other one |
 
 ### Entities
 
 ```python
-class BacktestRun(Entity):
-    """One simulated account."""
-    source: dict[str, Any]          # {"walk_forward_id": ...} | {"baseline": "momentum_12_1" | "low_vol" | "equal_weight" | "index", "index": "Nifty 50"}
-    rules: dict[str, Any]           # see the table below
-    costs: str                      # cost schedule name, e.g. "zerodha_2026_delivery"
-    start: date
-    end: date
+class BacktestGrid(Entity):
+    """Every rule combination for one source, capital and period, evaluated in one run."""
+    source: dict[str, Any]       # {"walk_forward_id": ...} | {"baseline": ...}
     capital: float
-    status: str = "running"         # running | done | failed
-    equity_path: str | None = None  # parquet/backtests/<id>_equity.parquet: date, value, cash, invested, charges_to_date
-    trades_path: str | None = None  # parquet/backtests/<id>_trades.parquet: date, symbol, side, shares, price, value, charges
-    summary: dict[str, Any] | None = None
-    sweep_id: str | None = None
+    costs: str                   # e.g. "zerodha_2026_delivery"
+    period: dict[str, str]
+    grid: dict[str, Any]         # the values of each rule
+    status: str = "running"
+    results_path: str | None = None   # parquet/backtests/grid_<id>.parquet: one row per combination
+    best: dict[str, Any] | None = None
     error: str | None = None
 
-class BacktestSweep(Entity):
-    """A grid of BacktestRuns judged together."""
-    label: str
-    selection_period: dict[str, str]    # {"start": "2023-01-01", "end": "2024-12-31"}
-    confirmation_period: dict[str, str] # {"start": "2025-01-01", "end": "2026-10-23"}
-    runs: int = 0
+class BacktestRun(Entity):
+    """One account, kept in full: the chosen configurations and their confirmations."""
+    source: dict[str, Any]
+    rules: dict[str, Any]
+    costs: str
+    capital: float
+    start: date
+    end: date
     status: str = "running"
-    table: dict[str, Any] | None = None # the comparison, per run and per period
+    equity_path: str | None = None    # date, value, cash, invested, charges_to_date
+    trades_path: str | None = None    # date, symbol, side, shares, price, value, charges
+    summary: dict[str, Any] | None = None
+    error: str | None = None
 ```
-
-### Rules
-
-| Rule | Values | Meaning |
-|---|---|---|
-| `rebalance` | `weekly` (every 5 sessions), `monthly` (21), `quarterly` (63) | Days on which the portfolio may change |
-| `top_n` | 10, 20 | Stocks bought when the portfolio fills |
-| `exit` | `band` (default), `fixed`, `score`, `stop` | How a holding is sold, below |
-| `band` | B = 2 × top_n by default | `band`: keep while rank ≤ B, sell when rank > B |
-| `stop_loss`, `take_profit` | e.g. 0.08, 0.15 | `stop`: band rule plus a sell at the next open after a close beyond either |
-| `weighting` | `equal` | Each new position gets cash ÷ open slots; holdings are not trimmed back to equal weight (trimming costs a sale) |
-| `slippage_bps` | 0, 5, 10 per trade | Against the trader on every fill |
-| `max_position_turnover` | 2 % of the stock's 20-session median turnover | A position larger than this is cut to it; a stock too thin for even one share is skipped |
-
-`fixed` sells every holding at each rebalance and buys the new top N (the honest "re-pick" rule).
-`score` sells when the stock's forecast falls below zero after rescaling by the walk-forward's
-calibration slope.
-
-### Mechanics
-
-- **Decision and fills.** A rebalance is decided after day t's close from the forecasts made at t,
-  which use only data to t's close. Orders fill at day t+1's open: sells first, then buys with the
-  cash. Prices are unadjusted (what one actually pays); a split or bonus between the buy and the
-  sale multiplies the shares held by the factor from `adj_factors`, so the value is unchanged on the
-  ex-date. Dividends are not credited; the doc's results will state this and the benchmark uses the
-  price index for the same reason.
-- **Whole shares.** Shares = floor(allocation ÷ price × (1 + slippage)). Leftover cash stays as cash
-  and earns nothing.
-- **Missing prices.** A held stock with no price on a rebalance day is held until it trades; a stock
-  delisted for good is sold at its last close with a flag in the trades file.
-- **Charges.** Every order is charged by the cost module (§6) at its own value; the depository
-  charge is once per stock per sale day.
-- **Survivorship.** The universe on each day is the stocks with rows that day; delisted stocks stay
-  in the history. No list from today is applied to the past.
-
-### Baselines (no model)
-
-| Baseline | Score used for ranking | Purpose |
-|---|---|---|
-| `index` | Nifty 50 or Nifty 500 price index, bought once | What doing nothing earns |
-| `equal_weight` | Every liquid stock, equal weight, rebalanced at the same pace, charged | The market as the backtest sees it |
-| `momentum_12_1` | `mom_12_1` | The best-known simple stock-picking rule |
-| `low_vol` | −`vol_120d` | The other well-known one |
-
-Baselines use the same rules and costs as the model portfolios, so the comparison is like for like.
 
 ### Reactions
 
 | Reaction | Input | What it does |
 |---|---|---|
-| `RunBacktest` | `{source, rules, costs, start, end, capital, sweep_id?}` | Loads the scores (the WalkForward's predictions file, or the baseline's SQL over the daily rows) and prices through DuckDB, runs the account in `finance/ml/backtest.py` (a pure function of scores, prices and rules, no runtime), writes the equity and trades files, publishes them, fills `summary` |
-| `RunBacktestSweep` | `{label, sources, grid, costs, capital, periods}` | Creates a BacktestSweep and defers one `RunBacktest` per (source × grid point × period) |
-| `CloseBacktestSweep` | on `BacktestRun.status` | When the sweep's runs are all done: the comparison table into the sweep row, and as markdown in its vars |
+| `RunBacktestGrid` | `{sources, capitals, period, grid, costs}` | Defers one `BacktestGridSource` per (source × capital). Returns in seconds |
+| `BacktestGridSource` | `{grid_id}` | Loads scores and prices through DuckDB; runs every combination; writes the results file; publishes it |
+| `SelectPortfolio` | `{grid_ids, criterion}` | Over the selection period only: the best configuration by excess return over the matching `equal_weight` baseline, net of everything, with its t-statistic; also the top 20; writes them to its vars |
+| `RunBacktest` | `{source, rules, costs, capital, start, end}` | One account in full, for the chosen configurations and the confirmation |
 
-### Summary of a run
+### Summary of an account
 
-`summary` holds, for the run's period and per calendar year: end value, CAGR, annualised volatility,
-Sharpe (risk-free rate 6.5 %), max drawdown and its dates, return of the matching benchmark, excess
-return and its t-statistic over months, months beating the benchmark, turnover (₹ traded ÷ average
-equity, per year), charges paid (₹ and % of average equity per year), average holding period,
-number of trades, and the share of positions cut by the turnover limit.
+End value, CAGR, volatility, Sharpe (risk-free 6.5 %), max drawdown and dates, return of NIFTYBEES
+and of the matching equal-weight baseline, excess return and its t-statistic over months, months
+beating NIFTYBEES, turnover, charges paid (₹ and % of capital per year), cash drag, average holding
+period, number of trades, and per calendar year.
 
-## 6. Costs
+## 7. Selection and the pass bar
 
-A new module `finance/ml/costs.py` with the schedule the owner pasted from Zerodha's charges page
-on 2026-10-25, one function per segment returning the ₹ charges for one executed order:
+With about 1,250 models and 61,000 account configurations, the best one in any period will look
+excellent by luck. The protocol:
+
+1. Models are chosen by IC on 2023–2024 (§5). Their 2025–2026 forecasts are made but not looked at.
+2. Portfolios are chosen on 2023–2024 only, by `SelectPortfolio`. The choice, and the top 20, are
+   committed to the results document **before** any 2025–2026 account is run.
+3. The chosen configuration and the top 20 are run unchanged on 2025-01-01 to 2026-10-23.
+4. Reported: the chosen one's result; the distribution of the top 20's results (if the best in
+   selection is ordinary in confirmation, that is overfitting and is stated as such); the rank
+   correlation between selection and confirmation results across all 61,000 configurations.
+
+**The pass bar, set now:** at ₹10,000, in 2025-01 to 2026-10, after charges and 5 bps slippage, the
+chosen portfolio ends above NIFTYBEES bought once with ₹10,000, and above its equal-weight baseline,
+with a positive t-statistic on monthly excess return. Anything less is reported as a failure.
+
+## 8. Costs
+
+A new module `finance/ml/costs.py` with the schedule the owner pasted from Zerodha's charges page on
+2026-10-25, one function per segment returning the ₹ charges for one executed order:
 
 | Item | Delivery (CNC) | Intraday (MIS) | Futures |
 |---|---|---|---|
@@ -255,72 +313,59 @@ on 2026-10-25, one function per segment returning the ₹ charges for one execut
 | GST | 18 % on brokerage + exchange + SEBI | same | same |
 | Depository (DP) | ₹15.34 + GST per stock per sale day | – | – |
 
-The DP charge is not on the pasted page; it is Zerodha's published CDSL charge and is flagged as
-an assumption to confirm. Tests check the module against two worked examples from Zerodha's
-brokerage calculator, entered by hand into the test.
+The DP charge is not on the pasted page; it is Zerodha's published CDSL charge and is flagged as an
+assumption to confirm. Tests check the module against worked examples from Zerodha's brokerage
+calculator, entered by hand.
 
-## 7. The experiment
-
-1. Register the three Fits; run `Screen` for the new features; finalise the feature lists.
-2. Six walk-forwards: 3 horizons × {xgboost, ridge}, label `wf r3`.
-3. Read the per-window IC tables. A horizon whose IC is not positive in most windows stops here.
-4. `RunBacktestSweep` over: sources {the surviving walk-forwards, 4 baselines} × rebalance {weekly,
-   monthly, quarterly} × top_n {10, 20} × exit {band, fixed} × slippage {5 bps}, capital ₹10 lakh
-   and ₹1 lakh, in the selection period 2023-01-01 to 2024-12-31.
-5. Choose the configuration with the best risk-adjusted excess return over the equal-weight
-   baseline in the selection period, and write the choice into the results doc before step 6.
-6. Run that one configuration, unchanged, on 2025-01-01 to 2026-10-23, with slippage 0, 5 and 10.
-7. Write the results: the selection table, the confirmation result, the stop/score exit variants as
-   a robustness check, and the per-window ICs.
-
-The pass bar, set now: in the confirmation period, after charges and 5 bps slippage, the chosen
-portfolio beats both Nifty 500 and the equal-weight baseline, with a positive excess-return
-t-statistic, at ₹1 lakh capital. Anything less is reported as a failure.
-
-## 8. Tests
+## 9. Tests
 
 | Test | Checks |
 |---|---|
-| `test_walk_forward_windows` | Window boundaries, embargo by sessions not days, no training row's exit date on or after its window's test start |
-| `test_walk_forward_end_to_end` | On the synthetic mirror: RunWalkForward → windows done → CloseWalkForward writes one predictions file with every window's rows |
+| `test_walk_forward_windows` | Window boundaries, embargo in sessions, no training target's exit on or after its window's test start |
+| `test_walk_forward_end_to_end` | Synthetic mirror: RunModelSearch → windows → CloseWalkForward → CloseModelSearch leaderboard |
+| `test_runfit_inline_specs_features` | RunFit fits only the given spec and features, inside the run |
 | `test_costs_schedule` | Each segment against hand-entered calculator examples; DP charge once per stock per sale day |
 | `test_backtest_known_outcome` | Synthetic prices where the top-ranked stock rises 1 % a day: exact end value after charges |
-| `test_backtest_band_rule` | A stock moving from rank 3 to rank 15 with N = 10, B = 20 is held; to rank 25 is sold |
-| `test_backtest_split` | A 1:2 split mid-hold doubles shares and leaves value unchanged |
-| `test_backtest_whole_shares_and_cash` | Allocation below one share skips the stock; leftover cash carries |
+| `test_backtest_band_rule` | Rank 3 → 15 with N = 10, B = 20 is held; → 25 is sold |
+| `test_backtest_split` | A 1:2 split mid-hold doubles shares, value unchanged |
+| `test_backtest_affordability_and_cash` | A stock dearer than the allocation is passed over; leftover cash carries |
 | `test_backtest_fills_next_open` | Decisions at t fill at t+1's open, never at t's close |
-| `test_baselines_same_rules` | A baseline and a model source with identical scores give identical runs |
+| `test_backtest_stop_rule` | Stop-loss and take-profit trigger on the close and fill the next open |
+| `test_grid_matches_single_runs` | A combination's row in a grid equals the same combination run alone |
 | `test_daily_rows_adjusted` | The daily rows' returns are continuous across a split |
+| `test_need_target_false` | The last h sessions appear with a null target |
 
-## 9. What changes where
+## 10. What changes where
 
 | File | Change |
 |---|---|
-| `apps/finance/src/finance/ml/forecast.py` | Daily rows on adjusted prices; the slow features; `daily_fit_definition` for 63 sessions |
-| `apps/finance/src/finance/ml/entities.py` | WalkForward, WalkForwardWindow, BacktestRun, BacktestSweep |
-| `apps/finance/src/finance/ml/reactions.py` | RunWalkForward, RunWindow, CloseWalkForward, RunBacktest, RunBacktestSweep, CloseBacktestSweep; `inline` and `specs` on RunFit |
-| `apps/finance/src/finance/ml/backtest.py` | New: the account simulation as a pure function |
+| `apps/finance/src/finance/ml/forecast.py` | Daily rows on adjusted prices; slow features; raw-return target; `need_target` |
+| `apps/finance/src/finance/ml/entities.py` | ModelSearch, WalkForward, WalkForwardWindow, BacktestGrid, BacktestRun |
+| `apps/finance/src/finance/ml/reactions.py` | RunModelSearch, RunWindow, CloseWalkForward, CloseModelSearch, RunBacktestGrid, BacktestGridSource, SelectPortfolio, RunBacktest; `inline`, `specs`, `features` on RunFit |
+| `apps/finance/src/finance/ml/backtest.py` | New: the account, the grid, the baselines |
 | `apps/finance/src/finance/ml/costs.py` | New: the cost schedules |
-| `apps/finance/src/finance/triggers.py` | OnChange for WalkForwardWindow.status and BacktestRun.status |
-| `apps/finance/migrations/` | The four new tables |
-| `apps/finance/fits/round3/` | Three Fit JSONs |
-| `apps/finance/tests/` | §8 |
-| `docs/finance-ml.md` | The walk-forward and backtest sections |
+| `apps/finance/src/finance/ml/estimators/` | lightgbm `fit_batches` streams like xgboost (it concatenates today); fine at 1.4 million rows |
+| `apps/finance/src/finance/triggers.py` | OnChange for WalkForwardWindow.status and WalkForward.status |
+| `apps/finance/migrations/` | The five new tables |
+| `apps/finance/fits/round3/` | Twelve Fit JSONs |
+| `apps/finance/tests/` | §9 |
+| `docs/finance-ml.md` | The walk-forward, search and backtest sections |
 
-Order of PRs: costs and backtest with baselines (testable without any model), then the walk-forward,
-then the Fits and the experiment, then the results document.
+Order of PRs:
 
-## 10. Open questions for review
+1. Costs, the account, baselines and `RunBacktestGrid`; then **Phase 1 is run and its results
+   written** (the capital study needs no model).
+2. Adjusted daily rows, the new features and targets, the Fits and the screen.
+3. Walk-forward and model search; stages 1 to 3 run overnight.
+4. Portfolio grid, selection, confirmation; the results document.
 
-1. **Capital levels.** ₹1 lakh and ₹10 lakh proposed. With N = 20, ₹1 lakh is ₹5,000 a stock and
-   the DP charge is 0.36 % per sale; is ₹1 lakh the size that matters, or a larger one?
-2. **N and the band.** 10 and 20 stocks, band at 2N. Narrower bands trade more; wider ones hold
-   losers longer.
-3. **Dividends.** Ignored on both sides for now. NSE corporate actions carry dividends; crediting
-   them is a follow-up that raises every portfolio's return by about 1 % a year.
-4. **Short side.** Out of scope: delivery cannot short overnight, and stock futures cover about 200
-   names. A long-only portfolio against the index is the test.
-5. **Model specs.** One xgboost spec fixed in advance, plus the ridge. A small search inside each
-   window is possible but multiplies fits by four.
-6. **The US.** The same machinery runs on US daily rows with a US cost schedule; proposed as a
-   second step, not part of this build.
+## 11. Open questions for review
+
+1. **Capitals in the study.** ₹2,000 to ₹10 lakh, focused on ₹10,000. Anything else to include?
+2. **Compute.** About a day of worker time for the model search, run overnight, one fit at a time;
+   the portfolio grid a few hours. Acceptable, or narrower?
+3. **Affordability bias.** At ₹10,000 the portfolio can only hold stocks priced under capital ÷ N,
+   so it leans to low-priced stocks. The baselines carry the same restriction, so the comparison is
+   fair; the result will not generalise to large accounts.
+4. **The US.** The same machinery runs on US daily rows with a US cost schedule; proposed as a
+   later step, not part of this build.
