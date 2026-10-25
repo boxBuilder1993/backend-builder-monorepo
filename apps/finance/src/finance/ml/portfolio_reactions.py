@@ -24,7 +24,8 @@ from finance.ml import backtest as B
 from finance.ml import costs as C
 from finance.ml import portfolio as P
 from finance.ml.entities import BacktestGrid, BacktestRun
-from finance.ml.reactions import PublishArtifact, PullStore
+from finance.ml.reactions import PublishArtifact
+from finance.reactions import PullStore
 
 GRID_BUDGET = 3 * 3600
 DEFAULT_COSTS = C.DELIVERY.name
