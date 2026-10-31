@@ -89,6 +89,7 @@ async def run(
                 triggers,
                 state,
                 source,
+                records,
             )
     except TimeoutError:
         outcome, error = "timeout", f"TimeoutError: budget of {timeout}s exhausted"
@@ -143,11 +144,13 @@ async def _attempts(
     triggers: Sequence[Trigger],
     state: _RunState,
     source: str,
+    records: RecordLevel,
 ) -> Context:
     for attempt in range(1, attempts + 1):
         session = Session(store, triggers=triggers, default_timeout=timeout)
         ctx = Context(session, input, reaction_id=reaction_id, source=source)
         ctx.trace.attempt = attempt
+        ctx.trace.capture = records == "full"
         state.attempts = attempt
         state.traces.append(ctx.trace)
         state.session = session
@@ -208,7 +211,12 @@ async def _record(
     full = level == "full"
 
     def payload(value: Any) -> dict[str, Any] | None:
+        """Encode now: used for the seed's input, which is captured at run start."""
         return redact(safe_jsonable(value)) if full else None
+
+    def snapshot(value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Already encoded by ``invoke`` when the invocation ended; just redact."""
+        return redact(value) if full and value is not None else None
 
     committed = session is not None and outcome == "ok"
     rows: list[RunRecord] = []
@@ -231,8 +239,8 @@ async def _record(
                     started_at=inv.started_at,
                     duration_ms=inv.duration_ms,
                     flush_ms=None,
-                    input=payload(inv.input),
-                    vars=payload(inv.vars),
+                    input=snapshot(inv.input),
+                    vars=snapshot(inv.vars),
                     changes=_own_changes(inv.created, inv.deleted),
                     enqueued=list(inv.enqueued) if committed and last else [],
                 )
@@ -274,7 +282,7 @@ async def _record(
             duration_ms=(time.perf_counter() - state.clock) * 1000,
             flush_ms=flush.duration_ms if flush is not None and committed else None,
             input=payload(input),
-            vars=payload(seed.vars if seed is not None else (root.vars if root else {})),
+            vars=snapshot(seed.vars) if seed is not None else payload(root.vars if root else {}),
             changes=changes,
             enqueued=list(session.enqueued) if committed and session is not None else [],
             deadline_at=state.deadline_at,

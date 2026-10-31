@@ -121,7 +121,7 @@ class UpdateLine(Reaction):
         ctx.save("line", line)
 ```
 
-**Input** is `ctx.input`, a `dict[str, Any]`. The reaction defines its own shape and documents it in its docstring. Inputs that arrive through the outbox must be JSON-encodable; inputs built in-process may hold anything.
+**Input** is `ctx.input`, a read-only mapping that is this invocation's own copy: assigning to it raises, and a child's input is never the parent's object. Nested values are not frozen; treat them as read-only anyway. The reaction defines its own shape and documents it in its docstring. Inputs that arrive through the outbox must be JSON-encodable; inputs built in-process may hold anything.
 
 **Output** is whatever the reaction wrote to the store, plus anything it `ctx.save`d. A reaction has no return value; its caller reads what it saved from the context `trigger` returns, and the response builder reads the root's.
 
@@ -177,7 +177,7 @@ await ctx.trigger(Reaction, input, timeout=None) -> Context       # now, same se
 await ctx.trigger(Reaction, input, deferred=True, timeout=None)   # after commit, by a worker
 ```
 
-`vars` belong to one invocation and are not persisted as data; they are where a reaction leaves things for its caller or, on the root, for the response builder, and they are stored on the invocation's run record so the console can show them. Keep it small and JSON-friendly where you can; anything else is stored as its `repr`.
+`vars` belong to one invocation and are not persisted as data; they are where a reaction leaves things for its caller or, on the root, for the response builder. They are encoded into the invocation's run record the moment the reaction returns, so the record shows what you saved then. Save ids and small JSON-friendly values; anything else is encoded as its `repr`, costs time on every invocation, and is your problem. Keep it small and JSON-friendly where you can; anything else is stored as its `repr`.
 
 ## 6. Reading and writing
 

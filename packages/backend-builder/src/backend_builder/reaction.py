@@ -98,7 +98,10 @@ async def _invoke(reaction: type[Reaction], ctx: Context) -> None:
         )
         raise
     finally:
+        from backend_builder.records import safe_jsonable
+
         span = ctx.trace.spans[-1]
+        capture = ctx.trace.capture
         ctx.trace.invocations.append(
             Invocation(
                 reaction=qualified_name(reaction),
@@ -109,8 +112,8 @@ async def _invoke(reaction: type[Reaction], ctx: Context) -> None:
                 duration_ms=span.duration_ms,
                 outcome=outcome,
                 error=error,
-                input=ctx.input,
-                vars=dict(ctx.vars),
+                input=safe_jsonable(dict(ctx.input)) if capture else None,
+                vars=safe_jsonable(dict(ctx.vars)) if capture else None,
                 created=list(ctx.created),
                 deleted=list(ctx.deleted),
                 enqueued=list(ctx.enqueued),
