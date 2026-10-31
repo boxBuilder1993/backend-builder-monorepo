@@ -488,7 +488,10 @@ async def test_logs_are_structured_collected_by_loki_and_shown_per_run(
         values = [v for stream in found.json()["data"]["result"] for v in stream["values"]]
         assert any("notify requested" in v[1] for v in values)
         labels = await loki.get("/loki/api/v1/labels")
-        assert set(labels.json()["data"]) <= {"app", "process", "service_name"}  # never ids
+        # Ids live inside the line, never as labels (docs/logs.md §2). Other sources, the
+        # host's journal tailer for one, may add bounded labels of their own.
+        assert {"root_id", "reaction_id"}.isdisjoint(labels.json()["data"])
+        assert {"app", "process"} <= set(labels.json()["data"])
 
     # The console shows the same lines on the run's page.
     async with AsyncClient(base_url=stack.admin_url, timeout=10) as admin:
