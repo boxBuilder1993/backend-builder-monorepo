@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -355,3 +356,64 @@ async def test_postgres_shows_the_running_row_mid_run_and_sweeps_lost_ones(
         "select outcome, error from _run where id = :id", id=ctx.reaction_id
     )
     assert row["outcome"] == "lost" and "stopped reporting" in row["error"]
+
+
+# --- snapshots at invocation end, inputs frozen ---------------------------------------------------
+
+
+class SaveAccount(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        account = await ctx.get_by_id(Account, ctx.input["id"])
+        assert account is not None
+        ctx.save("seen", account)
+        ctx.save("balance", account.balance)
+
+
+class MutateAfterChild(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        account = ctx.create(Account, owner="a", balance=1)
+        child = await ctx.trigger(SaveAccount, {"id": account.id})
+        assert child is not None and child.load("seen") is account  # live object for the parent
+        account.balance = 99  # after the child returned
+        ctx.save("seen", account)
+
+
+async def test_a_childs_record_holds_what_it_saved_when_it_returned() -> None:
+    store = InMemoryStore()
+    await run(store, MutateAfterChild, {})
+    child = next(r for r in store.records if r.reaction.endswith("SaveAccount"))
+    root = next(r for r in store.records if r.is_root)
+    assert child.vars is not None and child.vars["seen"]["balance"] == 1
+    assert child.vars["balance"] == 1
+    assert root.vars is not None and root.vars["seen"]["balance"] == 99
+    assert (await store.get_by_id(Account, child.vars["seen"]["id"])).balance == 99  # type: ignore[union-attr]
+
+
+class Tamper(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        ctx.input["k"] = "changed"  # type: ignore[index]
+
+
+class PassesOwnDict(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        payload: dict[str, Any] = {"k": "original"}
+        child = await ctx.trigger(Echo, payload)
+        payload["k"] = "mutated by parent afterwards"
+        assert child is not None
+        ctx.save("child_saw", child.load("k"))
+        ctx.save("child_input_now", dict(child.input))
+
+
+class Echo(Reaction):
+    async def calculate(self, ctx: Context) -> None:
+        ctx.save("k", ctx.input["k"])
+
+
+async def test_input_is_read_only_and_the_child_gets_its_own_copy() -> None:
+    store = InMemoryStore()
+    with pytest.raises(TypeError):
+        await run(store, Tamper, {"k": "v"}, max_attempts=1)
+    ctx = await run(store, PassesOwnDict, {})
+    assert ctx.load("child_saw") == "original"
+    assert ctx.load("child_input_now") == {"k": "original"}
+    assert dict(ctx.input) == {} and ctx.input.get("missing") is None

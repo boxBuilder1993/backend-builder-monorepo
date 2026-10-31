@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -31,7 +32,7 @@ class Context:
     def __init__(
         self,
         session: Session,
-        input: dict[str, Any],
+        input: Mapping[str, Any],
         *,
         reaction_id: str | None = None,
         parent_reaction_id: str | None = None,
@@ -42,7 +43,10 @@ class Context:
     ) -> None:
         self._session = session
         self._secrets = secrets if secrets is not None else _secrets.default
-        self.input = input
+        self.input: Mapping[str, Any] = MappingProxyType(dict(input))
+        """This invocation's input, read-only at the top level: assigning or
+        deleting a key raises ``TypeError``. A copy of what the caller passed,
+        so neither side can reach the other's. Nested values are not frozen."""
         self.reaction_id = reaction_id or str(uuid4())
         self.parent_reaction_id = parent_reaction_id
         self.root_id = root_id or self.reaction_id
@@ -110,7 +114,7 @@ class Context:
     async def trigger(
         self,
         reaction: type[Reaction],
-        input: dict[str, Any],
+        input: Mapping[str, Any],
         *,
         deferred: bool = False,
         timeout: float | None = None,
@@ -135,7 +139,7 @@ class Context:
         from backend_builder.reaction import invoke, qualified_name
 
         if deferred:
-            row_id = self._session.defer(qualified_name(reaction), input, timeout=timeout)
+            row_id = self._session.defer(qualified_name(reaction), dict(input), timeout=timeout)
             self.enqueued.append(row_id)
             return None
         child = Context(

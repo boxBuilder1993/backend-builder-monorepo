@@ -46,8 +46,12 @@ class Invocation:
     outcome: str
     """``ok``, ``error`` or ``timeout``."""
     error: str | None
-    input: dict[str, Any]
-    vars: dict[str, Any]
+    input: dict[str, Any] | None
+    """The input as JSON, encoded the moment the reaction returned; None when
+    the trace does not capture payloads."""
+    vars: dict[str, Any] | None
+    """What the invocation saved, as JSON, encoded the moment it returned, so
+    a later mutation of a shared entity by the parent never shows here."""
     created: list[tuple[str, str]]
     """``(table, id)`` per row created through this context."""
     deleted: list[tuple[str, str]]
@@ -62,6 +66,9 @@ class Trace:
     """Every invocation of this attempt, in completion order."""
     attempt: int = 1
     """Which run attempt this trace belongs to."""
+    capture: bool = True
+    """Whether invocations snapshot their input and vars; false at the
+    ``summary`` and ``off`` record levels, so nothing is encoded for nothing."""
 
     @contextmanager
     def span(self, name: str, reaction_id: str, parent_reaction_id: str | None) -> Generator[None]:
