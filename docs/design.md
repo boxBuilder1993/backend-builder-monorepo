@@ -341,7 +341,7 @@ Autogenerate sees a renamed field as drop plus add. The generated file is review
 
 Log collection, retention and the console's per-run log view are designed in [logs.md](logs.md).
 
-Compute pools, service calls and the Kubernetes deployment are designed in [pools.md](pools.md).
+Compute pools, pollers, profiles, service calls and the Kubernetes deployment are designed in [pools.md](pools.md).
 
 Each of these was designed in the earlier draft and is parked, with what has to exist first.
 
