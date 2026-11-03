@@ -313,3 +313,31 @@ def test_fit_job_falls_back_to_cpu_on_cuda_out_of_memory(
     done = fitting.fit_job(job)
     assert calls == ["cuda", "cpu"] and done.device == "cpu"
     assert artifacts.load(tmp_path / "m")[2]["device"] == "cpu"
+
+
+def test_ic_groups_by_a_list_of_columns() -> None:
+    from datetime import datetime
+
+    rng = np.random.default_rng(0)
+    rows: list[dict[str, Any]] = []
+    for d in range(30):
+        for h in (1, 5):
+            for _ in range(25):
+                y = rng.normal()
+                rows.append(
+                    {
+                        "ts": datetime(2026, 1, 1 + d),
+                        "h": h,
+                        "y": y,
+                        "pred_y": y * (1 if h == 1 else -1) + rng.normal(),
+                    }
+                )
+    t = pl.DataFrame(rows)
+    pos = metrics.evaluate(t.filter(pl.col("h") == 1), ["y"], ["ic"], {"group": ["ts", "h"]})[
+        "ic.y"
+    ]
+    both = metrics.evaluate(t, ["y"], ["ic", "ic_points"], {"group": ["ts", "h"]})
+    assert (
+        pos > 0.5 and abs(both["ic.y"]) < 0.15 and both["ic_points.y"] == 60
+    )  # opposite signs cancel
+    assert metrics.evaluate(t, ["y"], ["ic_points"], {"group": "ts"})["ic_points.y"] == 30

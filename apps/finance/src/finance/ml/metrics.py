@@ -89,15 +89,23 @@ def table_metric(name: str) -> Callable[[TableMetric], TableMetric]:
     return deco
 
 
+def _group(params: dict[str, Any]) -> list[str]:
+    """The decision-point columns: ``group`` as a name or a list of names (default ts; a pooled
+    Fit over hold durations groups by ts and h so durations are never ranked against each other)."""
+    g = params.get("group", "ts")
+    return [str(x) for x in g] if isinstance(g, list | tuple) else [str(g)]
+
+
 def _per_point(table: pl.DataFrame, col: str, params: dict[str, Any]) -> pl.Series:
     """Spearman correlation of truth and prediction within each decision point (params: group,
     default ts; min_cross_section, default 20 rows for a point to count)."""
-    group = str(params.get("group", "ts"))
+    group = _group(params)
     least = int(params.get("min_cross_section", 20))
-    if group not in table.columns:
-        raise ValueError(f"ic needs the column {group!r} in the table")
+    missing = [g for g in group if g not in table.columns]
+    if missing:
+        raise ValueError(f"ic needs the columns {missing} in the table")
     per = (
-        table.select([pl.col(group), pl.col(col), pl.col(f"pred_{col}")])
+        table.select([*(pl.col(g) for g in group), pl.col(col), pl.col(f"pred_{col}")])
         .drop_nulls()
         .group_by(group)
         .agg(
@@ -197,11 +205,11 @@ def _topk(table: pl.DataFrame, col: str, params: dict[str, Any]) -> pl.DataFrame
     """The rows a cross-sectional consumer would take: the ``top_k`` (default 5) highest predictions
     within each decision point (``group``, default ts), among the points with at least
     ``min_cross_section`` rows. Independent of calibration: a ranking, not a threshold."""
-    group = str(params.get("group", "ts"))
+    group = _group(params)
     k = int(params.get("top_k", 5))
     least = int(params.get("min_cross_section", 20))
     rc = str(params.get("return_column", "r"))
-    need = [group, rc, f"pred_{col}"]
+    need = [*group, rc, f"pred_{col}"]
     missing = [c for c in need if c not in table.columns]
     if missing:
         raise ValueError(f"top-k metrics need the columns {missing} in the table")

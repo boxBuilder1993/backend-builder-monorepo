@@ -16,6 +16,9 @@ from finance.ml import data, forecast
 
 DAYS = [date(2025, 6, 2), date(2025, 6, 3)]
 SYMBOLS = ["AAA", "BBB", "CCC"]
+SPLIT_SYMBOL = "SPL"
+"""A daily-only symbol (no minute bars) with a 1:2 split, for the adjusted-price rows."""
+SPLIT_DAY = DAYS[0] - timedelta(days=20)
 
 
 def _bars(day: date, symbol: str, seed: int, thin: bool = False) -> pl.DataFrame:
@@ -80,7 +83,9 @@ def synthetic_mirror(
     daily_days = [DAYS[0] - timedelta(days=d) for d in range(40, 0, -1)] + DAYS
     rows: list[dict[str, object]] = []
     for i, d in enumerate(daily_days):
-        for s in SYMBOLS:
+        for s in [*SYMBOLS, SPLIT_SYMBOL]:
+            # SPLIT_SYMBOL has a 1:2 split (factor 0.5) effective SPLIT_DAY: raw prices halve
+            half = 0.5 if (s == SPLIT_SYMBOL and d >= SPLIT_DAY) else 1.0
             rows.append(
                 {
                     "date": d,
@@ -88,10 +93,10 @@ def synthetic_mirror(
                     "symbol": s,
                     "series": "EQ",
                     "instrument": None,
-                    "open": 100.0,
-                    "high": 101.0,
-                    "low": 99.0,
-                    "close": 100.0 + i,
+                    "open": 100.0 * half,
+                    "high": 101.0 * half,
+                    "low": 99.0 * half,
+                    "close": (100.0 + i) * half,
                     "last": None,
                     "prev_close": None,
                     "volume": 1000,
@@ -130,6 +135,22 @@ def synthetic_mirror(
     )
     ref = root / "parquet/reference"
     ref.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "ex_date": [SPLIT_DAY],
+            "record_date": [SPLIT_DAY],
+            "isin": [f"IN{SPLIT_SYMBOL}"],
+            "symbol": [SPLIT_SYMBOL],
+            "series": ["EQ"],
+            "company": ["split co"],
+            "face_value": [1.0],
+            "subject": [
+                "Face Value Split (Sub-Division) - From Rs 2/- Per Share To Re 1/- Per Share"
+            ],
+            "kind": ["split"],
+            "factor": [0.5],
+        }
+    ).write_parquet(ref / "corp_actions.parquet")
     pl.DataFrame(
         {
             "index": ["NIFTY 500", "NIFTY 500", "NIFTY BANK", "NIFTY 50"],
@@ -790,3 +811,68 @@ def test_window_study_grid_pairs_and_tables(tmp_path: Path) -> None:
     assert "Indices:" in windows.weekend_table(rows)
     table = windows.stock_table(rows.with_columns(pl.lit(200).alias("sessions")), (2025,), 2025)
     assert "Picked windows in 2025" in table
+
+
+def test_portfolio_rows_one_per_duration_on_adjusted_prices(tmp_path: Path) -> None:
+    synthetic_mirror(tmp_path)
+    con = data.connect(tmp_path)
+    assert "equity_adj" in {r[0] for r in con.sql("show tables").fetchall()}
+    params = {
+        **forecast.PORTFOLIO_PARAMS,
+        "durations": [1, 5, 21],
+        "start": "2025-04-01",
+        "end": DAYS[-1].isoformat(),
+        "min_turnover_day": 1.0,
+        "min_sigma": 0.0,  # the fixture's returns are nearly constant
+    }
+    # the fixture has 42 sessions, fewer than the 250 the production rows require: relax it
+    sql = forecast.PORTFOLIO_SQL.replace("d.hist_ >= 250", "d.hist_ >= 20")
+    rows = data.run_query(con, sql, params)
+    assert set(rows.columns) >= {
+        *forecast.portfolio_features(),
+        "symbol",
+        "ts",
+        "h",
+        "y",
+        "r",
+        "scale",
+        "entry",
+        "exit_",
+        "exit_date",
+    }
+    a = rows.filter((pl.col("symbol") == "AAA") & (pl.col("day") == SPLIT_DAY))
+    assert a["h"].to_list() == [1, 5, 21]
+    one = a.filter(pl.col("h") == 5).row(0, named=True)
+    # entered at the next open, exited at the close five sessions later, on adjusted prices
+    assert one["entry"] == 100.0 and one["exit_"] == one["close"] + 5
+    assert one["r"] == pytest.approx(math.log(one["exit_"] / 100.0))
+    assert one["scale"] == pytest.approx(one["sig_d"] * math.sqrt(5))
+    assert one["exit_date"] > one["entry_date"] and one["exit_dom"] == one["exit_date"].day
+    assert one["spans_quarter_end"] in (0, 1) and one["own_h_mean_250"] is not None
+    # the 21-session rows near the end have no exit inside the data and are dropped...
+    assert rows.filter((pl.col("h") == 21) & (pl.col("day") == DAYS[0])).height == 0
+    # ...unless need_target is off: then a null target and an estimated exit date
+    kept = data.run_query(con, sql, {**params, "need_target": False})
+    tail = kept.filter(
+        (pl.col("h") == 21) & (pl.col("day") == DAYS[0]) & (pl.col("symbol") == "AAA")
+    ).row(0, named=True)
+    assert tail["y"] is None and tail["exit_"] is None and tail["exit_date"] > DAYS[0]
+    # the split: raw prices halve on SPLIT_DAY, the adjusted rows see no jump
+    spl = rows.filter((pl.col("symbol") == SPLIT_SYMBOL) & (pl.col("h") == 1)).sort("day")
+    at = spl.filter(pl.col("day") == SPLIT_DAY).row(0, named=True)
+    assert abs(at["ret_1d"]) < 0.02 and at["close"] < 70  # ret_1d adjusted, close is the raw price
+    # the Fit body binds every parameter the query uses; the symbol variant adds the identity
+    body = forecast.portfolio_fit_definition("r", (1, 5, 21))
+    assert set(data.param_names(body["query"])) == set(body["params"]) and body["key"] == [
+        "symbol",
+        "ts",
+        "h",
+    ]
+    assert body["target"]["columns"] == ["r"] and body["name"] == "portfolio pooled nse r"
+    sym = forecast.portfolio_fit_definition("y", with_symbol=True)
+    assert sym["features"][0] == {"name": "symbol", "kind": "categorical"} and sym["name"].endswith(
+        " sym"
+    )
+    assert forecast.portfolio_fit_definition("y", (21,))["name"] == "portfolio h21 nse y"
+    with pytest.raises(ValueError):
+        forecast.portfolio_fit_definition("z")
