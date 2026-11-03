@@ -1,6 +1,7 @@
 # Holding portfolios for a small account: forecasts for days to a quarter, and a backtest that trades them
 
-Status: **reviewed and agreed**, 2026-10-25, revision 3. Owner's decisions: no dividends, no shorting,
+Status: **reviewed and agreed**, 2026-10-25, revision 3; **revision 4 (2026-11-03) for review**: one pooled model
+across hold durations, stock-history features with a stock-identity experiment, exit-side calendar, no year (§5). Owner's decisions: no dividends, no shorting,
 search the space as widely as possible, study capital first, target ₹10,000, capitals from ₹10,000
 up, about a day of overnight compute is fine, the affordability tilt is accepted, the US later.
 Builds on [finance-ml.md](finance-ml.md) (Fit, FitRun, Model, InferRun, Evaluation),
@@ -90,24 +91,51 @@ NIFTYBEES once, the model has to carry the whole difference.
 
 ## 5. Phase 2: the forecasts
 
+### The shape of the model (revision 4)
+
+One row per **(stock, decision date, hold duration)**, the duration an input, so a single model learns
+every horizon at once and which signals matter at which horizon. Two pooled Fits (raw and
+volatility-scaled target) replace the twelve per-horizon ones; two per-horizon Fits (21 sessions, both
+targets) are kept as the comparison that says whether pooling helped.
+
+| Question raised | Decision | Why |
+|---|---|---|
+| Hold duration as an input | Yes: `h` ∈ {1, 5, 10, 21, 42, 63, 126} sessions, one row each per (stock, date); about 10 million rows | Seven times the examples; interactions between horizon and features are learnable |
+| Net revenue as the target | No: the target is the gross return; the backtest charges the real schedule for the actual capital | Costs are deterministic and depend on the account size (the fixed ₹18 per sale); nothing to learn |
+| The stock itself as a feature | As an experiment: every search runs with and without a `symbol` categorical, judged by out-of-sample IC; the stock's own trends enter through rolling history features in both runs | A raw identity mostly memorises each stock's past average return (momentum without discounting) and says nothing about a stock until its history changes. Rolling features transfer across stocks. The data decides |
+| Year as a feature | No. Regime features instead (`mkt_ret60`, `mkt_vol20`, `mkt_vol60`, `vix`, `breadth_d`, `disp_d`, already in the rows) | A model is used in a year it never trained on, where a year level is undefined |
+| Calendar of the entry | Kept: `dow`, `dom`, `moy`, `dte`, `after_holiday` | Date-tied patterns recur; the pooled model can learn they matter at short horizons and not at long |
+| Calendar of the exit | New: `exit_dom`, `exit_moy`, `exit_dte`, `spans_quarter_end`, `spans_expiry`, `exit_sessions_to_quarter_end` | For a long hold, what the position crosses can matter more than the day it starts |
+
+**Stock-history features** (the stock's own trends, rolling, from the past only): `own_night_60`,
+`own_night_250` (mean close→next-open return), `own_day_60` (mean open→close), `own_ret_mean_250`,
+`own_ret_sd_250`, `own_hit_250` (share of up days), `own_h_mean_250` (the stock's mean return over
+the row's own duration `h`, shrunk toward the cross-section: (n·mean + k·μ)/(n + k) with k = 20),
+`own_max_dd_250`, `own_gap_mean_60`.
+
+**Evaluation of a pooled model:** IC within each (date, `h`), so durations are never ranked against
+each other; the per-window summary reports IC per duration.
+
 ### Fits
 
-Twelve Fits under `apps/finance/fits/round3/`: horizons {5, 10, 21, 42, 63, 126} × targets
-{volatility-scaled return, raw return}, on the existing
+Four Fits under `apps/finance/fits/round3/`: `pooled` × targets {volatility-scaled, raw} and
+`h21` × the same two targets, on the existing
 [`daily_sql("nse")`](../apps/finance/src/finance/ml/forecast.py) with these changes:
 
 | Change | Detail | Why |
 |---|---|---|
 | Adjusted prices | Returns, features and targets from `equity_adj` (`adj_open`, `adj_close`, …) instead of `equity` | A split or bonus inside a long hold reads as a −50 % or −90 % return on unadjusted prices. Today's daily rows read `equity` |
+| Durations | `:durations` list; the query unnests it so each (stock, date) yields one row per `h`, with `h`, `exit_`, `scale`, the exit-calendar features and `own_h_mean_250` per row | The pooled model; `[21]` for the comparison Fits |
 | Raw-return target | `y = ln(exit / entry)` as a second target | The scaled target ranks well on risk-adjusted moves; a portfolio earns raw returns. Both are searched |
-| Slow features | `ret_120d`, `ret_250d`, `mom_12_1` (250-session return less the last 21), `vol_120d`, `max_dd_60d`, `deliv_pct_20d`, `turn_trend` (20-session turnover over 120-session), `s_ret_60d`, `rs_120`, `px_level` (log price, for affordability effects) | What matters at weeks to months: momentum and its one-month reversal, volatility, accumulation |
+| Slow features | `ret_120d`, `ret_250d`, `mom_12_1` (250-session return less the last 21), `vol_120d`, `max_dd_60d`, `deliv_pct_20d`, `turn_trend` (20-session turnover over 120-session), `s_ret_60d`, `rs_120`, `px_level` (log price, for affordability effects); the stock-history and exit-calendar features above; optionally `symbol` | What matters at weeks to months: momentum and its one-month reversal, volatility, accumulation |
 | Rows without a target | Query parameter `:need_target` (default true). False keeps the last h sessions with a null target, so `Infer` forecasts every day including today | Today's rows drop any row whose exit lies beyond the data |
 | Warm-up | Rows from 2022-09-01 so the 250-session features are complete; queries read from 2021-09-01 | |
 | Liquidity | 20-session median turnover ≥ ₹1 crore | A ₹10,000 order never moves these |
 | Universe | `series = 'EQ'` only | BE (trade-for-trade) stocks cannot be traded freely |
 
-**Feature sets**, both searched: `screened` (what `Screen` and `features_from_screen` keep on
-2022-09 to 2024-12) and `all` (every candidate).
+**Feature sets**, all searched: `screened` (what `Screen` and `features_from_screen` keep on
+2022-09 to 2024-12), `all` (every candidate), and each of those plus `symbol` (the identity
+experiment): four sets.
 
 ### The model search space
 
@@ -118,21 +146,28 @@ Twelve Fits under `apps/finance/fits/round3/`: horizons {5, 10, 21, 42, 63, 126}
 | lightgbm | num_leaves {15, 63} × n_estimators {300, 800} × learning_rate {0.03, 0.1} × min_child_samples {100, 1000} | 16 |
 | **Total** | | **52 specs** |
 
-52 specs × 2 feature sets × 12 Fits = 1,248 candidate models, each walked forward.
+52 specs × 4 feature sets × 4 Fits = 832 candidate models, each walked forward. A pooled fit has
+about 10 million rows and takes a few minutes on the streaming path; the stages below are still about
+a day of worker time.
 
-### The search, in two stages, inside the selection period only
+### The split (revision 4): train on everything except 2026, validate on 2026
 
-Fitting all 1,248 on 16 quarterly windows is about 20,000 fits. Instead:
+The owner's decision on 2026-11-03 replaces the quarterly walk-forward. 2026 is touched once, at the
+end; every choice is made a year earlier, so nothing in the final result was picked by looking at it.
 
-| Stage | Windows | Models | Fits | Picks by |
-|---|---|---|---|---|
-| 1. Coarse | 2 yearly windows: test 2023, test 2024 | all 1,248 | 2,496 | Mean IC over the two years, with a minimum in each year |
-| 2. Fine | 8 quarterly windows, 2023-Q1 to 2024-Q4 | top 5 per (horizon, target) from stage 1 = 60 | 480 | Mean quarterly IC and its t-statistic |
-| 3. Forward | 7 quarterly windows, 2025-Q1 to 2026-Q4 | the stage-2 top 5 per (horizon, target), fixed | 420 | Nothing: these forecasts feed the confirmation only |
+| Step | Train on | Judge on | Picks |
+|---|---|---|---|
+| 1. Model choice | 2022-09-01 to 2024-12-31 | 2025: IC per duration, within (date, h) | Top 4 per (Fit, identity yes/no) of the 832 candidates = 32 |
+| 2. Portfolio rule choice | the step-1 models' 2025 forecasts | 2025: the ₹10,000 account after charges and 5 bps slippage, against the equal-weight baseline | The best rule set and the top 20, written into the results document before step 3 |
+| 3. Final | **2022-09-01 to 2025-12-31** (the 32 models refitted) | **2026-01-01 to the data's end, once, unchanged** | Nothing: this is the result |
 
-Daily rows are about 1.4 million; a fit takes 10 to 60 seconds, so the three stages are roughly a day
-of worker time, run overnight, one fit at a time. Models are chosen by **forecast quality (IC)**, not
-by backtest profit, so the model choice and the portfolio choice cannot overfit each other.
+Fits: 832 (step 1) + 32 (step 3) = 864, each a few minutes at most on the streaming path: well under
+a day of worker time. A `WalkForward` now has two windows (train to 2024, test 2025; train to 2025,
+test 2026) instead of sixteen; the entities and reactions below are unchanged otherwise.
+
+What 2026 can say: forecast accuracy is well measured (about 200 trading days of rankings over
+1,500 stocks). A portfolio rebalanced quarterly has three or four decisions in it, so its 2026
+verdict carries wide error bars; the results report the weekly and monthly variants alongside.
 
 ### Entities
 
@@ -283,20 +318,17 @@ period, number of trades, and per calendar year.
 
 ## 7. Selection and the pass bar
 
-With about 1,250 models and 61,000 account configurations, the best one in any period will look
-excellent by luck. The protocol:
+With 832 models and 960 account configurations, the best one in any period looks excellent by luck.
+The protocol is the split of §5: models chosen by 2025 IC on fits through 2024; portfolio rules chosen
+on the ₹10,000 account over 2025 by `SelectPortfolio`, the choice and the top 20 committed to the
+results document first; then the chosen models refitted through 2025 and the chosen configurations
+run on 2026 unchanged. Reported: the chosen configuration's 2026 result; the distribution of the top
+20's 2026 results (if the best in 2025 is ordinary in 2026, that is overfitting and is stated); the
+rank correlation between 2025 and 2026 results across all configurations.
 
-1. Models are chosen by IC on 2023–2024 (§5). Their 2025–2026 forecasts are made but not looked at.
-2. Portfolios are chosen on 2023–2024 only, by `SelectPortfolio`. The choice, and the top 20, are
-   committed to the results document **before** any 2025–2026 account is run.
-3. The chosen configuration and the top 20 are run unchanged on 2025-01-01 to 2026-10-23.
-4. Reported: the chosen one's result; the distribution of the top 20's results (if the best in
-   selection is ordinary in confirmation, that is overfitting and is stated as such); the rank
-   correlation between selection and confirmation results across all 61,000 configurations.
-
-**The pass bar, set now:** at ₹10,000, in 2025-01 to 2026-10, after charges and 5 bps slippage, the
-chosen portfolio ends above NIFTYBEES bought once with ₹10,000, and above its equal-weight baseline,
-with a positive t-statistic on monthly excess return. Anything less is reported as a failure.
+**The pass bar, set now:** at ₹10,000, in 2026, after charges and 5 bps slippage, the chosen portfolio
+ends above NIFTYBEES bought once with ₹10,000, and above its equal-weight baseline, with a positive
+t-statistic on monthly excess return. Anything less is reported as a failure.
 
 ## 8. Costs
 
@@ -339,7 +371,8 @@ calculator, entered by hand.
 
 | File | Change |
 |---|---|
-| `apps/finance/src/finance/ml/forecast.py` | Daily rows on adjusted prices; slow features; raw-return target; `need_target` |
+| `apps/finance/src/finance/ml/forecast.py` | Daily rows on adjusted prices; `:durations` unnest with `h` as a feature; slow, stock-history and exit-calendar features; raw-return target; `need_target`; optional `symbol` feature |
+| `apps/finance/src/finance/ml/metrics.py` | `ic` grouped by (ts, h) when `h` is present |
 | `apps/finance/src/finance/ml/entities.py` | ModelSearch, WalkForward, WalkForwardWindow, BacktestGrid, BacktestRun |
 | `apps/finance/src/finance/ml/reactions.py` | RunModelSearch, RunWindow, CloseWalkForward, CloseModelSearch, RunBacktestGrid, BacktestGridSource, SelectPortfolio, RunBacktest; `inline`, `specs`, `features` on RunFit |
 | `apps/finance/src/finance/ml/backtest.py` | New: the account, the grid, the baselines |
@@ -347,7 +380,7 @@ calculator, entered by hand.
 | `apps/finance/src/finance/ml/estimators/` | lightgbm `fit_batches` streams like xgboost (it concatenates today); fine at 1.4 million rows |
 | `apps/finance/src/finance/triggers.py` | OnChange for WalkForwardWindow.status and WalkForward.status |
 | `apps/finance/migrations/` | The five new tables |
-| `apps/finance/fits/round3/` | Twelve Fit JSONs |
+| `apps/finance/fits/round3/` | Four Fit JSONs (pooled and h21, two targets each) |
 | `apps/finance/tests/` | §9 |
 | `docs/finance-ml.md` | The walk-forward, search and backtest sections |
 
