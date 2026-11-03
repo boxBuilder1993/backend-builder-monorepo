@@ -352,10 +352,18 @@ Design: [finance-portfolio.md §5](finance-portfolio.md). `finance/ml/walkforwar
   `RunWindow` per window. The default windows are the 2026 split: train to 2024-12-31 and test 2025,
   train to 2025-12-31 and test 2026.
 - `RunWindow` runs `RunFit` inline with the one spec and the feature subset, the Fit's end parameter
-  at `train_end`, then `Infer` on the test range (with `need_target` off where the Fit has it), and
+  at `train_end` (and its `max_exit`, where it has one, so no training target resolves after the
+  cut), then `Infer` on the test range (with `need_target` off where the Fit has it), and
   records the window's IC overall and per duration.
 - `CloseWalkForward` (OnChange on the window's status) concatenates the windows' inference tables
   into `parquet/walkforward/<id>.parquet` and writes the IC summary; `CloseModelSearch` (OnChange on
   the walk-forward's status) writes the leaderboard, ranked by the first window's IC.
+- `LoadRows` names the rows file by the hash of (query, params, data revision) and reuses it when
+  it exists, so the hundreds of fits of a search query the mirror once per window (`cached` in vars).
+- `PullStore` pulls by manifest: one recursive tree listing (13 s for 21,000 files), then only the
+  files whose blob id differs from `.manifest.json` in the mirror root; `snapshot_download` walked
+  every file (6 min) on each of the pipeline's own commits. `StoreSync.data_revision` hashes the
+  listing outside `mirror.DERIVED_PREFIXES` (models, inference, studies, backtests), so a model
+  upload or an inference publish moves the store's commit but not the data revision.
 - `RunFit` gained `inline`, `specs` and `features`; `FitRun.features` records a run's feature subset
   and `FitModel` fits on it.

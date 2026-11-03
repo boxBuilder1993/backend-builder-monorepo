@@ -1109,7 +1109,7 @@ select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, h,
        ln(exit_ / entry) / (sig_d * sqrt(h)) as y
 from r5
 where entry is not null and entry > 0 and sig_d >= :min_sigma
-  and (not :need_target or (exit_ is not null and exit_ > 0))
+  and (not :need_target or (exit_ is not null and exit_ > 0 and exit_date <= :max_exit))
 order by date, symbol, h
 """
 
@@ -1121,9 +1121,12 @@ PORTFOLIO_PARAMS: dict[str, Any] = {
     "min_turnover_day": 1e7,
     "start": "2022-09-01",
     "end": "2030-12-31",
+    "max_exit": "2030-12-31",
 }
 """One row per (symbol, session t, h) decided at t's close on split-adjusted prices, entered at the
-next open, exited at the close of the h-th session; `need_target` false keeps the last h sessions
+next open, exited at the close of the h-th session. `max_exit` drops every row whose exit lies
+after it, so a fit cut at a date sees no target that resolves past that date (the walk-forward sets
+it to `train_end`; the test and inference ranges leave it open); `need_target` false keeps the last h sessions
 with a null target so today's rows get a forecast. Rows start where 250 sessions of history exist.
 `min_sigma` drops stocks whose 20-session daily volatility is under 0.2 %: a stale or circuit-bound
 price, whose scaled target explodes (the July to October 2026 rows reached y = 913 without it)."""

@@ -176,8 +176,10 @@ class Publish(Reaction):
 class PullStore(Reaction):
     """Bring the mirror to the store's current revision, or find it already there. Input:
     {"patterns": [...]} (default parquet/**; the ML never needs raw). One API call when nothing
-    moved; a download of only the files whose hash differs when it did. Every outcome is a StoreSync
-    row: current, pulled, or failed with the error, so the next read tries again."""
+    moved; one tree listing and a download of only the files whose blob differs when it did. Every
+    outcome is a StoreSync row: current, pulled, or failed with the error, so the next read tries
+    again. Saves data_revision too: the market data's content hash, unmoved by the pipeline's own
+    commits (models, inference tables), for callers that cache what they derive from the data."""
 
     DEFAULT_PATTERNS = ["parquet/**"]
 
@@ -196,9 +198,16 @@ class PullStore(Reaction):
             revision = await asyncio.to_thread(mirror.store_revision, HF_REPO, token)
             covered = known is not None and set(patterns) <= set(known.patterns)
             if known is not None and known.revision == revision and covered and root.is_dir():
-                ctx.create(StoreSync, repo=HF_REPO, revision=revision, patterns=patterns)
+                ctx.create(
+                    StoreSync,
+                    repo=HF_REPO,
+                    revision=revision,
+                    patterns=patterns,
+                    data_revision=known.data_revision,
+                )
                 ctx.save("status", "current")
                 ctx.save("revision", revision)
+                ctx.save("data_revision", known.data_revision)
                 return
             pulled = await asyncio.to_thread(mirror.pull, HF_REPO, token, revision, patterns, root)
         except Exception as exc:  # noqa: BLE001 - the store being down is an outcome
@@ -218,6 +227,7 @@ class PullStore(Reaction):
             repo=HF_REPO,
             revision=revision,
             patterns=patterns,
+            data_revision=pulled.data_revision,
             files=pulled.files,
             bytes=pulled.bytes,
             seconds=round(pulled.seconds, 1),
@@ -225,5 +235,6 @@ class PullStore(Reaction):
         )
         ctx.save("status", "pulled")
         ctx.save("revision", revision)
+        ctx.save("data_revision", pulled.data_revision)
         ctx.save("files", pulled.files)
         ctx.save("bytes", pulled.bytes)

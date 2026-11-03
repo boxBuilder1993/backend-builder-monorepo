@@ -96,31 +96,56 @@ class RegisterFit(Reaction):
 class LoadRows(Reaction):
     """Input: {"query", "params", "key"}. PullStore first, so the mirror is at the store's revision;
     then the query through DuckDB over the mirror, written to a scratch Parquet for the caller.
-    Saves rows_path, rows and data_hash. Frames never travel through vars or the outbox."""
+    The file is named by the hash of (query, params, data revision), so a second request for the
+    same rows over the same data finds the file and skips the query: a model search runs hundreds of
+    fits over the same rows, and its own model and inference commits do not move the data revision.
+    Saves rows_path, rows, data_hash and cached. Frames never travel through vars or the outbox."""
 
     async def calculate(self, ctx: Context) -> None:
         pull = await ctx.trigger(PullStore, {})
         assert pull is not None
-        pulled = {k: pull.vars.get(k) for k in ("status", "revision", "files", "bytes", "error")}
+        keys = ("status", "revision", "data_revision", "files", "bytes", "error")
+        pulled = {k: pull.vars.get(k) for k in keys}
         ctx.save("store", pulled)
         if pulled["status"] == "failed":
             raise RuntimeError(f"store unavailable: {pulled['error']}")
         q, params = ctx.input["query"], dict(ctx.input["params"])
-        path = data.work_dir() / "rows" / f"{uuid.uuid4().hex}.parquet"
-        n, h = await asyncio.to_thread(_load, poller.data_root(), q, params, path)
+        at = pulled["data_revision"] or pulled["revision"]
+        path = data.work_dir() / "rows" / f"{rows_key(q, params, at)}.parquet"
+        cached = path.exists()
+        if cached:
+            n, h = await asyncio.to_thread(_recount, path)
+        else:
+            n, h = await asyncio.to_thread(_load, poller.data_root(), q, params, path)
         ctx.save("rows_path", str(path))
         ctx.save("rows", n)
         ctx.save("data_hash", h)
+        ctx.save("cached", cached)
+
+
+def rows_key(query: str, params: dict[str, Any], revision: Any) -> str:
+    """The rows file's name: what was asked, of which data."""
+    blob = json.dumps(
+        {"query": query, "params": params, "revision": revision}, sort_keys=True, default=str
+    )
+    return hashlib.sha256(blob.encode()).hexdigest()[:32]
+
+
+def _recount(path: Path) -> tuple[int, str]:
+    return data.count_rows(path), data.file_hash(path)
 
 
 def _load(root: Path, q: str, params: dict[str, Any], out: Path) -> tuple[int, str]:
-    """DuckDB writes the Parquet and hashes it; no frame of the rows exists in this process."""
+    """DuckDB writes the Parquet and hashes it; no frame of the rows exists in this process. The
+    query writes beside the final name and moves into place, so a reader never finds half a file."""
     con = data.connect(root)
+    tmp = out.with_name(f"{out.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet")
     try:
         data.tune(con)
-        n = data.write_rows(con, q, params, out)
+        n = data.write_rows(con, q, params, tmp)
     finally:
         con.close()
+    tmp.replace(out)
     return n, data.file_hash(out)
 
 

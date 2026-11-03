@@ -129,6 +129,7 @@ Four Fits under `apps/finance/fits/round3/`: `pooled` × targets {volatility-sca
 | Raw-return target | `y = ln(exit / entry)` as a second target | The scaled target ranks well on risk-adjusted moves; a portfolio earns raw returns. Both are searched |
 | Slow features | `ret_120d`, `ret_250d`, `mom_12_1` (250-session return less the last 21), `vol_120d`, `max_dd_60d`, `deliv_pct_20d`, `turn_trend` (20-session turnover over 120-session), `s_ret_60d`, `rs_120`, `px_level` (log price, for affordability effects); the stock-history and exit-calendar features above; optionally `symbol` | What matters at weeks to months: momentum and its one-month reversal, volatility, accumulation |
 | Rows without a target | Query parameter `:need_target` (default true). False keeps the last h sessions with a null target, so `Infer` forecasts every day including today | Today's rows drop any row whose exit lies beyond the data |
+| Purging | Query parameter `:max_exit` (default open). Rows whose exit lies after it are dropped; `RunWindow` sets it to `train_end` for the fit | A 126-session target decided in December 2024 resolves in mid-2025. Without the purge, the model is trained on the first half of its test year, and the first pilot (2026-11-03) showed it: IC rising from 0.02 at h=1 to 0.18 at h=126 |
 | Warm-up | Rows from 2022-09-01 so the 250-session features are complete; queries read from 2021-09-01 | |
 | Liquidity | 20-session median turnover ≥ ₹1 crore | A ₹10,000 order never moves these |
 | Universe | `series = 'EQ'` only | BE (trade-for-trade) stocks cannot be traded freely |
@@ -218,7 +219,7 @@ class WalkForwardWindow(Entity):
 | Reaction | Input | What it does |
 |---|---|---|
 | `RunModelSearch` | `{label, fit_ids, specs, feature_sets, windows, stage}` | Creates the ModelSearch and one WalkForward per (Fit × spec × feature set) with its windows, defers one `RunWindow` per window. Returns in seconds |
-| `RunWindow` | `{window_id}` | `RunFit` with `{"inline": true, "params": {"end": train_end}, "specs": [one], "features": [...]}`, then `Infer` on the test range with `need_target` false; records ids; status `done` or `failed` |
+| `RunWindow` | `{window_id}` | `RunFit` with `{"inline": true, "params": {"end": train_end, "max_exit": train_end}, "specs": [one], "features": [...]}`, then `Infer` on the test range with `need_target` false; records ids; status `done` or `failed` |
 | `CloseWalkForward` | OnChange `WalkForwardWindow.status` | When its windows are all finished: one predictions file (key, `pred_y`, `y`, `r`, `scale`, `entry`, `exit_`, window), IC per window and overall, status |
 | `CloseModelSearch` | OnChange `WalkForward.status` | When the search's walk-forwards are all finished: the leaderboard (per horizon and target: IC, its t, worst window) and the shortlist for the next stage |
 

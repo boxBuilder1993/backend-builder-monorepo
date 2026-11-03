@@ -15,7 +15,7 @@ import pytest
 from backend_builder import PostgresStore, Worker, run
 from finance import mirror
 from finance.ml import data, modelstore
-from finance.ml.reactions import Evaluate, FitModel, Infer, RegisterFit, RunFit
+from finance.ml.reactions import Evaluate, FitModel, Infer, LoadRows, RegisterFit, RunFit
 
 KEY = ["symbol", "date"]
 DEFINITION: dict[str, Any] = {
@@ -355,3 +355,47 @@ async def test_model_search_walks_forward_and_closes(
     assert s.status == "done" and s.leaderboard and len(s.leaderboard["rows"]) == 4
     assert s.leaderboard["failed"] == 0 and "selection_ic" in s.leaderboard["rows"][0]
     assert "ic_w0" in s.leaderboard["rows"][0] and "ic_w1" in s.leaderboard["rows"][0]
+
+
+async def test_load_rows_reuses_the_file_for_the_same_query_at_the_same_revision(
+    store: PostgresStore, toy_mirror: Path
+) -> None:
+    inp = {"query": DEFINITION["query"], "params": DEFINITION["params"], "key": DEFINITION["key"]}
+    first = await run(store, LoadRows, inp)
+    second = await run(store, LoadRows, inp)
+    assert first.load("cached") is False and second.load("cached") is True
+    assert second.load("rows_path") == first.load("rows_path")
+    assert second.load("rows") == first.load("rows") > 0
+    assert second.load("data_hash") == first.load("data_hash")
+    # other parameters are other rows, in another file
+    other = await run(store, LoadRows, {**inp, "params": {"end_date": "2026-01-10"}})
+    assert other.load("cached") is False and other.load("rows_path") != first.load("rows_path")
+    assert other.load("rows") < first.load("rows")
+
+
+def test_range_params_purges_targets_past_the_cut_only_where_the_fit_can() -> None:
+    from finance.ml.entities import Fit
+    from finance.ml.walkforward import range_params
+
+    def fit(params: dict[str, Any]) -> Fit:
+        return Fit(
+            name="f", query="q", params=params, key=[], features=[], target={}, search=[],
+            content_hash="x",
+        )  # fmt: skip
+
+    pooled = fit({"start": "2022-09-01", "end": "2030-12-31", "max_exit": "2030-12-31"})
+    cut = date(2024, 12, 31)
+    assert range_params(pooled, None, cut, purge=True) == {
+        "end": "2024-12-31",
+        "max_exit": "2024-12-31",
+    }
+    # the test range leaves the exits open, so every row whose truth is known is scored
+    assert range_params(pooled, date(2025, 1, 1), date(2025, 12, 31)) == {
+        "start": "2025-01-01",
+        "end": "2025-12-31",
+    }
+    assert range_params(fit({"end_date": "2026-01-20"}), None, cut, purge=True) == {
+        "end_date": "2024-12-31"
+    }
+    with pytest.raises(ValueError, match="no end parameter"):
+        range_params(fit({"start": "2022-09-01"}), None, cut)

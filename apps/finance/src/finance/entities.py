@@ -33,6 +33,9 @@ class StoreSync(Entity):
     revision: str
     """The store's commit the mirror was brought to, or found to be at."""
     patterns: list[str]
+    data_revision: str = ""
+    """mirror.data_revision() at that commit: the market data's content, the pipeline's own
+    outputs left out. Rows derived from the data are cached by it."""
     files: int = 0
     """Fetched this time; zero when the mirror was already current."""
     bytes: int = 0
