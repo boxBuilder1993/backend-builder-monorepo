@@ -35,6 +35,8 @@ class FitRun(Entity):
 
     fit_id: str
     params: dict[str, Any]
+    features: list[str] | None = None
+    """A subset of the Fit's feature names this run fits on; None is all of them."""
     status: str = "queued"
     """``queued`` | ``running`` | ``done`` | ``failed``."""
     specs: int = 0
@@ -139,4 +141,59 @@ class BacktestRun(Entity):
     """parquet/backtests/run_<id>_trades.parquet: date, symbol, side, shares, price, value,
     charges, why."""
     summary: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class ModelSearch(Entity):
+    """A grid of walk-forwards judged together: Fits × model specs × feature sets, each walked over
+    the same windows. See docs/finance-portfolio.md §5."""
+
+    label: str
+    fit_ids: list[str]
+    specs: list[dict[str, Any]]
+    """[{"algorithm", "params"}, ...], each a single resolved point."""
+    feature_sets: dict[str, Any]
+    """{name: [feature names] | None}; None is every feature of the Fit."""
+    windows: list[dict[str, Any]]
+    """[{"train_end", "test_start", "test_end"}, ...] as ISO dates."""
+    status: str = "running"
+    """``running`` | ``done`` | ``failed``."""
+    walk_forwards: int = 0
+    leaderboard: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class WalkForward(Entity):
+    """One Fit, one spec, one feature set, fitted and scored over windows."""
+
+    search_id: str | None = None
+    fit_id: str
+    algorithm: str
+    params: dict[str, Any]
+    feature_set: str
+    features: list[str] | None = None
+    label: str
+    status: str = "running"
+    """``running`` | ``done`` | ``failed``."""
+    windows: int = 0
+    predictions_path: str | None = None
+    """parquet/walkforward/<id>.parquet in the mirror: every window's inference rows."""
+    summary: dict[str, Any] | None = None
+    """IC per window and per duration, rows, the models."""
+    error: str | None = None
+
+
+class WalkForwardWindow(Entity):
+    walk_forward_id: str
+    index: int
+    train_end: date
+    test_start: date
+    test_end: date
+    status: str = "queued"
+    """``queued`` | ``running`` | ``done`` | ``failed``."""
+    fit_run_id: str | None = None
+    model_id: str | None = None
+    infer_run_id: str | None = None
+    ic: dict[str, Any] | None = None
+    """IC overall and per duration on this window's test rows."""
     error: str | None = None

@@ -125,21 +125,32 @@ def _load(root: Path, q: str, params: dict[str, Any], out: Path) -> tuple[int, s
 
 
 class RunFit(Reaction):
-    """Input: {"fit_id", "params"?}. One FitRun, the rows loaded once for the record, one Model row
-    per spec as queued, one deferred FitModel per spec with the algorithm's budget. Returns in
-    seconds; the console shows the fan-out before a single fit starts. The run is `running` from
-    here and only CloseFitRun changes it: concurrent FitModel runs never touch the FitRun row."""
+    """Input: {"fit_id", "params"?, "specs"?, "features"?, "inline"?}. One FitRun, the rows loaded
+    once for the record, one Model row per spec as queued, one FitModel per spec: deferred with the
+    algorithm's budget by default, so the run returns in seconds and the console shows the fan-out
+    before a single fit starts; ``inline`` true fits inside this run instead (a walk-forward window
+    scores the model it just made). ``specs`` replaces the Fit's search with the given entries;
+    ``features`` fits on a subset of the Fit's features. The run is `running` from here and only
+    CloseFitRun changes it: concurrent FitModel runs never touch the FitRun row."""
 
     async def calculate(self, ctx: Context) -> None:
         fit = await ctx.get_by_id(Fit, ctx.input["fit_id"])
         if fit is None:
             raise LookupError(f"no Fit {ctx.input['fit_id']}")
         params = data.resolve_params(fit.params, ctx.input.get("params"))
-        specs = search.expand(fit.search)
+        specs = search.expand(list(ctx.input["specs"]) if ctx.input.get("specs") else fit.search)
+        features = ctx.input.get("features")
+        if features is not None:
+            names = {str(f["name"]) for f in fit.features}
+            unknown = [f for f in features if f not in names]
+            if unknown:
+                raise ValueError(f"features not in the Fit: {unknown}")
+            features = [str(f) for f in features]
         run = ctx.create(
             FitRun,
             fit_id=fit.id,
             params=params,
+            features=features,
             specs=len(specs),
             status="running",
             started_at=_now(),
@@ -159,12 +170,11 @@ class RunFit(Reaction):
                 params=spec.params,
             )
             budget = E.REGISTRY[spec.algorithm].budget
-            await ctx.trigger(
-                FitModel,
-                {"model_id": m.id, "device": spec.device, "rows_path": rows_path},
-                deferred=True,
-                timeout=budget,
-            )
+            payload = {"model_id": m.id, "device": spec.device, "rows_path": rows_path}
+            if ctx.input.get("inline"):
+                await ctx.trigger(FitModel, payload)
+            else:
+                await ctx.trigger(FitModel, payload, deferred=True, timeout=budget)
             models.append(m.id)
         ctx.save("fit_run_id", run.id)
         ctx.save("models", models)
@@ -190,7 +200,11 @@ class FitModel(Reaction):
         ctx.save("model_id", model.id)
         try:
             rows_path = await self._rows(ctx, fit, run, ctx.input.get("rows_path"))
-            declared = S.declare(fit.key, fit.features, fit.target)
+            feats = fit.features
+            if run.features is not None:  # the run fits on a subset of the Fit's features
+                keep = set(run.features)
+                feats = [f for f in fit.features if str(f["name"]) in keep]
+            declared = S.declare(fit.key, feats, fit.target)
             out_dir = data.work_dir() / "models" / model.id
             job = fitting.FitJob(
                 rows_path=rows_path,
