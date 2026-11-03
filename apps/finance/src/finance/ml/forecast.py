@@ -905,12 +905,14 @@ P_EXIT = [
     "exit_sessions_to_quarter_end",
 ]
 """The calendar of the exit: for a long hold, what the position crosses."""
-P_CATEGORICAL = CATEGORICAL | {"exit_moy", "symbol"}
+P_CATEGORICAL = CATEGORICAL | {"exit_moy", "stock"}
 
 
 def portfolio_features(market: str = "nse", with_symbol: bool = False) -> list[str]:
-    out = daily_features(market) + P_SLOW + P_OWN + P_EXIT + ["h"]
-    return (["symbol"] if with_symbol else []) + out
+    """``hold`` is the row's duration and ``stock`` its symbol, as features: a column cannot be both
+    key and feature, so the query carries them twice (``h`` and ``symbol`` are the key)."""
+    out = daily_features(market) + P_SLOW + P_OWN + P_EXIT + ["hold"]
+    return (["stock"] if with_symbol else []) + out
 
 
 _PORTFOLIO_EQUITY_NSE = """select symbol, date, adj_open as open, adj_high as high, adj_low as low, adj_close as close,
@@ -1081,7 +1083,7 @@ r5 as (
            (own_h_n * own_h_raw + 20 * avg(own_h_raw) over (partition by date, h)) / nullif(own_h_n + 20, 0) as own_h_mean_250
     from r4
 )
-select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, h, date as day, close_raw as close, entry, entry_date, exit_, exit_date, sig_d,
+select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, h, symbol as stock, h as hold, date as day, close_raw as close, entry, entry_date, exit_, exit_date, sig_d,
        ret_1d, ret_5d, ret_20d, ret_60d, vol_20d, vol_60d, dist_hi, dist_lo, turn_rel, deliv_pct,
        ret_20d - i_ret_20d as rs_20, ret_60d - mkt_ret60 as rs_60, gap_d, range_pos_d, clv_d,
        rv_day, vwap_dev_close, r_first60, r_last60, relvol_day,

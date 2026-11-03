@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 import pytest
 from finance.ml import data, forecast
+from finance.ml import schema as S
 
 DAYS = [date(2025, 6, 2), date(2025, 6, 3)]
 SYMBOLS = ["AAA", "BBB", "CCC"]
@@ -870,9 +871,15 @@ def test_portfolio_rows_one_per_duration_on_adjusted_prices(tmp_path: Path) -> N
     ]
     assert body["target"]["columns"] == ["r"] and body["name"] == "portfolio pooled nse r"
     sym = forecast.portfolio_fit_definition("y", with_symbol=True)
-    assert sym["features"][0] == {"name": "symbol", "kind": "categorical"} and sym["name"].endswith(
-        " sym"
-    )
+    assert sym["features"][0] == {"name": "stock", "kind": "categorical"}
+    assert sym["name"].endswith(" sym")
+    for b in (
+        body,
+        sym,
+    ):  # a column is key, feature or target, never two: declare must accept these
+        S.declare(b["key"], b["features"], b["target"])
+    assert set(rows["stock"].to_list()) <= {*SYMBOLS, SPLIT_SYMBOL}
+    assert rows["hold"].to_list() == rows["h"].to_list()
     assert forecast.portfolio_fit_definition("y", (21,))["name"] == "portfolio h21 nse y"
     with pytest.raises(ValueError):
         forecast.portfolio_fit_definition("z")
