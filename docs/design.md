@@ -343,6 +343,8 @@ Log collection, retention and the console's per-run log view are designed in [lo
 
 Compute pools, pollers, profiles, service calls and the Kubernetes deployment are designed in [pools.md](pools.md).
 
+Compute targets beyond Kubernetes, keyed entities and their stores, and throughput are proposed in [scaling.md](scaling.md), which narrows the storage decision of section 23.
+
 Each of these was designed in the earlier draft and is parked, with what has to exist first.
 
 - **Deferred execution.** Built; see section 16.
