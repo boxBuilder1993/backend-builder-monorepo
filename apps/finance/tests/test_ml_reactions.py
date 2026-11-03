@@ -280,3 +280,78 @@ async def test_screen_sweep_runs_each_spec_and_records_failures(
     results = ctx.load("results")
     assert ctx.load("screens") == 2 and results[0]["spec"] == "minute nse 15" and results[0]["path"]
     assert results[1]["spec"] == "minute nse 60" and "error" in results[1]
+
+
+async def test_model_search_walks_forward_and_closes(
+    store: PostgresStore, toy_mirror: Path
+) -> None:
+    """Two specs × one feature subset × two windows on the toy Fit: each window fits inline and
+    scores its test range; the closers finish the walk-forwards and the search with a leaderboard."""
+    from finance import app
+    from finance.ml.entities import ModelSearch, WalkForward, WalkForwardWindow
+    from finance.ml.walkforward import RunModelSearch
+
+    fit_id = (await run(store, RegisterFit, DEFINITION)).load("fit_id")
+    windows = [
+        {"train_end": "2026-01-15", "test_start": "2026-01-16", "test_end": "2026-01-24"},
+        {"train_end": "2026-01-24", "test_start": "2026-01-25", "test_end": "2026-02-12"},
+    ]
+    ctx = await run(
+        store,
+        RunModelSearch,
+        {
+            "label": "toy search",
+            "fit_ids": [fit_id],
+            "specs": [
+                {"algorithm": "sklearn.linear", "params": {"alpha": 0.1}},
+                {"algorithm": "sklearn.linear", "params": {"alpha": 10.0}},
+            ],
+            "feature_sets": {"all": None, "close_only": ["close"]},
+            "windows": windows,
+        },
+    )
+    assert ctx.load("walk_forwards") == 4 and ctx.load("windows") == 8
+    search_id = ctx.load("search_id")
+    wfs = await store.query(
+        WalkForward, "select * from walk_forward where search_id = :s", s=search_id
+    )
+    assert len(wfs) == 4 and {w.status for w in wfs} == {"running"}
+    wins = await store.query(
+        WalkForwardWindow, "select * from walk_forward_window order by walk_forward_id, index"
+    )
+    assert len(wins) == 8 and {w.status for w in wins} == {"queued"}
+    worker = Worker(app, store)
+    while await worker.run_once():
+        pass
+    wins = await store.query(
+        WalkForwardWindow, "select * from walk_forward_window order by walk_forward_id, index"
+    )
+    assert {w.status for w in wins} == {"done"}, [w.error for w in wins]
+    assert all(w.fit_run_id and w.model_id and w.infer_run_id and w.ic for w in wins)
+    # the window's model was fitted on rows up to train_end only
+    fr = await store.query_raw(
+        "select params, features from fit_run where id = :r", r=wins[0].fit_run_id
+    )
+    assert fr[0]["params"]["end_date"] in ("2026-01-15", "2026-01-24")
+    subset = [w for w in wfs if w.feature_set == "close_only"][0]
+    sub_win = [w for w in wins if w.walk_forward_id == subset.id][0]
+    fr = await store.query_raw("select features from fit_run where id = :r", r=sub_win.fit_run_id)
+    assert fr[0]["features"] == ["close"]
+    m = await store.query_raw("select schema from model where id = :m", m=sub_win.model_id)
+    assert [f["name"] for f in m[0]["schema"]["features"]] == ["close"]
+    wfs = await store.query(
+        WalkForward, "select * from walk_forward where search_id = :s", s=search_id
+    )
+    assert {w.status for w in wfs} == {"done"}, [w.error for w in wfs]
+    one = wfs[0]
+    assert one.predictions_path and one.summary and len(one.summary["windows"]) == 2
+    table = pl.read_parquet(toy_mirror / one.predictions_path)
+    assert (
+        set(table["window"].to_list()) == {0, 1}
+        and "pred_fwd" in table.columns
+        and table.height > 0
+    )
+    s = (await store.query(ModelSearch, "select * from model_search where id = :s", s=search_id))[0]
+    assert s.status == "done" and s.leaderboard and len(s.leaderboard["rows"]) == 4
+    assert s.leaderboard["failed"] == 0 and "selection_ic" in s.leaderboard["rows"][0]
+    assert "ic_w0" in s.leaderboard["rows"][0] and "ic_w1" in s.leaderboard["rows"][0]
