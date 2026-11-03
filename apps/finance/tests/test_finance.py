@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -85,11 +85,10 @@ async def test_nightly_sync_runs_legs_then_publish_in_one_run(
     }  # fmt: skip
     assert legs["us"]["error"] == "ConnectionError: nseindia.com: timed out"
     assert legs["kite"]["implemented"] is False
-    assert ctx.load("published")["files"] == 1 and uploaded == [
-        ["raw/nse_cm/2026/nse_cm_20261021.zip"]
-    ]
+    ok_path = f"raw/nse_cm/{OK_DAY.year}/nse_cm_{OK_DAY:%Y%m%d}.zip"
+    assert ctx.load("published")["files"] == 1 and uploaded == [[ok_path]]
     rows = await store.query_raw("select path from data_file where published_at is not null")
-    assert [r["path"] for r in rows] == ["raw/nse_cm/2026/nse_cm_20261021.zip"]
+    assert [r["path"] for r in rows] == [ok_path]
     assert await store.query_raw("select count(*) as n from _outbox") == [
         {"n": 0}
     ]  # nothing deferred
@@ -113,19 +112,22 @@ async def test_unknown_leg_fails() -> None:
         await run(InMemoryStore(), SyncLeg, {"leg": "bonds"}, max_attempts=1)
 
 
+OK_DAY = date.today() - timedelta(days=2)
+NO_DATA_DAY = date.today() - timedelta(days=4)
+"""Relative to today: a no_data day inside RECENT_DAYS is asked again the next night, which the
+test below checks; a fixed date drifted out of that window a week after it was written."""
+
+
 def _fake_leg(seen: list[Ledger]) -> sources.Leg:
     def leg(data_dir: Path, today: date, ledger: Ledger) -> LegResult:
         seen.append(ledger)
-        f = data_dir / "raw/nse_cm/2026/nse_cm_20261021.zip"
+        rel = f"raw/nse_cm/{OK_DAY.year}/nse_cm_{OK_DAY:%Y%m%d}.zip"
+        f = data_dir / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(b"x" * 10)
         return LegResult(
-            written=[
-                Written(
-                    "raw/nse_cm/2026/nse_cm_20261021.zip", "raw", "nse_cm", date(2026, 10, 21), 10
-                )
-            ],
-            no_data=[NoData("nse_cm", date(2026, 10, 19))],
+            written=[Written(rel, "raw", "nse_cm", OK_DAY, 10)],
+            no_data=[NoData("nse_cm", NO_DATA_DAY)],
             notes={"requests": 2},
         )
 
@@ -144,15 +146,17 @@ async def test_sync_leg_writes_rows_idempotently(
     rows = await store.query_raw(
         "select path, status, bytes, published_at from data_file order by path"
     )
-    assert [(r["path"], r["status"], r["bytes"]) for r in rows] == [
-        (nodata_path("nse_cm", date(2026, 10, 19)), "no_data", 0),
-        ("raw/nse_cm/2026/nse_cm_20261021.zip", "ok", 10),
-    ]
+    assert sorted((r["path"], r["status"], r["bytes"]) for r in rows) == sorted(
+        [
+            (nodata_path("nse_cm", NO_DATA_DAY), "no_data", 0),
+            (f"raw/nse_cm/{OK_DAY.year}/nse_cm_{OK_DAY:%Y%m%d}.zip", "ok", 10),
+        ]
+    )
     assert all(r["published_at"] is None for r in rows)
 
     await run(store, SyncLeg, {"leg": "nse"})  # second night: same files, no new rows
     assert await store.query_raw("select count(*) as n from data_file") == [{"n": 2}]
-    assert ("nse_cm", date(2026, 10, 21)) in seen[1].ok
+    assert ("nse_cm", OK_DAY) in seen[1].ok
     assert seen[1].no_data == frozenset()  # the no_data day is recent, so it is asked again
 
 

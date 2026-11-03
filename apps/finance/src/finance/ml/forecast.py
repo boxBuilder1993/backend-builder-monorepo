@@ -867,6 +867,331 @@ def daily_fit_definition(
     }
 
 
+# ---- the portfolio rows: one row per (stock, date, hold duration) -----------------------------------
+
+DURATIONS = (1, 5, 10, 21, 42, 63, 126)
+"""Hold durations in sessions a pooled Fit sees at once; ``:durations`` picks a subset at run time."""
+
+P_SLOW = [
+    "ret_120d",
+    "ret_250d",
+    "mom_12_1",
+    "vol_120d",
+    "max_dd_60d",
+    "deliv_pct_20d",
+    "turn_trend",
+    "s_ret_60d",
+    "rs_120",
+]
+P_OWN = [
+    "own_night_60",
+    "own_night_250",
+    "own_day_60",
+    "own_ret_mean_250",
+    "own_ret_sd_250",
+    "own_hit_250",
+    "own_h_mean_250",
+    "own_max_dd_250",
+]
+"""The stock's own habits, rolling and from the past only: its overnight and daytime means, its
+return distribution, its mean return over the row's own duration shrunk toward the cross-section
+(k = 20 observations), its deepest fall from a 250-session high."""
+P_EXIT = [
+    "exit_dom",
+    "exit_moy",
+    "exit_dte",
+    "spans_quarter_end",
+    "spans_expiry",
+    "exit_sessions_to_quarter_end",
+]
+"""The calendar of the exit: for a long hold, what the position crosses."""
+P_CATEGORICAL = CATEGORICAL | {"exit_moy", "stock"}
+
+
+def portfolio_features(market: str = "nse", with_symbol: bool = False) -> list[str]:
+    """``hold`` is the row's duration and ``stock`` its symbol, as features: a column cannot be both
+    key and feature, so the query carries them twice (``h`` and ``symbol`` are the key)."""
+    out = daily_features(market) + P_SLOW + P_OWN + P_EXIT + ["hold"]
+    return (["stock"] if with_symbol else []) + out
+
+
+_PORTFOLIO_EQUITY_NSE = """select symbol, date, adj_open as open, adj_high as high, adj_low as low, adj_close as close,
+           close as close_raw, turnover, trades, deliv_pct
+    from equity_adj where date between :start::date - interval 400 day and :end::date + interval 200 day
+    qualify row_number() over (partition by symbol, date order by series) = 1"""
+
+_PORTFOLIO_TEMPLATE = """
+with
+e as (
+    __EQUITY__
+),
+d1 as (
+    select *,
+           ln(close / lag(close) over w) as ret_1d,
+           ln(close / lag(close, 5) over w) as ret_5d,
+           ln(close / lag(close, 20) over w) as ret_20d,
+           ln(close / lag(close, 60) over w) as ret_60d,
+           ln(close / lag(close, 120) over w) as ret_120d,
+           ln(close / lag(close, 250) over w) as ret_250d,
+           ln(close / lag(close, 250) over w) - ln(close / lag(close, 21) over w) as mom_12_1,
+           open / nullif(lag(close) over w, 0) - 1 as gap_d,
+           ln(close / nullif(open, 0)) as day_ret,
+           (close - low) / nullif(high - low, 0) as range_pos_d,
+           ((close - low) - (high - close)) / nullif(high - low, 0) as clv_d,
+           ln(nullif(trades, 0)) as log_trades,
+           ln(nullif(turnover / nullif(trades, 0), 0)) as avg_trade,
+           ln(close_raw) as log_px,
+           lead(open) over w as entry,
+           lead(date) over w as entry_date,
+           lead(close, 1) over w as exit_1, lead(date, 1) over w as exit_date_1,
+           ln(close / lag(close, 1) over w) as past_1,
+           lead(close, 5) over w as exit_5, lead(date, 5) over w as exit_date_5,
+           ln(close / lag(close, 5) over w) as past_5,
+           lead(close, 10) over w as exit_10, lead(date, 10) over w as exit_date_10,
+           ln(close / lag(close, 10) over w) as past_10,
+           lead(close, 21) over w as exit_21, lead(date, 21) over w as exit_date_21,
+           ln(close / lag(close, 21) over w) as past_21,
+           lead(close, 42) over w as exit_42, lead(date, 42) over w as exit_date_42,
+           ln(close / lag(close, 42) over w) as past_42,
+           lead(close, 63) over w as exit_63, lead(date, 63) over w as exit_date_63,
+           ln(close / lag(close, 63) over w) as past_63,
+           lead(close, 126) over w as exit_126, lead(date, 126) over w as exit_date_126,
+           ln(close / lag(close, 126) over w) as past_126,
+           count(*) over (partition by symbol order by date rows between 249 preceding and current row) as hist
+    from e window w as (partition by symbol order by date)
+),
+d2 as (
+    select *,
+           stddev_samp(ret_1d) over w20 as vol_20d,
+           stddev_samp(ret_1d) over w60 as vol_60d,
+           stddev_samp(ret_1d) over w120 as vol_120d,
+           stddev_samp(ret_1d) over (partition by symbol order by date rows between :vol_sessions - 1 preceding and current row) as sig_d,
+           close / nullif(max(high) over w250, 0) as dist_hi,
+           close / nullif(min(low) over w250, 0) as dist_lo,
+           turnover / nullif(quantile_cont(turnover, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as turn_rel,
+           quantile_cont(turnover, 0.5) over w20 as turn20,
+           quantile_cont(turnover, 0.5) over w120 as turn120,
+           trades / nullif(quantile_cont(trades, 0.5) over (partition by symbol order by date rows between 20 preceding and 1 preceding), 0) as trades_rel,
+           avg(deliv_pct) over w20 as deliv_pct_20d,
+           max(close) over w60 as hi60,
+           max(close) over w250 as hi250,
+           avg(gap_d) over w60 as own_night_60,
+           avg(gap_d) over w250 as own_night_250,
+           avg(day_ret) over w60 as own_day_60,
+           avg(ret_1d) over w250 as own_ret_mean_250,
+           stddev_samp(ret_1d) over w250 as own_ret_sd_250,
+           avg(case when ret_1d > 0 then 1.0 else 0.0 end) over w250 as own_hit_250,
+           avg(past_1) over w250 as own_mean_1, count(past_1) over w250 as own_n_1,
+           avg(past_5) over w250 as own_mean_5, count(past_5) over w250 as own_n_5,
+           avg(past_10) over w250 as own_mean_10, count(past_10) over w250 as own_n_10,
+           avg(past_21) over w250 as own_mean_21, count(past_21) over w250 as own_n_21,
+           avg(past_42) over w250 as own_mean_42, count(past_42) over w250 as own_n_42,
+           avg(past_63) over w250 as own_mean_63, count(past_63) over w250 as own_n_63,
+           avg(past_126) over w250 as own_mean_126, count(past_126) over w250 as own_n_126,
+           hist as hist_
+    from d1
+    window w20 as (partition by symbol order by date rows between 19 preceding and current row),
+           w60 as (partition by symbol order by date rows between 59 preceding and current row),
+           w120 as (partition by symbol order by date rows between 119 preceding and current row),
+           w250 as (partition by symbol order by date rows between 249 preceding and current row)
+),
+d3 as (
+    select *,
+           min(close / nullif(hi60, 0)) over w60 - 1 as max_dd_60d,
+           min(close / nullif(hi250, 0)) over w250 - 1 as own_max_dd_250,
+           turn20 / nullif(turn120, 0) as turn_trend
+    from d2
+    window w60 as (partition by symbol order by date rows between 59 preceding and current row),
+           w250 as (partition by symbol order by date rows between 249 preceding and current row)
+),
+__SHAPE__,
+i0 as (select date, close, ln(close / lag(close) over (order by date)) as iret from (__INDEX__)),
+i1 as (
+    select date, iret as mkt_ret_1d,
+           ln(close / lag(close, 20) over (order by date)) as i_ret_20d,
+           ln(close / lag(close, 60) over (order by date)) as mkt_ret60,
+           ln(close / lag(close, 120) over (order by date)) as i_ret_120d,
+           stddev_samp(iret) over (order by date rows between 19 preceding and current row) as mkt_vol20,
+           stddev_samp(iret) over (order by date rows between 59 preceding and current row) as mkt_vol60
+    from i0
+),
+vix as (__VIX__),
+sec as (
+    select date, name,
+           ln(close / lag(close) over w) as s_ret_1d,
+           ln(close / lag(close, 5) over w) as s_ret_5d,
+           ln(close / lag(close, 20) over w) as s_ret_20d,
+           ln(close / lag(close, 60) over w) as s_ret_60d
+    from (__SECTOR_SRC__) window w as (partition by name order by date)
+),
+__OVERSEAS_CTES__,
+cons as (
+    __CONS__
+),
+cons_first as (select * from cons qualify row_number() over (partition by symbol order by as_of) = 1),
+ticks as (__TICKS__),
+sessions as (select date, lag(date) over (order by date) as prev_date from (select distinct date from e)),
+r1 as (
+    select d.*,
+           coalesce(c.industry, f.industry) as industry,
+           coalesce(c.in_n50, f.in_n50, 0) as in_n50, coalesce(c.in_n500, f.in_n500, 0) as in_n500,
+           coalesce(c.in_mid100, f.in_mid100, 0) as in_mid100, coalesce(c.in_small250, f.in_small250, 0) as in_small250,
+           t.tick / nullif(d.close_raw, 0) * 1e4 as tick_bps,
+           ln(nullif(d.turn20, 0)) as log_turn20,
+           s.rv_day, s.vwap_dev_close, s.r_first60, s.r_last60, s.relvol_day,
+           ii.mkt_ret_1d, ii.i_ret_20d, ii.mkt_ret60, ii.i_ret_120d, ii.mkt_vol20, ii.mkt_vol60, v.vix,
+           __OVERSEAS_COLS__,
+           ss.prev_date
+    from d3 d
+    asof left join cons c on d.symbol = c.symbol and d.date >= c.as_of
+    left join cons_first f on d.symbol = f.symbol
+    left join ticks t on t.symbol = d.symbol
+    left join shape2 s on s.symbol = d.symbol and s.day = d.date
+    left join i1 ii on ii.date = d.date
+    left join vix v on v.date = d.date
+__OVERSEAS_JOIN__
+    left join sessions ss on ss.date = d.date
+    where d.date between :start and :end and d.turn20 >= :min_turnover_day and d.hist_ >= 250
+),
+r2 as (
+    select r.*,
+           __SECTOR_CASE__ as sector_idx,
+           avg(ret_1d) over wp as p_ret_1d, avg(ret_5d) over wp as p_ret_5d, avg(ret_20d) over wp as p_ret_20d,
+           sum(ret_20d * turn20) over wp / nullif(sum(turn20) over wp, 0) as pw_ret_20d,
+           ret_5d - avg(ret_5d) over wp as sp_5d, ret_20d - avg(ret_20d) over wp as sp_20d, ret_60d - avg(ret_60d) over wp as sp_60d,
+           avg(case when ret_1d > 0 then 1.0 else 0.0 end) over wt as breadth_d,
+           stddev_samp(ret_1d) over wt as disp_d
+    from r1 r
+    window wp as (partition by coalesce(r.industry, 'none'), r.date), wt as (partition by r.date)
+),
+r3 as (
+    select r.*, sx.s_ret_1d, sx.s_ret_5d, sx.s_ret_20d, sx.s_ret_60d, r.ret_20d - sx.s_ret_20d as xs_ret_20d
+    from r2 r left join sec sx on sx.name = r.sector_idx and sx.date = r.date
+),
+hs as (select unnest(:durations::int[]) as h),
+r4 as (
+    select r.*, hs.h,
+           case hs.h when 1 then exit_1 when 5 then exit_5 when 10 then exit_10 when 21 then exit_21 when 42 then exit_42 when 63 then exit_63 when 126 then exit_126 end as exit_,
+           case hs.h when 1 then exit_date_1 when 5 then exit_date_5 when 10 then exit_date_10 when 21 then exit_date_21 when 42 then exit_date_42 when 63 then exit_date_63 when 126 then exit_date_126 end as exit_date_known,
+           case hs.h when 1 then own_mean_1 when 5 then own_mean_5 when 10 then own_mean_10 when 21 then own_mean_21 when 42 then own_mean_42 when 63 then own_mean_63 when 126 then own_mean_126 end as own_h_raw,
+           case hs.h when 1 then own_n_1 when 5 then own_n_5 when 10 then own_n_10 when 21 then own_n_21 when 42 then own_n_42 when 63 then own_n_63 when 126 then own_n_126 end as own_h_n
+    from r3 r cross join hs
+),
+r5 as (
+    select *,
+           coalesce(exit_date_known, entry_date + ((h * 7) / 5 + 1)::int) as exit_date,
+           (own_h_n * own_h_raw + 20 * avg(own_h_raw) over (partition by date, h)) / nullif(own_h_n + 20, 0) as own_h_mean_250
+    from r4
+)
+select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, h, symbol as stock, h as hold, date as day, close_raw as close, entry, entry_date, exit_, exit_date, sig_d,
+       ret_1d, ret_5d, ret_20d, ret_60d, vol_20d, vol_60d, dist_hi, dist_lo, turn_rel, deliv_pct,
+       ret_20d - i_ret_20d as rs_20, ret_60d - mkt_ret60 as rs_60, gap_d, range_pos_d, clv_d,
+       rv_day, vwap_dev_close, r_first60, r_last60, relvol_day,
+       log_trades, avg_trade, trades_rel,
+       industry, sector_idx, in_n50, in_n500, in_mid100, in_small250, log_px, tick_bps, log_turn20,
+       p_ret_1d, p_ret_5d, p_ret_20d, pw_ret_20d, sp_5d, sp_20d, sp_60d,
+       s_ret_1d, s_ret_5d, s_ret_20d, xs_ret_20d,
+       breadth_d, disp_d,
+       mkt_ret_1d, mkt_ret60, mkt_vol20, mkt_vol60, vix,
+       __OVERSEAS_OUT__,
+       isodow(entry_date) as dow, dayofmonth(entry_date) as dom, month(entry_date) as moy,
+       greatest(0, __EXPIRY__ - entry_date) as dte,
+       (entry_date - date > case when isodow(entry_date) = 1 then 3 else 1 end)::int as after_holiday,
+       ret_120d, ret_250d, mom_12_1, vol_120d, max_dd_60d, deliv_pct_20d, turn_trend, s_ret_60d, ret_120d - i_ret_120d as rs_120,
+       own_night_60, own_night_250, own_day_60, own_ret_mean_250, own_ret_sd_250, own_hit_250, own_h_mean_250, own_max_dd_250,
+       dayofmonth(exit_date) as exit_dom, month(exit_date) as exit_moy,
+       greatest(0, __EXPIRY_EXIT__ - exit_date) as exit_dte,
+       (date_trunc('quarter', exit_date) > date_trunc('quarter', entry_date))::int as spans_quarter_end,
+       (__EXPIRY__ between entry_date and exit_date)::int as spans_expiry,
+       datediff('day', exit_date, (date_trunc('quarter', exit_date) + interval 3 month - interval 1 day)::date) * 5 / 7 as exit_sessions_to_quarter_end,
+       sig_d * sqrt(h) as scale,
+       ln(exit_ / entry) as r,
+       ln(exit_ / entry) / (sig_d * sqrt(h)) as y
+from r5
+where entry is not null and entry > 0 and sig_d >= :min_sigma
+  and (not :need_target or (exit_ is not null and exit_ > 0))
+order by date, symbol, h
+"""
+
+PORTFOLIO_PARAMS: dict[str, Any] = {
+    "durations": list(DURATIONS),
+    "need_target": True,
+    "vol_sessions": 20,
+    "min_sigma": 0.002,
+    "min_turnover_day": 1e7,
+    "start": "2022-09-01",
+    "end": "2030-12-31",
+}
+"""One row per (symbol, session t, h) decided at t's close on split-adjusted prices, entered at the
+next open, exited at the close of the h-th session; `need_target` false keeps the last h sessions
+with a null target so today's rows get a forecast. Rows start where 250 sessions of history exist.
+`min_sigma` drops stocks whose 20-session daily volatility is under 0.2 %: a stale or circuit-bound
+price, whose scaled target explodes (the July to October 2026 rows reached y = 913 without it)."""
+
+
+def portfolio_sql(market: str = "nse") -> str:
+    """The pooled rows query for a market: the daily template's sources on adjusted prices, every
+    duration of ``:durations`` as its own row, the stock's own habits and the exit's calendar."""
+    cfg = dict(DAILY_MARKETS[market])
+    if market == "nse":
+        cfg["equity"] = _PORTFOLIO_EQUITY_NSE
+    cfg["expiry_exit"] = _nse_expiry("exit_date") if market == "nse" else _third_friday("exit_date")
+    out = _PORTFOLIO_TEMPLATE
+    for key, text in cfg.items():
+        out = out.replace(f"__{key.upper()}__", text)
+    return out
+
+
+PORTFOLIO_SQL = portfolio_sql("nse")
+
+
+def portfolio_fit_definition(
+    target: str = "y",
+    durations: tuple[int, ...] = DURATIONS,
+    with_symbol: bool = False,
+    market: str = "nse",
+    **overrides: Any,
+) -> dict[str, Any]:
+    """The Fit body for the pooled rows: ``target`` "y" (volatility-scaled) or "r" (raw log return),
+    one row per duration in ``durations``, the stock identity as a feature when ``with_symbol``."""
+    if target not in ("y", "r"):
+        raise ValueError("target is y (scaled) or r (raw)")
+    params = {**PORTFOLIO_PARAMS, "durations": list(durations), **overrides}
+    shape = f"h{durations[0]}" if len(durations) == 1 else "pooled"
+    name = f"portfolio {shape} {market} {target}" + (" sym" if with_symbol else "")
+    return {
+        "name": name,
+        "description": (
+            f"{market.upper()}: {'volatility-scaled' if target == 'y' else 'raw'} log return over the "
+            f"row's own hold duration ({', '.join(map(str, durations))} sessions), decided at the close "
+            "on adjusted prices, entered at the next open; docs/finance-portfolio.md §5"
+        ),
+        "query": portfolio_sql(market),
+        "params": params,
+        "key": ["symbol", "ts", "h"],
+        "features": [
+            {"name": f, "kind": "categorical" if f in P_CATEGORICAL else "numeric"}
+            for f in portfolio_features(market, with_symbol)
+        ],
+        "target": {"columns": [target], "task": "regression"},
+        "search": [
+            {"algorithm": "sklearn.linear", "params": {}},
+            {
+                "algorithm": "xgboost",
+                "params": {
+                    "max_depth": [3, 4],
+                    "learning_rate": 0.05,
+                    "n_estimators": [300, 600],
+                    "min_child_weight": 200,
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.7,
+                    "reg_lambda": 5.0,
+                },
+            },
+        ],
+    }
+
+
 def fit_definition(horizon_minutes: int, **overrides: Any) -> dict[str, Any]:
     """The Fit body for one horizon: the query above, its params, features with kinds, the target."""
     params = {**PARAMS, "horizon_minutes": horizon_minutes, **overrides}
