@@ -367,9 +367,13 @@ def test_walkforward_scores_take_the_forecast_at_the_duration_of_the_rebalance(
     # the source helper routes to it, and a baseline still goes to the baselines
     rules = B.Rules(top_n=2, rebalance=5)
     src = {"walk_forward_id": "x", "predictions_path": "parquet/walkforward/wf.parquet"}
-    assert np.array_equal(
-        P.source_scores(tmp_path, src, prices, market, rules)[0], short, equal_nan=True
-    )
+    routed = P.source_scores(tmp_path, src, prices, market, rules)[0]
+    assert isinstance(routed, B.Signal) and np.array_equal(routed.score, short, equal_nan=True)
+    # the excess is the forecast less the day's mean at that duration (zero here), less the cost
+    assert routed.excess is not None and (routed.excess[5, s0], routed.excess[5, s1]) == (1.0, -1.0)
+    costly = P.source_scores(tmp_path, src, prices, market, rules, schedule=ZERO, capital=1e4)[0]
+    assert isinstance(costly, B.Signal) and costly.excess is not None
+    assert costly.excess[5, s0] == 1.0  # the zero schedule costs nothing
     assert (
         len(P.source_scores(tmp_path, {"baseline": "equal_weight"}, prices, market, rules, draws=3))
         == 3
@@ -463,3 +467,73 @@ async def test_select_portfolio_ranks_models_against_the_matching_equal_weight(
         await run(
             store, RunBacktestGrid, {**spec, "sources": [{"walk_forward_id": str(uuid.uuid4())}]}
         )
+
+
+def test_forecast_curve_picks_the_hold_with_the_best_rate_after_costs(tmp_path: Path) -> None:
+    """S0's forecast rises with the hold, S1's is its mirror (so the day's mean is zero at every
+    duration): after a 0.5 % round trip, per session held, S0's best hold is 5 sessions
+    ((0.02 − 0.005) / 5 = 0.003 beats 0.001 at h=1 and 0.0012 at h=21); S1 loses at every hold
+    and its best is the least bad. A dearer round trip (1.9 %) pushes the choice out to 21
+    sessions, where the forecast clears it by most per session."""
+    prices = synthetic_prices(date(2025, 3, 1))
+    market = B.Market.from_frame(prices)
+    d0 = market.dates[5]
+    rows: list[dict[str, Any]] = []
+    for h, v in ((1, 0.001), (5, 0.02), (21, 0.03)):
+        for sym, sign in (("S0", 1.0), ("S1", -1.0)):
+            rows.append({"symbol": sym, "ts": datetime.combine(d0, time(15, 30)), "h": h,
+                         "day": d0, "pred_r": sign * v, "r": 0.0})  # fmt: skip
+    (tmp_path / "parquet" / "walkforward").mkdir(parents=True)
+    pl.DataFrame(rows).write_parquet(tmp_path / "parquet/walkforward/wf.parquet")
+    s0, s1 = market.symbols.index("S0"), market.symbols.index("S1")
+    fc = P.Forecasts.load(tmp_path, "parquet/walkforward/wf.parquet")
+    assert fc.durations == (1, 5, 21)
+    sig = fc.curve(market, cost=0.005)
+    assert sig.hold is not None and sig.excess is not None
+    assert sig.hold[5, s0] == 5 and sig.score[5, s0] == pytest.approx(0.003)
+    assert sig.excess[5, s0] == pytest.approx(0.015)
+    assert sig.hold[5, s1] == 21 and sig.score[5, s1] < 0  # the least bad of three losses
+    dear = fc.curve(market, cost=0.019)
+    assert dear.hold is not None and dear.hold[5, s0] == 21
+    assert dear.score[5, s0] == pytest.approx(0.011 / 21)
+    # the nearest-duration signal still reads the one duration, with the cost taken off the excess
+    at = fc.at(market, rebalance=10, cost=0.005)
+    assert (
+        at.score[5, s0] == 0.02
+        and at.excess is not None
+        and at.excess[5, s0] == pytest.approx(0.015)
+    )
+    # the source helper routes the model hold to the curve
+    rules = B.Rules(top_n=2, rebalance=5, hold="model")
+    src = {"walk_forward_id": "x", "predictions_path": "parquet/walkforward/wf.parquet"}
+    routed = P.source_scores(tmp_path, src, prices, market, rules, forecasts=fc)[0]
+    assert isinstance(routed, B.Signal) and routed.hold is not None and routed.hold[5, s0] == 5
+
+
+def test_model_hold_sells_when_its_duration_is_up_and_the_threshold_gates_buys() -> None:
+    """Under the model hold, A bought at day 1's open on day 0's decision with a 2-session hold
+    is sold at day 3's open, whatever its rank; under the threshold, a stock whose excess is below
+    the bar is never bought, and the rules refuse a source that lacks what they read."""
+    n = 6
+    m = market(n, {"A": [100.0] * n, "B": [100.0] * n})
+    a = m.symbols.index("A")
+    score = const_scores(m, {"A": 1.0, "B": 0.5})
+    hold = np.full_like(score, np.nan)
+    hold[:, a] = 2
+    sig = B.Signal(score, excess=score - 0.9, hold=hold)
+    rules = B.Rules(top_n=1, rebalance=100, slippage_bps=0, hold="model")
+    r = B.simulate(m, sig, rules, 1_000, ZERO, 0, n - 1, record=True)
+    sells = [x for x in r.log if x["side"] == "sell"]
+    assert [x["date"] for x in sells] == [m.dates[3]] and sells[0]["why"] == "rule"
+    assert r.hold_days == [2]
+    # the threshold: A's excess is 0.1, B's is -0.4, so with two slots only A is bought
+    gated = B.Rules(top_n=2, rebalance=100, slippage_bps=0, min_pred_bps=50)
+    r = B.simulate(m, sig, gated, 1_000, ZERO, 0, n - 1, record=True)
+    assert {x["symbol"] for x in r.log if x["side"] == "buy"} == {"A"}
+    with pytest.raises(ValueError, match="excess"):
+        B.simulate(m, score, gated, 1_000, ZERO, 0, n - 1)
+    with pytest.raises(ValueError, match="hold"):
+        B.simulate(m, score, rules, 1_000, ZERO, 0, n - 1)
+    # a baseline grid collapses the forecast rules, so it matches every model configuration
+    grid = {"top_n": [1], "rebalance": [5], "hold": ["rebalance", "model"], "min_pred_bps": [0, 50]}
+    assert len(B.rules_grid(grid)) == 4 and len(B.rules_grid(grid, model_free=True)) == 1
