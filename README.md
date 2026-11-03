@@ -82,6 +82,7 @@ uv run pytest
 - [Backups](docs/backups.md): `make pg-backup`, nightly dumps of every app database with retention and an off-box copy.
 - [Logs](docs/logs.md): structured lines to stdout, collected into Loki with one day of retention, shown per run in the console. Decided, not built.
 - [Pools, pollers and profiles](docs/pools.md): the design for running reactions in Kubernetes pools, consuming work through pollers, and running it under profiles, with everything declared in code. Decided, not built.
+- [Scaling](docs/scaling.md): compute targets beyond Kubernetes (hosts, ECS, functions, external jobs), keyed entities that may live in DynamoDB, and throughput on one box. Proposal.
 - [Running on a host](docs/running.md): `make up APP=<app>`, one shared Postgres in Docker and the app's processes as systemd user units that start at boot.
 - [The forecast model](docs/finance-forecast.md): the first ML problem of the finance app, the expected price Δ minutes ahead, and the order of work.
 
