@@ -82,3 +82,63 @@ async def test_store_outage_is_an_outcome(
     assert ctx.load("status") == "failed" and "503" in ctx.load("error")
     rows = await store.query_raw("select status, error from store_sync")
     assert rows[0]["status"] == "failed" and fake.pulls == []
+
+
+def test_pattern_prefix_and_data_revision_leave_the_pipelines_outputs_out() -> None:
+    assert mirror.pattern_prefix("parquet/**") == "parquet"
+    assert mirror.pattern_prefix("parquet/equity/*.parquet") == "parquet/equity"
+    assert mirror.pattern_prefix("*") == ""
+    assert mirror.pattern_prefix("raw/nse_cm/2026*") == "raw/nse_cm"
+    assert mirror.matches("parquet/equity/a.parquet", ["parquet/**"])
+    assert not mirror.matches("raw/x.csv", ["parquet/**"])
+    base = {
+        "parquet/equity/a.parquet": "b1",
+        "parquet/inference/i.parquet": "b2",
+        "models/m/x": "b3",
+    }
+    same_data = {**base, "parquet/inference/i.parquet": "b9", "models/m/x": "b8"}
+    moved = {**base, "parquet/equity/a.parquet": "b7"}
+    assert mirror.data_revision(base) == mirror.data_revision(same_data)
+    assert mirror.data_revision(base) != mirror.data_revision(moved)
+
+
+def test_pull_fetches_only_what_the_manifest_does_not_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = {"parquet/a.parquet": "b1", "parquet/b.parquet": "b2", "parquet/c.parquet": "b3"}
+    sizes = {"parquet/a.parquet": 3, "parquet/b.parquet": 3, "parquet/c.parquet": 3}
+    fetched: list[str] = []
+
+    def fake_tree(repo: str, token: str, revision: str, patterns: list[str]) -> dict[str, str]:
+        return dict(listing)
+
+    def fake_sizes(repo: str, token: str, revision: str, patterns: list[str]) -> dict[str, int]:
+        return dict(sizes)
+
+    def fake_download(repo: str, token: str, revision: str, path: str, root: Path) -> None:
+        fetched.append(path)
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_bytes(b"new")
+
+    monkeypatch.setattr(mirror, "tree", fake_tree)
+    monkeypatch.setattr(mirror, "_sizes", fake_sizes)
+    monkeypatch.setattr(mirror, "download", fake_download)
+    root = tmp_path / "mirror"
+    (root / "parquet").mkdir(parents=True)
+    (root / "parquet" / "a.parquet").write_bytes(b"old")  # right size: kept on the bootstrap
+    (root / "parquet" / "b.parquet").write_bytes(b"wrong size")
+    got = mirror.pull("r", "t", "rev1", ["parquet/**"], root)
+    assert sorted(fetched) == ["parquet/b.parquet", "parquet/c.parquet"] and got.files == 2
+    assert got.data_revision == mirror.data_revision(listing)
+    assert mirror.read_manifest(root) == listing
+    # the store moves one blob: only that file is fetched; a pipeline output does not move the data
+    fetched.clear()
+    listing["parquet/b.parquet"] = "b2x"
+    listing["parquet/inference/i.parquet"] = "i1"
+    got = mirror.pull("r", "t", "rev2", ["parquet/**"], root)
+    assert sorted(fetched) == ["parquet/b.parquet", "parquet/inference/i.parquet"]
+    assert got.data_revision == mirror.data_revision(listing)
+    assert mirror.read_manifest(root)["parquet/b.parquet"] == "b2x"
+    # nothing moved: nothing fetched
+    fetched.clear()
+    assert mirror.pull("r", "t", "rev2", ["parquet/**"], root).files == 0 and fetched == []

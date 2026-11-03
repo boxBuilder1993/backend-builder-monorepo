@@ -358,7 +358,12 @@ Design: [finance-portfolio.md §5](finance-portfolio.md). `finance/ml/walkforwar
 - `CloseWalkForward` (OnChange on the window's status) concatenates the windows' inference tables
   into `parquet/walkforward/<id>.parquet` and writes the IC summary; `CloseModelSearch` (OnChange on
   the walk-forward's status) writes the leaderboard, ranked by the first window's IC.
-- `LoadRows` names the rows file by the hash of (query, params, store revision) and reuses it when
+- `LoadRows` names the rows file by the hash of (query, params, data revision) and reuses it when
   it exists, so the hundreds of fits of a search query the mirror once per window (`cached` in vars).
+- `PullStore` pulls by manifest: one recursive tree listing (13 s for 21,000 files), then only the
+  files whose blob id differs from `.manifest.json` in the mirror root; `snapshot_download` walked
+  every file (6 min) on each of the pipeline's own commits. `StoreSync.data_revision` hashes the
+  listing outside `mirror.DERIVED_PREFIXES` (models, inference, studies, backtests), so a model
+  upload or an inference publish moves the store's commit but not the data revision.
 - `RunFit` gained `inline`, `specs` and `features`; `FitRun.features` records a run's feature subset
   and `FitModel` fits on it.

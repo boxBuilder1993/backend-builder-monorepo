@@ -96,20 +96,22 @@ class RegisterFit(Reaction):
 class LoadRows(Reaction):
     """Input: {"query", "params", "key"}. PullStore first, so the mirror is at the store's revision;
     then the query through DuckDB over the mirror, written to a scratch Parquet for the caller.
-    The file is named by the hash of (query, params, store revision), so a second request for the
-    same rows at the same revision finds the file and skips the query: a model search runs hundreds
-    of fits over the same rows. Saves rows_path, rows, data_hash and cached. Frames never travel
-    through vars or the outbox."""
+    The file is named by the hash of (query, params, data revision), so a second request for the
+    same rows over the same data finds the file and skips the query: a model search runs hundreds of
+    fits over the same rows, and its own model and inference commits do not move the data revision.
+    Saves rows_path, rows, data_hash and cached. Frames never travel through vars or the outbox."""
 
     async def calculate(self, ctx: Context) -> None:
         pull = await ctx.trigger(PullStore, {})
         assert pull is not None
-        pulled = {k: pull.vars.get(k) for k in ("status", "revision", "files", "bytes", "error")}
+        keys = ("status", "revision", "data_revision", "files", "bytes", "error")
+        pulled = {k: pull.vars.get(k) for k in keys}
         ctx.save("store", pulled)
         if pulled["status"] == "failed":
             raise RuntimeError(f"store unavailable: {pulled['error']}")
         q, params = ctx.input["query"], dict(ctx.input["params"])
-        path = data.work_dir() / "rows" / f"{rows_key(q, params, pulled['revision'])}.parquet"
+        at = pulled["data_revision"] or pulled["revision"]
+        path = data.work_dir() / "rows" / f"{rows_key(q, params, at)}.parquet"
         cached = path.exists()
         if cached:
             n, h = await asyncio.to_thread(_recount, path)
