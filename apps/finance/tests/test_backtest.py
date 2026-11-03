@@ -5,7 +5,8 @@ backtest reactions on Postgres with the price loader faked. See docs/finance-por
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import uuid
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,12 @@ from finance.ml import backtest as B
 from finance.ml import costs as C
 from finance.ml import portfolio as P
 from finance.ml.entities import BacktestGrid, BacktestRun
-from finance.ml.portfolio_reactions import RunBacktest, RunBacktestGrid, SummarizeBacktestGrids
+from finance.ml.portfolio_reactions import (
+    RunBacktest,
+    RunBacktestGrid,
+    SelectPortfolio,
+    SummarizeBacktestGrids,
+)
 
 ZERO = C.Schedule("zero", 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
@@ -332,3 +338,128 @@ def test_a_ruin_early_in_one_year_summarises_the_years_after() -> None:
     assert r.ruined and r.dates[0].year == 2024 and r.dates[-1].year == 2025
     s = B.summarise(r, 1_000)
     assert s["ruined"] and s["end_value"] == 0 and s["by_year"]["2025"] in (0.0, -100.0)
+
+
+def test_nearest_duration_prefers_the_closer_then_the_shorter() -> None:
+    assert [P.nearest_duration(r) for r in (1, 3, 5, 7, 8, 15, 30, 50, 90, 100, 200)] == [
+        1, 1, 5, 5, 10, 10, 21, 42, 63, 126, 126
+    ]  # fmt: skip
+
+
+def test_walkforward_scores_take_the_forecast_at_the_duration_of_the_rebalance(
+    tmp_path: Path,
+) -> None:
+    prices = synthetic_prices(date(2025, 3, 1))
+    market = B.Market.from_frame(prices)
+    d0 = market.dates[5]
+    rows: list[dict[str, Any]] = []
+    for sym in ("S0", "S1"):
+        for h, v in ((5, 1.0), (21, -1.0)):
+            rows.append({"symbol": sym, "ts": datetime.combine(d0, time(15, 30)), "h": h,
+                         "day": d0, "pred_y": v if sym == "S0" else -v, "y": 0.0})  # fmt: skip
+    (tmp_path / "parquet" / "walkforward").mkdir(parents=True)
+    pl.DataFrame(rows).write_parquet(tmp_path / "parquet/walkforward/wf.parquet")
+    s0, s1 = market.symbols.index("S0"), market.symbols.index("S1")
+    short = P.walkforward_scores(tmp_path, "parquet/walkforward/wf.parquet", market, rebalance=5)
+    assert (short[5, s0], short[5, s1]) == (1.0, -1.0) and np.isnan(short[6, s0])
+    monthly = P.walkforward_scores(tmp_path, "parquet/walkforward/wf.parquet", market, rebalance=21)
+    assert (monthly[5, s0], monthly[5, s1]) == (-1.0, 1.0)
+    # the source helper routes to it, and a baseline still goes to the baselines
+    rules = B.Rules(top_n=2, rebalance=5)
+    src = {"walk_forward_id": "x", "predictions_path": "parquet/walkforward/wf.parquet"}
+    assert np.array_equal(
+        P.source_scores(tmp_path, src, prices, market, rules)[0], short, equal_nan=True
+    )
+    assert (
+        len(P.source_scores(tmp_path, {"baseline": "equal_weight"}, prices, market, rules, draws=3))
+        == 3
+    )
+
+
+async def test_select_portfolio_ranks_models_against_the_matching_equal_weight(
+    store: PostgresStore, faked_prices: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finance import app, settings
+    from finance.ml.entities import WalkForward
+
+    monkeypatch.setattr(settings, "PUBLISH", False)
+    prices = synthetic_prices(date(2025, 3, 1))
+    market = B.Market.from_frame(prices)
+    # a "model" that knows the next 5 and 21 sessions: a perfect forecast, scaled, one row per day
+    rng = np.random.default_rng(1)
+    rows: list[dict[str, Any]] = []
+    closes = {s: prices.filter(pl.col("symbol") == s).sort("date") for s in market.symbols}
+    for d in market.dates:
+        for s in market.symbols:
+            if s == P.ETF:
+                continue
+            c = closes[s]["close"].to_numpy()
+            j = closes[s]["date"].to_list().index(d)
+            for h in (5, 21):
+                if j + h + 1 < len(c):
+                    fwd = float(np.log(c[j + h] / c[j + 1]))
+                    rows.append({"symbol": s, "ts": datetime.combine(d, time(15, 30)), "h": h,
+                                 "day": d, "pred_y": fwd + rng.normal(0, 0.001), "y": fwd})  # fmt: skip
+    rel = "parquet/walkforward/test.parquet"
+    (faked_prices / "parquet" / "walkforward").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_parquet(faked_prices / rel)
+    wf = await store.create(
+        WalkForward, fit_id="f", algorithm="oracle", params={}, feature_set="all",
+        label="oracle", status="done", windows=1, predictions_path=rel,
+    )  # fmt: skip
+    spec = {
+        "label": "select test",
+        "sources": [{"walk_forward_id": wf.id}, {"baseline": "equal_weight"}],
+        "capitals": [100_000],
+        "start": "2025-03-01",
+        "end": "2025-04-30",
+        "grid": {"top_n": [2, 3], "rebalance": [5, 21], "exit": ["band"], "band": [2.0]},
+        "draws": 2,
+    }
+    ctx = await run(store, RunBacktestGrid, spec)
+    worker = Worker(app, store)
+    while await worker.run_once():
+        pass
+    grids = await store.query(
+        BacktestGrid, "select * from backtest_grid where label = :l", l="select test"
+    )
+    assert {g.status for g in grids} == {"done"}, [g.error for g in grids]
+    model = next(g for g in grids if "walk_forward_id" in g.source)
+    assert model.source["predictions_path"] == rel and model.combinations == 4
+    table = pl.read_parquet(faked_prices / str(model.results_path))
+    assert (
+        set(table["walk_forward_id"].to_list()) == {wf.id}
+        and table["source"].str.starts_with("walk_forward").all()
+    )
+    sel = await run(
+        store, SelectPortfolio, {"label": "select test", "grid_ids": ctx.vars["grids"], "top": 3}
+    )
+    best, top = sel.vars["best"], sel.vars["top"]
+    assert sel.vars["configurations"] == 4 and len(top) == 3 and top[0] == best
+    assert (
+        best["excess_pct"] == best["return_pct"] - best["return_pct_ew"] and best["excess_pct"] > 0
+    )
+    assert best["grid_id"] == model.id and set(top[0]) >= {"rank", "top_n", "rebalance", "sharpe"}
+    assert "| rank | grid_id |" in sel.vars["table_top"]
+    ranking = pl.read_parquet(faked_prices / str(sel.vars["ranking_path"]))
+    assert ranking["rank"].to_list() == [1, 2, 3, 4] and ranking["excess_pct"].is_sorted(
+        descending=True
+    )
+    stat = sel.vars["monthly_excess"]
+    assert (
+        stat["months"] >= 1
+        and "t_stat" in stat
+        and sel.vars["best_run_id"] != sel.vars["baseline_run_id"]
+    )
+    runs = await store.query(
+        BacktestRun, "select * from backtest_run where label like 'select test %'"
+    )
+    assert {r.status for r in runs} == {"done"} and {r.label for r in runs} == {
+        "select test best",
+        "select test equal_weight",
+    }
+    # a source that has no predictions yet is refused before anything is queued
+    with pytest.raises(ValueError, match="no predictions"):
+        await run(
+            store, RunBacktestGrid, {**spec, "sources": [{"walk_forward_id": str(uuid.uuid4())}]}
+        )

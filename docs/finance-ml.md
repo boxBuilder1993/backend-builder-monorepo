@@ -331,6 +331,17 @@ Design: [finance-portfolio.md](finance-portfolio.md). Built so far: phase 1, whi
 - Reactions in `finance/ml/portfolio_reactions.py`: `RunBacktestGrid` (pulls the store once, then
   defers one `BacktestGridSource` per source × capital), `BacktestGridSource`, `RunBacktest`,
   `SummarizeBacktestGrids` (markdown tables in vars for a label).
+- A grid or run source may be a walk-forward: `{"walk_forward_id": ...}`. `RunBacktestGrid` copies
+  the predictions path into the grid's source; the simulation scores each day by the forecast at the
+  hold duration nearest the rule's rebalance interval (`portfolio.nearest_duration`: 5 sessions →
+  h=5, 21 → 21, 63 → 63), one score array per interval.
+- `SelectPortfolio {label, grid_ids, top?}`: the grids of one period and capital, with exactly one
+  `equal_weight` grid among them as the matching baseline. Each configuration's return less the
+  equal-weight return under the same rules ranks the candidates; `best`, `top` (default 20) and a
+  markdown table go to vars, the full ranking to `parquet/backtests/select_<id>.parquet`. The best
+  and its baseline then run as full accounts over the period (`BacktestRun`s labelled
+  `<label> best` and `<label> equal_weight`) for `monthly_excess`: the mean, standard deviation and
+  t-statistic of the monthly excess return and the months beating the baseline.
 
 ```bash
 backend-builder trigger finance finance.ml.portfolio_reactions.RunBacktestGrid --input '{

@@ -36,6 +36,7 @@ def test_app_scope() -> None:
         "WindowStudy",
         "RetryModels",
         "RunBacktestGrid",
+        "SelectPortfolio",
         "BacktestGridSource",
         "RunBacktest",
         "SummarizeBacktestGrids",
