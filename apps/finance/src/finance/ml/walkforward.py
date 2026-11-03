@@ -42,14 +42,19 @@ def _err(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def range_params(fit: Fit, start: date | None, end: date) -> dict[str, Any]:
+def range_params(fit: Fit, start: date | None, end: date, purge: bool = False) -> dict[str, Any]:
     """The Fit's own names for its date range: ``start``/``end`` on the forecast Fits, ``end_date``
-    on others; a Fit without an end parameter cannot be walked forward."""
+    on others; a Fit without an end parameter cannot be walked forward. With ``purge``, a Fit that
+    has a ``max_exit`` parameter gets it set to ``end`` too, so no training target resolves after
+    the cut: a 126-session target decided in December 2024 is observed in mid-2025, inside the
+    test year, and a model that saw it has been shown the test period."""
     out: dict[str, Any] = {}
     end_key = next((k for k in ("end", "end_date") if k in fit.params), None)
     if end_key is None:
         raise ValueError(f"Fit {fit.name!r} has no end parameter to cut training at")
     out[end_key] = end.isoformat()
+    if purge and "max_exit" in fit.params:
+        out["max_exit"] = end.isoformat()
     if start is not None:
         start_key = next((k for k in ("start", "start_date") if k in fit.params), None)
         if start_key:
@@ -147,7 +152,7 @@ class RunWindow(Reaction):
                 RunFit,
                 {
                     "fit_id": fit.id,
-                    "params": range_params(fit, None, win.train_end),
+                    "params": range_params(fit, None, win.train_end, purge=True),
                     "specs": [{"algorithm": wf.algorithm, "params": wf.params}],
                     "features": wf.features,
                     "inline": True,

@@ -858,6 +858,12 @@ def test_portfolio_rows_one_per_duration_on_adjusted_prices(tmp_path: Path) -> N
         (pl.col("h") == 21) & (pl.col("day") == DAYS[0]) & (pl.col("symbol") == "AAA")
     ).row(0, named=True)
     assert tail["y"] is None and tail["exit_"] is None and tail["exit_date"] > DAYS[0]
+    # max_exit purges every row whose target resolves after it, whatever its duration: a fit cut
+    # there sees nothing from beyond the cut
+    cut = DAYS[0] - timedelta(days=10)
+    purged = data.run_query(con, sql, {**params, "max_exit": cut.isoformat()})
+    assert 0 < purged.height < rows.height and purged.filter(pl.col("exit_date") > cut).height == 0
+    assert purged.height == rows.filter(pl.col("exit_date") <= cut).height
     # the split: raw prices halve on SPLIT_DAY, the adjusted rows see no jump
     spl = rows.filter((pl.col("symbol") == SPLIT_SYMBOL) & (pl.col("h") == 1)).sort("day")
     at = spl.filter(pl.col("day") == SPLIT_DAY).row(0, named=True)
