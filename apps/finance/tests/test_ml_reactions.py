@@ -355,6 +355,23 @@ async def test_model_search_walks_forward_and_closes(
     assert s.status == "done" and s.leaderboard and len(s.leaderboard["rows"]) == 4
     assert s.leaderboard["failed"] == 0 and "selection_ic" in s.leaderboard["rows"][0]
     assert "ic_w0" in s.leaderboard["rows"][0] and "ic_w1" in s.leaderboard["rows"][0]
+    assert "selection_hit" in s.leaderboard["rows"][0] and "slope_w1" in s.leaderboard["rows"][0]
+    # a score added later is computed from the saved predictions, without refitting
+    from finance.ml.walkforward import RescoreModelSearch
+
+    for w in wins:
+        await store.update(WalkForwardWindow, w.id, {"ic": {"ic": 0.5}})
+    await store.update(ModelSearch, search_id, {"leaderboard": None})
+    ctx = await run(store, RescoreModelSearch, {"search_id": search_id})
+    assert ctx.load("walk_forwards") == 4
+    while await worker.run_once():
+        pass
+    wins = await store.query(WalkForwardWindow, "select * from walk_forward_window")
+    assert all(w.ic and w.ic.get("ic") != 0.5 and "rows" in w.ic for w in wins)
+    s = (await store.query(ModelSearch, "select * from model_search where id = :s", s=search_id))[0]
+    assert s.leaderboard and len(s.leaderboard["rows"]) == 4 and s.status == "done"
+    wf = (await store.query(WalkForward, "select * from walk_forward where id = :w", w=one.id))[0]
+    assert wf.summary and wf.summary["rows"] == one.summary["rows"] and "hit" in wf.summary
 
 
 async def test_load_rows_reuses_the_file_for_the_same_query_at_the_same_revision(
@@ -399,3 +416,37 @@ def test_range_params_purges_targets_past_the_cut_only_where_the_fit_can() -> No
     }
     with pytest.raises(ValueError, match="no end parameter"):
         range_params(fit({"start": "2022-09-01"}), None, cut)
+
+
+def test_window_scores_measure_direction_and_scale(tmp_path: Path) -> None:
+    """A forecast at half the realised return, within each day: perfect ranking (both ICs 1), every
+    sign right, slope 2, r2 0.75 (the forecast's own scale explains three quarters), bias the level
+    it misses; deciles monotone in forecast and realised return. A duration with a constant
+    forecast has no correlation and is left out."""
+    from finance.ml.scores import window_scores
+
+    rng = np.random.default_rng(1)
+    rows: list[dict[str, Any]] = []
+    for d in range(12):
+        for i in range(30):
+            y = float(rng.normal(0.0, 0.1))
+            rows.append({"symbol": f"S{i}", "day": d, "h": 21, "r": y + 0.02, "pred_r": y / 2})
+            rows.append({"symbol": f"S{i}", "day": d, "h": 5, "r": y, "pred_r": 0.0})
+    rows.append({"symbol": "S0", "day": 99, "h": 21, "r": None, "pred_r": 0.1})  # no target
+    path = tmp_path / "pred.parquet"
+    pl.DataFrame(rows).write_parquet(path)
+    out = window_scores(path, "r", ["symbol", "day", "h"])
+    assert out["rows"] == 720 and out["points"] == 12
+    h21 = out["by_h"]["21"]
+    assert h21["ic"] == 1.0 and h21["pearson"] == 1.0 and h21["points"] == 12
+    assert h21["slope"] == 2.0 and h21["r2"] == 0.75
+    ys = [r["r"] for r in rows if r["h"] == 21 and r["r"] is not None]
+    assert abs(h21["bias"] - (-0.01 - 0.5 * float(np.mean(ys)))) < 1e-3  # mean(y/2) - mean(y + .02)
+    assert 0.9 < h21["hit"] < 1.0  # the +0.02 level flips the sign of a few small moves
+    dec = h21["deciles"]
+    assert len(dec) == 10 and [d["n"] for d in dec] == [36] * 10
+    assert [d["pred"] for d in dec] == sorted(d["pred"] for d in dec)
+    assert [d["real"] for d in dec] == sorted(d["real"] for d in dec)
+    assert dec[0]["hit"] < 0.1 and dec[9]["hit"] > 0.9
+    assert out["by_h"]["5"]["points"] == 0 and out["by_h"]["5"]["ic"] is None
+    assert out["ic"] == 1.0  # the overall is over the decision points that have a correlation
