@@ -150,19 +150,24 @@ experiment): four sets.
 about 10 million rows and takes a few minutes on the streaming path; the stages below are still about
 a day of worker time.
 
-### The search, in two stages, inside the selection period only
+### The split (revision 4): train on everything except 2026, validate on 2026
 
-Fitting all 832 on 16 quarterly windows is about 13,000 fits. Instead:
+The owner's decision on 2026-11-03 replaces the quarterly walk-forward. 2026 is touched once, at the
+end; every choice is made a year earlier, so nothing in the final result was picked by looking at it.
 
-| Stage | Windows | Models | Fits | Picks by |
-|---|---|---|---|---|
-| 1. Coarse | 2 yearly windows: test 2023, test 2024 | all 832 | 1,664 | Mean IC over the two years, with a minimum in each year |
-| 2. Fine | 8 quarterly windows, 2023-Q1 to 2024-Q4 | top 8 per (Fit, identity yes/no) from stage 1 = 64 | 512 | Mean quarterly IC per duration and its t-statistic |
-| 3. Forward | 7 quarterly windows, 2025-Q1 to 2026-Q4 | the stage-2 top 4 per (Fit, identity yes/no), fixed = 32 | 224 | Nothing: these forecasts feed the confirmation only |
+| Step | Train on | Judge on | Picks |
+|---|---|---|---|
+| 1. Model choice | 2022-09-01 to 2024-12-31 | 2025: IC per duration, within (date, h) | Top 4 per (Fit, identity yes/no) of the 832 candidates = 32 |
+| 2. Portfolio rule choice | the step-1 models' 2025 forecasts | 2025: the ₹10,000 account after charges and 5 bps slippage, against the equal-weight baseline | The best rule set and the top 20, written into the results document before step 3 |
+| 3. Final | **2022-09-01 to 2025-12-31** (the 32 models refitted) | **2026-01-01 to the data's end, once, unchanged** | Nothing: this is the result |
 
-Daily rows are about 1.4 million; a fit takes 10 to 60 seconds, so the three stages are roughly a day
-of worker time, run overnight, one fit at a time. Models are chosen by **forecast quality (IC)**, not
-by backtest profit, so the model choice and the portfolio choice cannot overfit each other.
+Fits: 832 (step 1) + 32 (step 3) = 864, each a few minutes at most on the streaming path: well under
+a day of worker time. A `WalkForward` now has two windows (train to 2024, test 2025; train to 2025,
+test 2026) instead of sixteen; the entities and reactions below are unchanged otherwise.
+
+What 2026 can say: forecast accuracy is well measured (about 200 trading days of rankings over
+1,500 stocks). A portfolio rebalanced quarterly has three or four decisions in it, so its 2026
+verdict carries wide error bars; the results report the weekly and monthly variants alongside.
 
 ### Entities
 
@@ -313,20 +318,17 @@ period, number of trades, and per calendar year.
 
 ## 7. Selection and the pass bar
 
-With about 1,250 models and 61,000 account configurations, the best one in any period will look
-excellent by luck. The protocol:
+With 832 models and 960 account configurations, the best one in any period looks excellent by luck.
+The protocol is the split of §5: models chosen by 2025 IC on fits through 2024; portfolio rules chosen
+on the ₹10,000 account over 2025 by `SelectPortfolio`, the choice and the top 20 committed to the
+results document first; then the chosen models refitted through 2025 and the chosen configurations
+run on 2026 unchanged. Reported: the chosen configuration's 2026 result; the distribution of the top
+20's 2026 results (if the best in 2025 is ordinary in 2026, that is overfitting and is stated); the
+rank correlation between 2025 and 2026 results across all configurations.
 
-1. Models are chosen by IC on 2023–2024 (§5). Their 2025–2026 forecasts are made but not looked at.
-2. Portfolios are chosen on 2023–2024 only, by `SelectPortfolio`. The choice, and the top 20, are
-   committed to the results document **before** any 2025–2026 account is run.
-3. The chosen configuration and the top 20 are run unchanged on 2025-01-01 to 2026-10-23.
-4. Reported: the chosen one's result; the distribution of the top 20's results (if the best in
-   selection is ordinary in confirmation, that is overfitting and is stated as such); the rank
-   correlation between selection and confirmation results across all 61,000 configurations.
-
-**The pass bar, set now:** at ₹10,000, in 2025-01 to 2026-10, after charges and 5 bps slippage, the
-chosen portfolio ends above NIFTYBEES bought once with ₹10,000, and above its equal-weight baseline,
-with a positive t-statistic on monthly excess return. Anything less is reported as a failure.
+**The pass bar, set now:** at ₹10,000, in 2026, after charges and 5 bps slippage, the chosen portfolio
+ends above NIFTYBEES bought once with ₹10,000, and above its equal-weight baseline, with a positive
+t-statistic on monthly excess return. Anything less is reported as a failure.
 
 ## 8. Costs
 
