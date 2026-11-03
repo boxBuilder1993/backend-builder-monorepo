@@ -6,8 +6,9 @@ App's four hours, stated here."""
 
 from backend_builder import OnChange, OnSchedule
 
-from finance.ml.entities import Model
+from finance.ml.entities import Model, WalkForward, WalkForwardWindow
 from finance.ml.reactions import CloseFitRun
+from finance.ml.walkforward import CloseModelSearch, CloseWalkForward
 from finance.reactions import NightlySync
 
 NIGHT_TIMEOUT = 4 * 3600
@@ -16,4 +17,6 @@ triggers = [
     OnSchedule("30 14 * * *", NightlySync, timeout=NIGHT_TIMEOUT),
     OnSchedule("30 16 * * *", NightlySync, timeout=NIGHT_TIMEOUT),
     OnChange(Model, ["status"], CloseFitRun),
+    OnChange(WalkForwardWindow, ["status"], CloseWalkForward),
+    OnChange(WalkForward, ["status"], CloseModelSearch),
 ]

@@ -14,7 +14,7 @@ from finance.sources import Ledger, LegResult, NoData, Written
 def test_app_scope() -> None:
     assert {e.__name__ for e in app.entities} == {
         "DataFile", "StoreSync", "Fit", "FitRun", "Model", "InferRun", "Evaluation",
-        "BacktestGrid", "BacktestRun",
+        "BacktestGrid", "BacktestRun", "ModelSearch", "WalkForward", "WalkForwardWindow",
     }  # fmt: skip
     poller = {"NightlySync", "SyncLeg", "Publish", "PullStore"}
     ml = {
@@ -39,6 +39,10 @@ def test_app_scope() -> None:
         "BacktestGridSource",
         "RunBacktest",
         "SummarizeBacktestGrids",
+        "RunModelSearch",
+        "RunWindow",
+        "CloseWalkForward",
+        "CloseModelSearch",
     }
     api = {"RegisterFitApi", "RunFitApi", "GetRunApi", "InferApi", "EvaluateApi"}
     assert {r.__name__ for r in app.reactions} == poller | ml | api

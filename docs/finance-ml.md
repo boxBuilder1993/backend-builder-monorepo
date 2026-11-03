@@ -342,3 +342,20 @@ backend-builder trigger finance finance.ml.portfolio_reactions.RunBacktestGrid -
            "exit": ["band", "fixed"], "band": [2.0]}}'
 backend-builder trigger finance finance.ml.portfolio_reactions.SummarizeBacktestGrids --input '{"label": "capital study"}'
 ```
+
+## Walk-forward and model search (2026-11-03)
+
+Design: [finance-portfolio.md §5](finance-portfolio.md). `finance/ml/walkforward.py`:
+
+- `RunModelSearch {label, fit_ids, specs, feature_sets, windows?}` creates a `ModelSearch`, one
+  `WalkForward` per (Fit × spec × feature set) and its `WalkForwardWindow`s, and defers one
+  `RunWindow` per window. The default windows are the 2026 split: train to 2024-12-31 and test 2025,
+  train to 2025-12-31 and test 2026.
+- `RunWindow` runs `RunFit` inline with the one spec and the feature subset, the Fit's end parameter
+  at `train_end`, then `Infer` on the test range (with `need_target` off where the Fit has it), and
+  records the window's IC overall and per duration.
+- `CloseWalkForward` (OnChange on the window's status) concatenates the windows' inference tables
+  into `parquet/walkforward/<id>.parquet` and writes the IC summary; `CloseModelSearch` (OnChange on
+  the walk-forward's status) writes the leaderboard, ranked by the first window's IC.
+- `RunFit` gained `inline`, `specs` and `features`; `FitRun.features` records a run's feature subset
+  and `FitModel` fits on it.
