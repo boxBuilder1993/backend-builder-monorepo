@@ -136,7 +136,8 @@ class RunModelSearch(Reaction):
 class RunWindow(Reaction):
     """Deferred, one per WalkForwardWindow. Input: {"window_id"}. RunFit inline with the one spec
     and the feature subset, the query's end at train_end; then Infer on the test range with
-    need_target off, so every test day gets a forecast. Records the ids and the window's IC."""
+    need_target off, so every test day gets a forecast, and sample off, so every listed duration
+    does. Records the ids and the window's scores."""
 
     async def calculate(self, ctx: Context) -> None:
         win = await ctx.get_by_id(WalkForwardWindow, ctx.input["window_id"])
@@ -168,6 +169,10 @@ class RunWindow(Reaction):
             params = range_params(fit, win.test_start, win.test_end)
             if "need_target" in fit.params:
                 params["need_target"] = False
+            if "sample" in fit.params:
+                params["sample"] = (
+                    0  # the training rows sample durations; the forecast is the full curve
+                )
             inferred = await ctx.trigger(
                 Infer,
                 {

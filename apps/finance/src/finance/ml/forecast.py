@@ -871,6 +871,9 @@ def daily_fit_definition(
 
 DURATIONS = (1, 5, 10, 21, 42, 63, 126)
 """Hold durations in sessions a pooled Fit sees at once; ``:durations`` picks a subset at run time."""
+EVERY_DURATION = tuple(range(1, 64))
+"""Every hold from a day to a quarter (revision 5); trained with ``SAMPLE`` per stock-day, scored in full."""
+SAMPLE = 7
 
 P_SLOW = [
     "ret_120d",
@@ -894,8 +897,9 @@ P_OWN = [
     "own_max_dd_250",
 ]
 """The stock's own habits, rolling and from the past only: its overnight and daytime means, its
-return distribution, its mean return over the row's own duration shrunk toward the cross-section
-(k = 20 observations), its deepest fall from a 250-session high."""
+return distribution, its mean daily return scaled to the row's own duration (``own_h_mean_250``;
+revision 5 replaced the per-duration rolling mean, hard-coded for seven durations, after stage 1
+showed the stock-history features move the IC by under 0.005), its deepest fall from a 250-session high."""
 P_EXIT = [
     "exit_dom",
     "exit_moy",
@@ -943,20 +947,7 @@ d1 as (
            ln(close_raw) as log_px,
            lead(open) over w as entry,
            lead(date) over w as entry_date,
-           lead(close, 1) over w as exit_1, lead(date, 1) over w as exit_date_1,
-           ln(close / lag(close, 1) over w) as past_1,
-           lead(close, 5) over w as exit_5, lead(date, 5) over w as exit_date_5,
-           ln(close / lag(close, 5) over w) as past_5,
-           lead(close, 10) over w as exit_10, lead(date, 10) over w as exit_date_10,
-           ln(close / lag(close, 10) over w) as past_10,
-           lead(close, 21) over w as exit_21, lead(date, 21) over w as exit_date_21,
-           ln(close / lag(close, 21) over w) as past_21,
-           lead(close, 42) over w as exit_42, lead(date, 42) over w as exit_date_42,
-           ln(close / lag(close, 42) over w) as past_42,
-           lead(close, 63) over w as exit_63, lead(date, 63) over w as exit_date_63,
-           ln(close / lag(close, 63) over w) as past_63,
-           lead(close, 126) over w as exit_126, lead(date, 126) over w as exit_date_126,
-           ln(close / lag(close, 126) over w) as past_126,
+           row_number() over w as rn,
            count(*) over (partition by symbol order by date rows between 249 preceding and current row) as hist
     from e window w as (partition by symbol order by date)
 ),
@@ -981,13 +972,6 @@ d2 as (
            avg(ret_1d) over w250 as own_ret_mean_250,
            stddev_samp(ret_1d) over w250 as own_ret_sd_250,
            avg(case when ret_1d > 0 then 1.0 else 0.0 end) over w250 as own_hit_250,
-           avg(past_1) over w250 as own_mean_1, count(past_1) over w250 as own_n_1,
-           avg(past_5) over w250 as own_mean_5, count(past_5) over w250 as own_n_5,
-           avg(past_10) over w250 as own_mean_10, count(past_10) over w250 as own_n_10,
-           avg(past_21) over w250 as own_mean_21, count(past_21) over w250 as own_n_21,
-           avg(past_42) over w250 as own_mean_42, count(past_42) over w250 as own_n_42,
-           avg(past_63) over w250 as own_mean_63, count(past_63) over w250 as own_n_63,
-           avg(past_126) over w250 as own_mean_126, count(past_126) over w250 as own_n_126,
            hist as hist_
     from d1
     window w20 as (partition by symbol order by date rows between 19 preceding and current row),
@@ -1069,18 +1053,21 @@ r3 as (
     from r2 r left join sec sx on sx.name = r.sector_idx and sx.date = r.date
 ),
 hs as (select unnest(:durations::int[]) as h),
-r4 as (
-    select r.*, hs.h,
-           case hs.h when 1 then exit_1 when 5 then exit_5 when 10 then exit_10 when 21 then exit_21 when 42 then exit_42 when 63 then exit_63 when 126 then exit_126 end as exit_,
-           case hs.h when 1 then exit_date_1 when 5 then exit_date_5 when 10 then exit_date_10 when 21 then exit_date_21 when 42 then exit_date_42 when 63 then exit_date_63 when 126 then exit_date_126 end as exit_date_known,
-           case hs.h when 1 then own_mean_1 when 5 then own_mean_5 when 10 then own_mean_10 when 21 then own_mean_21 when 42 then own_mean_42 when 63 then own_mean_63 when 126 then own_mean_126 end as own_h_raw,
-           case hs.h when 1 then own_n_1 when 5 then own_n_5 when 10 then own_n_10 when 21 then own_n_21 when 42 then own_n_42 when 63 then own_n_63 when 126 then own_n_126 end as own_h_n
-    from r3 r cross join hs
+sh as (  -- the durations each (stock, date) carries: all of them, or :sample drawn by a hash
+    select r.symbol, r.date, hs.h
+    from (select symbol, date from r3) r cross join hs
+    qualify :sample = 0 or row_number() over (partition by r.symbol, r.date order by hash(r.symbol || '|' || r.date::varchar || '|' || hs.h::varchar)) <= :sample
+),
+r4 as (  -- the exit is the close of the h-th session after the decision, by session number
+    select r.*, sh.h, x.close as exit_, x.date as exit_date_known
+    from r3 r
+    join sh on sh.symbol = r.symbol and sh.date = r.date
+    left join (select symbol, rn, close, date from d1) x on x.symbol = r.symbol and x.rn = r.rn + sh.h
 ),
 r5 as (
     select *,
            coalesce(exit_date_known, entry_date + ((h * 7) / 5 + 1)::int) as exit_date,
-           (own_h_n * own_h_raw + 20 * avg(own_h_raw) over (partition by date, h)) / nullif(own_h_n + 20, 0) as own_h_mean_250
+           own_ret_mean_250 * h as own_h_mean_250
     from r4
 )
 select symbol, date::timestamp + interval 15 hour + interval 30 minute as ts, h, symbol as stock, h as hold, date as day, close_raw as close, entry, entry_date, exit_, exit_date, sig_d,
@@ -1115,6 +1102,7 @@ order by date, symbol, h
 
 PORTFOLIO_PARAMS: dict[str, Any] = {
     "durations": list(DURATIONS),
+    "sample": 0,
     "need_target": True,
     "vol_sessions": 20,
     "min_sigma": 0.002,
@@ -1124,7 +1112,9 @@ PORTFOLIO_PARAMS: dict[str, Any] = {
     "max_exit": "2030-12-31",
 }
 """One row per (symbol, session t, h) decided at t's close on split-adjusted prices, entered at the
-next open, exited at the close of the h-th session. `max_exit` drops every row whose exit lies
+next open, exited at the close of the h-th session; `sample` > 0 keeps that many of the listed durations
+per (symbol, session), drawn by a hash of the three, so a Fit on every duration from 1 to 63
+(`EVERY_DURATION`) trains on as many rows as one on seven. `max_exit` drops every row whose exit lies
 after it, so a fit cut at a date sees no target that resolves past that date (the walk-forward sets
 it to `train_end`; the test and inference ranges leave it open); `need_target` false keeps the last h sessions
 with a null target so today's rows get a forecast. Rows start where 250 sessions of history exist.
@@ -1160,13 +1150,26 @@ def portfolio_fit_definition(
     if target not in ("y", "r"):
         raise ValueError("target is y (scaled) or r (raw)")
     params = {**PORTFOLIO_PARAMS, "durations": list(durations), **overrides}
-    shape = f"h{durations[0]}" if len(durations) == 1 else "pooled"
+    if len(durations) == 1:
+        shape = f"h{durations[0]}"
+    elif len(durations) > len(DURATIONS) and durations == tuple(
+        range(durations[0], durations[-1] + 1)
+    ):
+        shape = f"pooled{durations[-1]}"
+        params["sample"] = overrides.get("sample", SAMPLE)
+    else:
+        shape = "pooled"
     name = f"portfolio {shape} {market} {target}" + (" sym" if with_symbol else "")
+    span = (
+        f"{durations[0]}..{durations[-1]}, {params['sample']} per stock-day"
+        if len(durations) > len(DURATIONS)
+        else ", ".join(map(str, durations))
+    )
     return {
         "name": name,
         "description": (
             f"{market.upper()}: {'volatility-scaled' if target == 'y' else 'raw'} log return over the "
-            f"row's own hold duration ({', '.join(map(str, durations))} sessions), decided at the close "
+            f"row's own hold duration ({span} sessions), decided at the close "
             "on adjusted prices, entered at the next open; docs/finance-portfolio.md §5"
         ),
         "query": portfolio_sql(market),
