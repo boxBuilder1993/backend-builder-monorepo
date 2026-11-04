@@ -53,6 +53,13 @@ class Rules:
     take_profit: float = 0.20
     max_turnover_share: float = 0.02
     """A position is at most this share of the stock's 20-session median rupee turnover."""
+    hold: str = "rebalance"
+    """``rebalance``: the forecast at the duration nearest the rebalance interval ranks the stocks.
+    ``model``: each stock is ranked by the best point on its forecast curve after that duration's
+    costs, per session held, and a holding is also sold when that duration is up (revision 5)."""
+    min_pred_bps: float = 0.0
+    """Buy only when the forecast's excess over the day's average, less the round-trip cost, is at
+    least this many basis points; 0 disables. Needs a source that carries the excess."""
 
     def keep_rank(self) -> int:
         if self.exit == "fixed":
@@ -118,12 +125,30 @@ class Market:
 
 
 @dataclass
+class Signal:
+    """What a source says about every (date, symbol): the ranking ``score``; optionally ``excess``,
+    the forecast over the day's average less the round-trip cost, in return units, which the
+    ``min_pred_bps`` rule reads; and ``hold``, the sessions the model would hold, which the
+    ``model`` hold reads. All aligned to the market, NaN where absent."""
+
+    score: np.ndarray
+    excess: np.ndarray | None = None
+    hold: np.ndarray | None = None
+
+    @classmethod
+    def of(cls, x: np.ndarray | Signal) -> Signal:
+        return x if isinstance(x, Signal) else cls(x)
+
+
+@dataclass
 class Holding:
     shares: float
     cost: float
     factor: float
     bought_t: int
     bought_decision: int
+    until: int = -1
+    """The day index whose open sells it under the ``model`` hold; -1 when the rules decide."""
 
 
 @dataclass
@@ -144,7 +169,7 @@ class Result:
 
 def simulate(
     market: Market,
-    scores: np.ndarray,
+    scores: np.ndarray | Signal,
     rules: Rules,
     capital: float,
     schedule: C.Schedule,
@@ -153,6 +178,18 @@ def simulate(
     record: bool = False,
 ) -> Result:
     """One account from the trading day at index ``start`` to ``end`` inclusive."""
+    signal = Signal.of(scores)
+    scores = signal.score
+    if rules.min_pred_bps > 0 and signal.excess is None:
+        raise ValueError(
+            "min_pred_bps needs a source that carries the forecast's excess over costs"
+        )
+    if rules.hold == "model" and signal.hold is None:
+        raise ValueError("the model hold needs a source that carries the model's hold duration")
+    if rules.hold not in ("rebalance", "model"):
+        raise ValueError(f"hold is rebalance or model, not {rules.hold!r}")
+    threshold = rules.min_pred_bps / 1e4
+    until_for: dict[int, int] = {}
     slip = rules.slippage_bps / 1e4
     cash = float(capital)
     held: dict[int, Holding] = {}
@@ -227,7 +264,9 @@ def simulate(
             traded += value
             trades += 1
             # the decision that queued this buy is the one before the counter moved on
-            held[s] = Holding(shares, price, market.factor[t, s], t, decision - 1)
+            held[s] = Holding(
+                shares, price, market.factor[t, s], t, decision - 1, until_for.pop(s, -1)
+            )
             if record:
                 log.append(_trade(market, t, s, "buy", shares, price, value, c, "rule"))
         # 3. at the close: delistings and stops
@@ -240,11 +279,15 @@ def simulate(
                 h = held[s]
                 if c_t <= h.cost * (1 - rules.stop_loss) or c_t >= h.cost * (1 + rules.take_profit):
                     sells.add(s)
+            if held[s].until == t + 1:
+                sells.add(s)  # the model's hold is up: sold at tomorrow's open
         # 4. a decision
         if k % rules.rebalance == 0 and t < end:
             sc = scores[t]
             close_t = market.close[t]
             valid = ~np.isnan(sc) & ~np.isnan(close_t)
+            if signal.excess is not None and threshold > 0:
+                valid &= signal.excess[t] >= threshold
             idx = np.flatnonzero(valid)
             order = idx[np.argsort(-sc[idx], kind="stable")]
             rank = {int(s): i + 1 for i, s in enumerate(order)}
@@ -273,6 +316,12 @@ def simulate(
                         break
                     if close_t[s] * (1 + slip) * (1 + buy_rate) <= target:
                         buys.append(s)
+                        if rules.hold == "model" and signal.hold is not None:
+                            h_s = signal.hold[t, s]
+                            if not np.isnan(h_s):
+                                # decided at t's close, bought at t+1's open, sold at the open
+                                # after the h-th session's close
+                                until_for[s] = t + int(h_s) + 1
             decision += 1
         # 5. mark at the close
         for s in held:
@@ -369,9 +418,13 @@ def summarise(result: Result, capital: float) -> dict[str, Any]:
     }
 
 
-def rules_grid(grid: dict[str, list[Any]], base: Rules | None = None) -> list[Rules]:
+def rules_grid(
+    grid: dict[str, list[Any]], base: Rules | None = None, model_free: bool = False
+) -> list[Rules]:
     """Every combination of the listed rule values; ``band`` only varies for the band and stop exits
-    (fixed and score ignore it), so no combination is counted twice."""
+    (fixed and score ignore it), so no combination is counted twice. ``model_free`` (a baseline
+    source) collapses the rules that read a forecast, ``hold`` and ``min_pred_bps``, to their
+    defaults, so a baseline grid has one row per rule set the model grids are compared on."""
     keys = sorted(grid)
     seen: set[Rules] = set()
     out: list[Rules] = []
@@ -380,6 +433,8 @@ def rules_grid(grid: dict[str, list[Any]], base: Rules | None = None) -> list[Ru
         r = replace(base, **kw) if base else Rules(**kw)
         if r.exit in ("fixed", "score"):
             r = replace(r, band=1.0)
+        if model_free:
+            r = replace(r, hold="rebalance", min_pred_bps=0.0)
         if r not in seen:
             seen.add(r)
             out.append(r)
@@ -388,7 +443,7 @@ def rules_grid(grid: dict[str, list[Any]], base: Rules | None = None) -> list[Ru
 
 def run_grid(
     market: Market,
-    score_draws: list[np.ndarray],
+    score_draws: list[np.ndarray | Signal],
     grid: list[Rules],
     capital: float,
     schedule: C.Schedule,

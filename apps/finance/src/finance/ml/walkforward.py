@@ -24,6 +24,7 @@ from backend_builder import Context, Reaction
 from finance import reactions as poller
 from finance.ml.entities import Fit, InferRun, ModelSearch, WalkForward, WalkForwardWindow
 from finance.ml.reactions import Infer, PublishArtifact, RunFit
+from finance.ml.scores import SCORE_KEYS, mean_scores, window_scores
 
 WINDOW_BUDGET = 2 * 3600
 """A window fits one model on up to about ten million rows and scores a year: well under this."""
@@ -135,7 +136,8 @@ class RunModelSearch(Reaction):
 class RunWindow(Reaction):
     """Deferred, one per WalkForwardWindow. Input: {"window_id"}. RunFit inline with the one spec
     and the feature subset, the query's end at train_end; then Infer on the test range with
-    need_target off, so every test day gets a forecast. Records the ids and the window's IC."""
+    need_target off, so every test day gets a forecast, and sample off, so every listed duration
+    does. Records the ids and the window's scores."""
 
     async def calculate(self, ctx: Context) -> None:
         win = await ctx.get_by_id(WalkForwardWindow, ctx.input["window_id"])
@@ -167,6 +169,10 @@ class RunWindow(Reaction):
             params = range_params(fit, win.test_start, win.test_end)
             if "need_target" in fit.params:
                 params["need_target"] = False
+            if "sample" in fit.params:
+                params["sample"] = (
+                    0  # the training rows sample durations; the forecast is the full curve
+                )
             inferred = await ctx.trigger(
                 Infer,
                 {
@@ -182,7 +188,7 @@ class RunWindow(Reaction):
             win.infer_run_id = str(inferred.vars["infer_run_id"])
             path = poller.data_root() / str(inferred.vars["path"])
             win.ic = await asyncio.to_thread(
-                window_ic, path, fit.target["columns"][0], list(fit.key)
+                window_scores, path, fit.target["columns"][0], list(fit.key)
             )
         except Exception as exc:  # noqa: BLE001 - the window's outcome
             win.status, win.error = "failed", _err(exc)
@@ -190,36 +196,6 @@ class RunWindow(Reaction):
             return
         win.status = "done"
         ctx.save("ic", win.ic)
-
-
-def window_ic(path: Path, target: str, key: list[str]) -> dict[str, Any]:
-    """Spearman IC within each decision point (the key without the instrument: the time, and h
-    when present), averaged: overall and per duration. Rows without a target (the last h sessions)
-    are left out."""
-    df = pl.read_parquet(path)
-    pred = f"pred_{target}"
-    df = df.filter(pl.col(target).is_not_null() & pl.col(pred).is_not_null())
-    group = [k for k in key if k != "symbol"]
-    if "h" in df.columns and "h" not in group:
-        group.append("h")
-    per = (
-        df.group_by(group)
-        .agg(pl.corr(pl.col(target).rank(), pl.col(pred).rank()).alias("c"), pl.len().alias("n"))
-        .filter(pl.col("n") >= 20)
-        .drop_nulls("c")
-    )
-    mean_c = per["c"].mean() if per.height else None
-    out: dict[str, Any] = {
-        "ic": round(float(mean_c), 4) if isinstance(mean_c, int | float) else None,
-        "points": per.height,
-        "rows": df.height,
-    }
-    if "h" in df.columns and per.height:
-        by_h = (
-            per.group_by("h").agg(pl.col("c").mean().round(4), pl.len().alias("points")).sort("h")
-        )
-        out["by_h"] = {str(h): {"ic": c, "points": n} for h, c, n in by_h.rows()}
-    return out
 
 
 class CloseWalkForward(Reaction):
@@ -263,19 +239,7 @@ class CloseWalkForward(Reaction):
             PublishArtifact, {"paths": [rel], "kind": "parquet", "source": "walkforward"}
         )
         wf.predictions_path = rel
-        wf.summary = {
-            "rows": rows,
-            "windows": [
-                {
-                    "index": w.index,
-                    "test_start": w.test_start.isoformat(),
-                    "model_id": w.model_id,
-                    **(w.ic or {}),
-                }  # fmt: skip
-                for w in windows
-            ],
-            "ic": _mean([w.ic["ic"] for w in windows if w.ic and w.ic.get("ic") is not None]),
-        }
+        wf.summary = summarise(rows, windows)
         wf.status = "done"
         ctx.save("closed", True)
         ctx.save("summary", wf.summary)
@@ -289,8 +253,21 @@ def _concat(root: Path, paths: list[tuple[int, str]], rel: str) -> int:
     return out.height
 
 
-def _mean(xs: list[float]) -> float | None:
-    return round(sum(xs) / len(xs), 4) if xs else None
+def summarise(rows: int, windows: list[WalkForwardWindow]) -> dict[str, Any]:
+    """The walk-forward's summary: every window's scores, and their means over windows."""
+    return {
+        "rows": rows,
+        "windows": [
+            {
+                "index": w.index,
+                "test_start": w.test_start.isoformat(),
+                "model_id": w.model_id,
+                **(w.ic or {}),
+            }  # fmt: skip
+            for w in windows
+        ],
+        **mean_scores([w.ic for w in windows if w.ic]),
+    }
 
 
 class CloseModelSearch(Reaction):
@@ -311,34 +288,126 @@ class CloseModelSearch(Reaction):
         if any(w.status == "running" for w in wfs) or len(wfs) < search.walk_forwards:
             ctx.save("closed", False)
             return
-        fits: dict[str, str] = {}
-        for fid in search.fit_ids:
-            fit = await ctx.get_by_id(Fit, fid)
-            fits[fid] = fit.name if fit else fid
-        rows: list[dict[str, Any]] = []
-        for w in wfs:
-            summary: dict[str, Any] = w.summary or {}
-            raw_windows: list[Any] = list(summary.get("windows") or [])
-            windows: list[dict[str, Any]] = (
-                [dict[str, Any](x) for x in raw_windows] if w.status == "done" else []
-            )
-            row: dict[str, Any] = {
-                "walk_forward_id": w.id,
-                "fit": fits.get(w.fit_id, w.fit_id),
-                "algorithm": w.algorithm,
-                "params": w.params,
-                "feature_set": w.feature_set,
-                "status": w.status,
-                "selection_ic": windows[0].get("ic") if windows else None,
-            }
-            for win in windows:
-                row[f"ic_w{win['index']}"] = win.get("ic")
-                by_h: dict[str, dict[str, Any]] = dict(win.get("by_h") or {})
-                for h, v in by_h.items():
-                    row[f"ic_w{win['index']}_h{h}"] = v.get("ic")
-            rows.append(row)
-        rows.sort(key=lambda r: (r["fit"], -(r["selection_ic"] or -9)))
-        search.leaderboard = {"rows": rows, "failed": sum(1 for w in wfs if w.status == "failed")}
+        search.leaderboard = await leaderboard(ctx, search, wfs)
         search.status = "done"
         ctx.save("closed", True)
         ctx.save("leaderboard", search.leaderboard)
+
+
+async def leaderboard(ctx: Context, search: ModelSearch, wfs: list[WalkForward]) -> dict[str, Any]:
+    """Per Fit, the walk-forwards ranked by the Spearman IC of the first window (the selection
+    window), every window's scores alongside: ``<score>_w<i>`` overall and ``<score>_w<i>_h<h>``
+    per duration for the IC, hit rate and slope."""
+    fits: dict[str, str] = {}
+    for fid in search.fit_ids:
+        fit = await ctx.get_by_id(Fit, fid)
+        fits[fid] = fit.name if fit else fid
+    rows: list[dict[str, Any]] = []
+    for w in wfs:
+        summary: dict[str, Any] = w.summary or {}
+        raw_windows: list[Any] = list(summary.get("windows") or [])
+        windows: list[dict[str, Any]] = (
+            [dict[str, Any](x) for x in raw_windows] if w.status == "done" else []
+        )
+        row: dict[str, Any] = {
+            "walk_forward_id": w.id,
+            "fit": fits.get(w.fit_id, w.fit_id),
+            "algorithm": w.algorithm,
+            "params": w.params,
+            "feature_set": w.feature_set,
+            "status": w.status,
+            "selection_ic": windows[0].get("ic") if windows else None,
+        }
+        for k in SCORE_KEYS[1:]:
+            row[f"selection_{k}"] = windows[0].get(k) if windows else None
+        for win in windows:
+            for k in SCORE_KEYS:
+                row[f"{k}_w{win['index']}"] = win.get(k)
+            by_h: dict[str, dict[str, Any]] = dict(win.get("by_h") or {})
+            for h, v in by_h.items():
+                for k in ("ic", "hit", "slope"):
+                    row[f"{k}_w{win['index']}_h{h}"] = v.get(k)
+        rows.append(row)
+    rows.sort(key=lambda r: (r["fit"], -(r["selection_ic"] or -9)))
+    return {"rows": rows, "failed": sum(1 for w in wfs if w.status == "failed")}
+
+
+class RescoreWalkForward(Reaction):
+    """Input: {"walk_forward_id"}. Recomputes every window's scores of a done walk-forward from its
+    saved predictions table and rewrites the summary. How a finished search gets a score that did
+    not exist when it ran."""
+
+    async def calculate(self, ctx: Context) -> None:
+        wf = await ctx.get_by_id(WalkForward, ctx.input["walk_forward_id"])
+        if wf is None:
+            raise LookupError(f"no WalkForward {ctx.input['walk_forward_id']}")
+        if wf.status != "done" or not wf.predictions_path:
+            ctx.save("rescored", False)
+            return
+        fit = await ctx.get_by_id(Fit, wf.fit_id)
+        if fit is None:
+            raise LookupError(f"WalkForward {wf.id} without its Fit")
+        windows = await ctx.query(
+            WalkForwardWindow,
+            "select * from walk_forward_window where walk_forward_id = :w order by index",
+            w=wf.id,
+        )
+        path = poller.data_root() / wf.predictions_path
+        scored = await asyncio.to_thread(
+            _rescore, path, fit.target["columns"][0], list(fit.key), [w.index for w in windows]
+        )
+        for w in windows:
+            w.ic = scored[w.index]
+        wf.summary = summarise(int((wf.summary or {}).get("rows") or 0), windows)
+        ctx.save("rescored", True)
+        ctx.save("summary", wf.summary)
+
+
+def _rescore(path: Path, target: str, key: list[str], indexes: list[int]) -> dict[int, Any]:
+    table = pl.read_parquet(path)
+    out: dict[int, Any] = {}
+    for i in indexes:
+        part = table.filter(pl.col("window") == i)
+        tmp = path.with_suffix(f".w{i}.tmp.parquet")
+        part.write_parquet(tmp)
+        try:
+            out[i] = window_scores(tmp, target, key)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return out
+
+
+class RescoreModelSearch(Reaction):
+    """Input: {"search_id"}. One deferred RescoreWalkForward per done walk-forward of the search,
+    then a deferred RebuildLeaderboard. Returns in seconds; the worker does the rest."""
+
+    async def calculate(self, ctx: Context) -> None:
+        search = await ctx.get_by_id(ModelSearch, ctx.input["search_id"])
+        if search is None:
+            raise LookupError(f"no ModelSearch {ctx.input['search_id']}")
+        wfs = await ctx.query(
+            WalkForward,
+            "select * from walk_forward where search_id = :s and status = 'done'",
+            s=search.id,
+        )
+        for w in wfs:
+            await ctx.trigger(
+                RescoreWalkForward, {"walk_forward_id": w.id}, deferred=True, timeout=1800
+            )
+        await ctx.trigger(RebuildLeaderboard, {"search_id": search.id}, deferred=True, timeout=1800)
+        ctx.save("walk_forwards", len(wfs))
+
+
+class RebuildLeaderboard(Reaction):
+    """Input: {"search_id"}. The leaderboard of a search rebuilt from its walk-forwards' current
+    summaries. Deferred after the rescores, so the worker runs it once they are done."""
+
+    async def calculate(self, ctx: Context) -> None:
+        search = await ctx.get_by_id(ModelSearch, ctx.input["search_id"])
+        if search is None:
+            raise LookupError(f"no ModelSearch {ctx.input['search_id']}")
+        wfs = await ctx.query(
+            WalkForward, "select * from walk_forward where search_id = :s", s=search.id
+        )
+        search.leaderboard = await leaderboard(ctx, search, wfs)
+        ctx.save("rows", len(search.leaderboard["rows"]))

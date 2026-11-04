@@ -131,19 +131,26 @@ def _grid(root: Path, g: BacktestGrid, out: Path) -> pl.DataFrame:
     prices = P.universe(P.load_prices(root, start, end))
     market = B.Market.from_frame(prices)
     name = P.source_name(g.source)
-    grid = B.rules_grid(dict(g.grid))
+    model = "walk_forward_id" in g.source
+    grid = B.rules_grid(dict(g.grid), model_free=not model)
     if name == "niftybees":
         base = grid[0]
         grid = [B.Rules(**{**asdict(base), **P.niftybees_rules_override()})]
     i0, i1 = market.index(start), market.index(end, after=True) - 1
-    # a model is asked for the hold nearest each rebalance interval: one score array per interval
-    groups: dict[int, list[B.Rules]] = {}
+    # a model is asked for the hold nearest each rebalance interval, or for its own hold, and
+    # what a forecast must clear depends on the position size: one signal per such group
+    schedule = C.SCHEDULES[g.costs]
+    forecasts = P.Forecasts.load(root, str(g.source["predictions_path"])) if model else None
+    groups: dict[tuple[Any, ...], list[B.Rules]] = {}
     for r in grid:
-        groups.setdefault(r.rebalance if "walk_forward_id" in g.source else 0, []).append(r)
+        key = (r.hold, 0 if r.hold == "model" else r.rebalance, r.top_n) if model else ()
+        groups.setdefault(key, []).append(r)
     parts: list[pl.DataFrame] = []
     for rules in groups.values():
-        draws = P.source_scores(root, g.source, prices, market, rules[0], g.draws, 0)
-        parts.append(B.run_grid(market, draws, rules, g.capital, C.SCHEDULES[g.costs], i0, i1))
+        draws = P.source_scores(
+            root, g.source, prices, market, rules[0], g.draws, 0, schedule, g.capital, forecasts
+        )
+        parts.append(B.run_grid(market, draws, rules, g.capital, schedule, i0, i1))
     table = pl.concat(parts, how="diagonal_relaxed").with_columns(
         pl.lit(g.id).alias("grid_id"),
         pl.lit(name).alias("source"),
@@ -199,7 +206,9 @@ def _account(root: Path, run: BacktestRun, rules: B.Rules, stem: str) -> dict[st
     prices = P.universe(P.load_prices(root, start, end))
     market = B.Market.from_frame(prices, rules.max_turnover_share)
     name = P.source_name(run.source)
-    scores = P.source_scores(root, run.source, prices, market, rules, 1, 0)[0]
+    scores = P.source_scores(
+        root, run.source, prices, market, rules, 1, 0, C.SCHEDULES[run.costs], run.capital
+    )[0]
     if name == "niftybees":
         rules = B.Rules(**{**asdict(rules), **P.niftybees_rules_override()})
     i0, i1 = market.index(start), market.index(end, after=True) - 1
@@ -217,6 +226,9 @@ def _account(root: Path, run: BacktestRun, rules: B.Rules, stem: str) -> dict[st
 
 
 RULE_COLUMNS = list(asdict(B.Rules(top_n=1, rebalance=1)))
+MATCH_COLUMNS = [c for c in RULE_COLUMNS if c not in ("hold", "min_pred_bps")]
+"""A model's configuration is compared with the equal-weight account under the same rules except
+those that read a forecast, which a baseline has not got."""
 SELECT_COLUMNS = [
     "rank", "grid_id", "source", "walk_forward_id", *RULE_COLUMNS, "return_pct", "return_pct_ew",
     "excess_pct", "sharpe", "max_drawdown_pct", "charges_pct_per_year", "trades", "avg_hold_days",
@@ -289,12 +301,12 @@ class SelectPortfolio(Reaction):
 
 def _rank(root: Path, candidates: list[BacktestGrid], ew: BacktestGrid, rel: str) -> pl.DataFrame:
     base = pl.read_parquet(root / str(ew.results_path)).select(
-        *RULE_COLUMNS, pl.col("return_pct").alias("return_pct_ew")
+        *MATCH_COLUMNS, pl.col("return_pct").alias("return_pct_ew")
     )
     tables = [pl.read_parquet(root / str(g.results_path)) for g in candidates]
     joined = (
         pl.concat(tables, how="diagonal_relaxed")
-        .join(base, on=RULE_COLUMNS, how="inner")
+        .join(base, on=MATCH_COLUMNS, how="inner")
         .with_columns((pl.col("return_pct") - pl.col("return_pct_ew")).alias("excess_pct"))
         .sort(["excess_pct", "sharpe"], descending=[True, True], nulls_last=True)
         .with_row_index("rank", offset=1)

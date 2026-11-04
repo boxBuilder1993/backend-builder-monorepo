@@ -868,8 +868,37 @@ def test_portfolio_rows_one_per_duration_on_adjusted_prices(tmp_path: Path) -> N
     spl = rows.filter((pl.col("symbol") == SPLIT_SYMBOL) & (pl.col("h") == 1)).sort("day")
     at = spl.filter(pl.col("day") == SPLIT_DAY).row(0, named=True)
     assert abs(at["ret_1d"]) < 0.02 and at["close"] < 70  # ret_1d adjusted, close is the raw price
+    # every duration from a day to a quarter, 3 per (stock, day) drawn by a hash: exactly 3 each,
+    # the same 3 on a second run, and together they cover the range; sample 0 keeps them all
+    every = {
+        **params,
+        "durations": list(forecast.EVERY_DURATION),
+        "sample": 3,
+        "need_target": False,
+    }
+    drawn = data.run_query(con, sql, every)
+    per = drawn.group_by("symbol", "day").agg(pl.col("h").n_unique().alias("k"), pl.len())
+    assert per["k"].unique().to_list() == [3] and per["len"].unique().to_list() == [3]
+    assert drawn["h"].n_unique() > 50
+    again = data.run_query(con, sql, every)
+    assert again.select("symbol", "day", "h").equals(drawn.select("symbol", "day", "h"))
+    full = data.run_query(con, sql, {**every, "sample": 0})
+    assert full.group_by("symbol", "day").len()["len"].unique().to_list() == [63]
+    # the sampled rows are a subset of the full ones, with the same exits and features
+    sub = full.join(drawn.select("symbol", "day", "h"), on=["symbol", "day", "h"], how="semi")
+    assert sub.height == drawn.height
+    assert (
+        sub.sort("day", "symbol", "h")
+        .select("exit_", "own_h_mean_250")
+        .equals(drawn.sort("day", "symbol", "h").select("exit_", "own_h_mean_250"))
+    )
+    long = forecast.portfolio_fit_definition("r", forecast.EVERY_DURATION, with_symbol=True)
+    assert long["name"] == "portfolio pooled63 nse r sym" and long["params"]["sample"] == 7
+    assert "1..63, 7 per stock-day" in long["description"]
+    assert set(data.param_names(long["query"])) == set(long["params"])
     # the Fit body binds every parameter the query uses; the symbol variant adds the identity
     body = forecast.portfolio_fit_definition("r", (1, 5, 21))
+    assert body["params"]["sample"] == 0 and body["name"] == "portfolio pooled nse r"
     assert set(data.param_names(body["query"])) == set(body["params"]) and body["key"] == [
         "symbol",
         "ts",

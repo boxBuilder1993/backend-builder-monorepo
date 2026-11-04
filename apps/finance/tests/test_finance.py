@@ -44,6 +44,9 @@ def test_app_scope() -> None:
         "RunWindow",
         "CloseWalkForward",
         "CloseModelSearch",
+        "RescoreWalkForward",
+        "RescoreModelSearch",
+        "RebuildLeaderboard",
     }
     api = {"RegisterFitApi", "RunFitApi", "GetRunApi", "InferApi", "EvaluateApi"}
     assert {r.__name__ for r in app.reactions} == poller | ml | api

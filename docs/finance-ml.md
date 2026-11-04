@@ -334,7 +334,13 @@ Design: [finance-portfolio.md](finance-portfolio.md). Built so far: phase 1, whi
 - A grid or run source may be a walk-forward: `{"walk_forward_id": ...}`. `RunBacktestGrid` copies
   the predictions path into the grid's source; the simulation scores each day by the forecast at the
   hold duration nearest the rule's rebalance interval (`portfolio.nearest_duration`: 5 sessions →
-  h=5, 21 → 21, 63 → 63), one score array per interval.
+  h=5, 21 → 21, 63 → 63), one signal per interval. `portfolio.Forecasts` reads the table once per
+  grid and demeans the forecast within (date, h); a `backtest.Signal` carries the score, that excess
+  less the round-trip cost of one position (`costs.round_trip_bps` at capital / top_n) and, under
+  `Rules.hold = "model"`, the duration whose excess per session held is highest, which the account
+  ranks by and sells at. `Rules.min_pred_bps` buys only where the excess clears that many basis
+  points. Baseline grids collapse both rules (`rules_grid(model_free=True)`), and `SelectPortfolio`
+  matches on the other rule columns (`MATCH_COLUMNS`). Revision 5 of the design doc.
 - `SelectPortfolio {label, grid_ids, top?}`: the grids of one period and capital, with exactly one
   `equal_weight` grid among them as the matching baseline. Each configuration's return less the
   equal-weight return under the same rules ranks the candidates; `best`, `top` (default 20) and a
@@ -364,11 +370,23 @@ Design: [finance-portfolio.md §5](finance-portfolio.md). `finance/ml/walkforwar
   train to 2025-12-31 and test 2026.
 - `RunWindow` runs `RunFit` inline with the one spec and the feature subset, the Fit's end parameter
   at `train_end` (and its `max_exit`, where it has one, so no training target resolves after the
-  cut), then `Infer` on the test range (with `need_target` off where the Fit has it), and
-  records the window's IC overall and per duration.
+  cut), then `Infer` on the test range (with `need_target` off where the Fit has it, and `sample`
+  off, so every listed duration is forecast), and records the window's scores
+  (`finance/ml/scores.py`: Spearman and Pearson IC within each (date, h), hit rate, cross-sectional
+  calibration slope and R², level bias, a decile table of forecast against realised return; overall
+  and per duration).
 - `CloseWalkForward` (OnChange on the window's status) concatenates the windows' inference tables
-  into `parquet/walkforward/<id>.parquet` and writes the IC summary; `CloseModelSearch` (OnChange on
-  the walk-forward's status) writes the leaderboard, ranked by the first window's IC.
+  into `parquet/walkforward/<id>.parquet` and writes the summary (every window's scores and their
+  means); `CloseModelSearch` (OnChange on the walk-forward's status) writes the leaderboard, ranked
+  by the first window's Spearman IC, every score of every window alongside (`<score>_w<i>`, and
+  `ic`/`hit`/`slope` per duration as `<score>_w<i>_h<h>`).
+- `RescoreWalkForward {walk_forward_id}` recomputes a done walk-forward's scores from its saved
+  predictions; `RescoreModelSearch {search_id}` defers one per done walk-forward and then
+  `RebuildLeaderboard {search_id}`. How a finished search gets a score that did not exist when it ran.
+- The portfolio rows query (`forecast.portfolio_sql`) finds the exit by a self-join on the stock's
+  session number, so any hold duration works; `:sample` > 0 keeps that many of `:durations` per
+  (stock, date), drawn by a hash. `fits/round3/portfolio_pooled63_nse_{r,y}_sym.json` train on every
+  hold from 1 to 63 sessions (`forecast.EVERY_DURATION`), 7 per stock-day, and forecast the full curve.
 - `LoadRows` names the rows file by the hash of (query, params, data revision) and reuses it when
   it exists, so the hundreds of fits of a search query the mirror once per window (`cached` in vars).
 - `PullStore` pulls by manifest: one recursive tree listing (13 s for 21,000 files), then only the

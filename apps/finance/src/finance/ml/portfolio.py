@@ -18,8 +18,9 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from finance.ml import costs as C
 from finance.ml import data
-from finance.ml.backtest import Market, Rules
+from finance.ml.backtest import Market, Rules, Signal
 from finance.ml.forecast import DURATIONS
 
 LIQUID_TURNOVER = 1e7
@@ -101,19 +102,76 @@ def nearest_duration(rebalance: int, durations: tuple[int, ...] = DURATIONS) -> 
     return min(durations, key=lambda h: (abs(h - rebalance), h))
 
 
+class Forecasts:
+    """A walk-forward's forecasts, read once: (date, symbol, h, pred, excess), where ``excess`` is
+    the forecast less the mean forecast of the day at that duration. The day's level is what no
+    cross-sectional model forecasts (revision 5: the first stage-1 window missed it by 3 points in
+    every decile while its relative sizes were right), so the rules read the excess."""
+
+    def __init__(self, frame: pl.DataFrame) -> None:
+        self.frame = frame
+        self.durations = tuple(sorted(frame["h"].unique().to_list()))
+
+    @classmethod
+    def load(cls, root: Any, predictions_path: str) -> Forecasts:
+        lf = pl.scan_parquet(Path(root) / predictions_path)
+        cols = lf.collect_schema().names()
+        pred = next(c for c in cols if c.startswith("pred_"))
+        day = pl.col("day") if "day" in cols else pl.col("ts").dt.date()
+        f = (
+            lf.select(
+                day.alias("date"), "symbol", pl.col("h").cast(pl.Int64), pl.col(pred).alias("pred")
+            )
+            .drop_nulls()
+            .with_columns(
+                (pl.col("pred") - pl.col("pred").mean().over("date", "h")).alias("excess")
+            )
+            .collect()
+        )
+        return cls(f)
+
+    def at(self, market: Market, rebalance: int, cost: float = 0.0) -> Signal:
+        """The forecast at the duration nearest the rebalance interval as the score, since an
+        account that decides every ``rebalance`` sessions holds for about that long; the excess
+        less the round-trip ``cost`` alongside."""
+        h = nearest_duration(rebalance, self.durations)
+        f = self.frame.filter(pl.col("h") == h)
+        return Signal(
+            market.scores(f.select("date", "symbol", pl.col("pred").alias("score"))),
+            market.scores(f.select("date", "symbol", (pl.col("excess") - cost).alias("score"))),
+        )
+
+    def curve(self, market: Market, cost: float) -> Signal:
+        """The model's own hold: for each (date, symbol) the duration whose excess less the
+        round-trip ``cost``, per session held, is highest; that rate is the score, the excess at
+        that duration and the duration itself alongside."""
+        best = (
+            self.frame.with_columns(((pl.col("excess") - cost) / pl.col("h")).alias("rate"))
+            .sort(["date", "symbol", "rate", "h"], descending=[False, False, True, False])
+            .unique(["date", "symbol"], keep="first", maintain_order=True)
+        )
+        return Signal(
+            market.scores(best.select("date", "symbol", pl.col("rate").alias("score"))),
+            market.scores(best.select("date", "symbol", (pl.col("excess") - cost).alias("score"))),
+            market.scores(
+                best.select("date", "symbol", pl.col("h").cast(pl.Float64).alias("score"))
+            ),
+        )
+
+
 def walkforward_scores(
     root: Any, predictions_path: str, market: Market, rebalance: int
 ) -> np.ndarray:
-    """A walk-forward's forecasts as a score array: the forecast at the duration nearest the
-    rebalance interval, since an account that decides every ``rebalance`` sessions holds for about
-    that long. Rows are keyed by the decision day; the first ``pred_*`` column is the score."""
-    h = nearest_duration(rebalance)
-    lf = pl.scan_parquet(Path(root) / predictions_path).filter(pl.col("h") == h)
-    cols = lf.collect_schema().names()
-    pred = next(c for c in cols if c.startswith("pred_"))
-    day = pl.col("day") if "day" in cols else pl.col("ts").dt.date()
-    f = lf.select(day.alias("date"), "symbol", pl.col(pred).alias("score")).collect()
-    return market.scores(f.drop_nulls())
+    """The forecast at the duration nearest the rebalance interval, as a score array."""
+    return Forecasts.load(root, predictions_path).at(market, rebalance).score
+
+
+def round_trip_cost(schedule: C.Schedule | None, capital: float, rules: Rules) -> float:
+    """The round-trip charges on one position of the account, as a return: what a forecast must
+    clear. Zero without a schedule."""
+    if schedule is None:
+        return 0.0
+    return C.round_trip_bps(schedule, capital / rules.top_n) / 1e4
 
 
 def source_name(source: dict[str, Any]) -> str:
@@ -130,12 +188,20 @@ def source_scores(
     rules: Rules,
     draws: int = 1,
     seed: int = 0,
-) -> list[np.ndarray]:
-    """Score arrays for a grid source: a walk-forward's forecasts (``{"walk_forward_id",
-    "predictions_path"}``, one array per rebalance interval) or a baseline."""
+    schedule: C.Schedule | None = None,
+    capital: float = 0.0,
+    forecasts: Forecasts | None = None,
+) -> list[np.ndarray | Signal]:
+    """Signals for a grid source: a walk-forward's forecasts (``{"walk_forward_id",
+    "predictions_path"}``; the rules say at which hold, and the schedule and capital what a
+    forecast must clear) or a baseline. ``forecasts`` passes an already loaded table."""
     if "walk_forward_id" in source:
-        return [walkforward_scores(root, str(source["predictions_path"]), market, rules.rebalance)]
-    return baseline_scores(str(source["baseline"]), prices, market, draws=draws, seed=seed)
+        fc = forecasts or Forecasts.load(root, str(source["predictions_path"]))
+        cost = round_trip_cost(schedule, capital, rules)
+        if rules.hold == "model":
+            return [fc.curve(market, cost)]
+        return [fc.at(market, rules.rebalance, cost)]
+    return list(baseline_scores(str(source["baseline"]), prices, market, draws=draws, seed=seed))
 
 
 def niftybees_rules_override() -> dict[str, Any]:
