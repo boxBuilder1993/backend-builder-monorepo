@@ -50,7 +50,7 @@ times the byte per cell the finished index holds."""
 
 INCORE_BUDGET = 8 * 1024**3
 """The host memory a GPU attempt may spend on that matrix: the card holds 8 GB, so a matrix past
-this never trains on it anyway, and building it (20 GB at 40 million rows) is what took the worker."""
+this never trains on it anyway, and building it (20 GB at 40 million rows) took the worker down."""
 
 
 def gpu_fits(rows: int, features: int, budget: int | None = None) -> bool:
