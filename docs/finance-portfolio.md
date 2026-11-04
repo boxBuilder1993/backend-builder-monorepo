@@ -236,8 +236,8 @@ them, and the model's own view of the best duration tested as a portfolio rule. 
 scope for this account (₹20 per intraday order is 0.4 % of ₹10,000 per round trip; delivery is free).
 
 **Rows.** A dense grid is 63 rows per (stock, date), about 46 million training rows and 17 GB of
-features: it does not fit on the box. Instead each (stock, date) draws **7 durations from 1..63** by a
-deterministic hash of (symbol, date), so the rows file is byte-identical across runs and the row
+float32 features: too much to hold at once. Instead each (stock, date) draws **7 durations from 1..63**
+by a deterministic hash of (symbol, date), so the rows file is byte-identical across runs and the row
 count equals today's. Every duration appears about 82,000 times in the training range; a tree
 reads `h` as a number and learns the return as a smooth function of it (the returns at 30 and 31
 sessions are nearly the same row anyway). Inference asks for the full range, 63 rows per stock-day,
@@ -248,7 +248,8 @@ so a forecast is a curve over the hold, not a point.
 | Exit price and date | A self-join on the stock's session number (`rn + h`) replaces the seven hard-coded `lead(close, h)` columns and the `case` on `h` | Any `h` works; the seven original durations must produce the same `exit_` and `exit_date` as before (tested) |
 | `:durations` | Still a list, so the comparison Fits (`[21]`) and inference (`1..63`) use it unchanged; a new `:sample` parameter (default 0 = keep every listed duration) keeps `k` of them per (stock, date) by `hash(symbol, date, h)` rank | Training rows stay at 7 per stock-day; inference and the h21 Fits are unaffected |
 | `own_h_mean_250` | Becomes `own_ret_mean_250 × h` | The per-duration rolling mean was hard-coded per `h`; stage 1 showed the stock-history features move the IC by less than 0.005 |
-| Fits | `portfolio pooled63 nse r` and `... y` under `fits/round3/`, durations 1..63, sample 7 | New names; the seven-duration Fits stay as the comparison |
+| Fits | `portfolio pooled63 nse r` and `... y` under `fits/round3/`, durations 1..63, sample 7; `portfolio pooled63 full nse r` and `... y`, sample 0, the dense grid | New names; the seven-duration Fits stay as the comparison |
+| Dense fits in batches | The fit child already streams the rows file in million-row chunks: the ridge accumulates its Gram matrix (exact), xgboost fills its quantile matrix. lightgbm now reads the chunks through an `lgb.Sequence` and keeps only its binned matrix, about a byte per cell (4 GB for the dense grid); the same single fit as from the whole matrix, tested against `LGBMRegressor` | The owner asked whether the dense grid could be trained in batches rather than sampled. It can; the cost is training time, about nine times a sampled window's (4 → 35–40 minutes), inside the 2-hour window budget |
 | Scores per window | Next to the Spearman IC per `(date, h)`: Pearson IC; hit rate (sign agreement); cross-sectional calibration slope and R² (realised on predicted after removing each day's mean within `h`); level bias (mean predicted − mean realised); a decile table of mean predicted vs mean realised return, per `h` | The Spearman IC ignores magnitude. The portfolio sizes positions and compares a forecast against costs, so the forecast's scale must be measured. Slope, bias and deciles are in the target's units: return points for a raw-return target, scaled units for the symmetric one |
 | `RescoreWalkForward` | Reaction: recomputes a done walk-forward's scores from its saved predictions parquet and rewrites the summary; `RescoreModelSearch` runs it over a search and rebuilds the leaderboard | Stage 1's 416 walk-forwards get the new scores without refitting |
 
@@ -268,7 +269,10 @@ of the stage-1 leaderboard} × {all, no_stock}, train through 2024, judged on 20
 20 walk-forwards. Compared with the seven-duration pooled Fits at the shared durations (1, 5, 10, 21,
 42, 63). If pooled63 matches or beats them there, it is the portfolio model and the variable-hold
 rule below is searched in step 2; if it is worse, the seven-duration model stays and the result is
-written up here.
+written up here. Then one dense walk-forward: the best stage-1b tree spec on `pooled63 full`, both
+feature sets, about 11 hours. If it beats the sampled fit at the shared durations by more than the
+spread between stage-1b windows, the dense Fit is the portfolio model and the sample is raised or
+dropped for the remaining specs; otherwise the sampled fit stands and the dense result is recorded.
 
 ## 6. Phase 3: the portfolios
 
