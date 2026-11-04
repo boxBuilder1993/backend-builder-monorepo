@@ -895,6 +895,11 @@ def test_portfolio_rows_one_per_duration_on_adjusted_prices(tmp_path: Path) -> N
     long = forecast.portfolio_fit_definition("r", forecast.EVERY_DURATION, with_symbol=True)
     assert long["name"] == "portfolio pooled63 nse r sym" and long["params"]["sample"] == 7
     assert "1..63, 7 per stock-day" in long["description"]
+    full = forecast.portfolio_fit_definition(
+        "r", forecast.EVERY_DURATION, with_symbol=True, sample=0
+    )
+    assert full["name"] == "portfolio pooled63 full nse r sym" and full["params"]["sample"] == 0
+    assert "1..63, all sessions" in full["description"]
     assert set(data.param_names(long["query"])) == set(long["params"])
     # the Fit body binds every parameter the query uses; the symbol variant adds the identity
     body = forecast.portfolio_fit_definition("r", (1, 5, 21))
