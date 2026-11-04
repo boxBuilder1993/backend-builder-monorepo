@@ -235,6 +235,17 @@ and when it runs out the retry on the CPU happens after the failed attempt's mat
 exception's traceback used to keep it alive through the retry). The paged fit is the in-core fit to
 within float rounding (tested against a `QuantileDMatrix` built from the same chunks).
 
+Measured on the 39.7-million-row dense training file (88 features) under a 12 GB cap on 2026-11-05:
+streaming the chunks alone peaks at 3.6 GB; the external-memory matrix at 4.9 GB, six minutes to
+build and about 65 s per boosting round (300 rounds is five hours, so a dense xgboost fit needs
+its budgets raised); the in-core matrix grows 320 MB per million rows in its second pass, 20 GB at
+this size, and that is what both dense attempts died building. They died there because the GPU is
+tried first and that attempt builds the in-core matrix on the host before anything reaches the
+card. `fit_job` therefore sends a fit whose matrix would pass `INCORE_BUDGET` (8 GB at 4.5 bytes
+per cell, about 20 million rows of 88 features) straight to the CPU when the device is `auto`; an
+explicit `cuda` is still honoured. lightgbm's streaming path on the same file: 10.4 GB peak, 280 s
+to build its dataset, 1.8 s per round, so a dense lightgbm fit takes about a quarter of an hour.
+
 **Budgets.** `PullStore` an hour for a first pull, `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
 the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`. Retries are the runtime's default: every failure a reaction understands is an outcome, so a
 retry replays only infrastructure faults, such as two `CloseFitRun` runs for one sweep colliding.

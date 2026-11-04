@@ -5,6 +5,7 @@ estimators on a small frame, artifacts, metrics, the query parameter binding."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -433,3 +434,45 @@ def test_xgboost_cpu_fit_pages_through_the_disk(
     booster = xgb.train(train, dm, num_boost_round=30)
     expected = np.asarray(booster.inplace_predict(whole.X), dtype="float64")
     np.testing.assert_allclose(paged.predict(whole.X)["pred_fwd"], expected, rtol=1e-5)
+
+
+def test_fit_job_skips_the_gpu_for_a_fit_the_card_cannot_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-core matrix a GPU attempt builds on the host is what killed the dense fit; a fit past
+    the budget goes to the CPU without the attempt. An explicit device is honoured regardless."""
+    from finance.ml import fitting
+
+    assert fitting.gpu_fits(4_400_000, 88) and not fitting.gpu_fits(40_000_000, 88)
+    path = tmp_path / "rows.parquet"
+    frame(n=120).write_parquet(path)
+    declared = S.declare(KEY, FEATURES, {"columns": ["fwd"], "task": "regression"})
+    adapter = E.REGISTRY["xgboost"]
+    real = adapter.fit_batches
+    calls: list[str] = []
+
+    def spy(batches: Any, schema: Any, params: Any, device: str, seed: int) -> Any:
+        calls.append(device)
+        return real(batches, schema, params, "cpu", seed)
+
+    def cuda(adapter: type[Any], wanted: str) -> str:
+        return "cuda"
+
+    monkeypatch.setattr(adapter, "fit_batches", spy)
+    monkeypatch.setattr(E, "pick_device", cuda)
+    monkeypatch.setattr(fitting, "INCORE_BUDGET", 10)  # 120 rows is already too many
+    job = fitting.FitJob(
+        rows_path=str(path),
+        schema=declared.to_dict(),
+        algorithm="xgboost",
+        params=E.resolve_params("xgboost", {"n_estimators": 5}),
+        device="auto",
+        seed=1,
+        out_dir=str(tmp_path / "m"),
+        info={},
+    )
+    done = fitting.fit_job(job)
+    assert calls == ["cpu"] and done.device == "cpu"
+    calls.clear()
+    done = fitting.fit_job(replace(job, device="cuda", out_dir=str(tmp_path / "m2")))
+    assert calls == ["cuda"] and done.device == "cuda"
