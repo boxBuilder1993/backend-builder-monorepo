@@ -306,7 +306,7 @@ class BacktestRun(Entity):
 | Reaction | Input | What it does |
 |---|---|---|
 | `RunBacktestGrid` | `{sources, capitals, period, grid, costs}` | Defers one `BacktestGridSource` per (source × capital). Returns in seconds |
-| `BacktestGridSource` | `{grid_id}` | Loads scores and prices through DuckDB; runs every combination; writes the results file; publishes it |
+| `BacktestGridSource` | `{grid_id}` | Loads scores and prices through DuckDB; runs every combination; writes the results file; publishes it. A walk-forward source scores each day by the forecast at the duration nearest the rebalance interval |
 | `SelectPortfolio` | `{grid_ids, criterion}` | Over the selection period only: the best configuration by excess return over the matching `equal_weight` baseline, net of everything, with its t-statistic; also the top 20; writes them to its vars |
 | `RunBacktest` | `{source, rules, costs, capital, start, end}` | One account in full, for the chosen configurations and the confirmation |
 

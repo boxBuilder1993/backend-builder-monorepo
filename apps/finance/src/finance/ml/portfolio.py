@@ -11,6 +11,7 @@ on adjusted closes so a split is not a crash. See docs/finance-portfolio.md §4 
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -18,7 +19,8 @@ import numpy as np
 import polars as pl
 
 from finance.ml import data
-from finance.ml.backtest import Market
+from finance.ml.backtest import Market, Rules
+from finance.ml.forecast import DURATIONS
 
 LIQUID_TURNOVER = 1e7
 """₹1 crore: a stock is in the universe on a day when its 20-session median turnover is at least this."""
@@ -91,6 +93,49 @@ def baseline_scores(
         )
         return [market.scores(f)]
     raise ValueError(f"unknown baseline {name!r}; known: {BASELINES}")
+
+
+def nearest_duration(rebalance: int, durations: tuple[int, ...] = DURATIONS) -> int:
+    """The hold duration the model was asked about that is closest to the rebalance interval; the
+    shorter one on a tie."""
+    return min(durations, key=lambda h: (abs(h - rebalance), h))
+
+
+def walkforward_scores(
+    root: Any, predictions_path: str, market: Market, rebalance: int
+) -> np.ndarray:
+    """A walk-forward's forecasts as a score array: the forecast at the duration nearest the
+    rebalance interval, since an account that decides every ``rebalance`` sessions holds for about
+    that long. Rows are keyed by the decision day; the first ``pred_*`` column is the score."""
+    h = nearest_duration(rebalance)
+    lf = pl.scan_parquet(Path(root) / predictions_path).filter(pl.col("h") == h)
+    cols = lf.collect_schema().names()
+    pred = next(c for c in cols if c.startswith("pred_"))
+    day = pl.col("day") if "day" in cols else pl.col("ts").dt.date()
+    f = lf.select(day.alias("date"), "symbol", pl.col(pred).alias("score")).collect()
+    return market.scores(f.drop_nulls())
+
+
+def source_name(source: dict[str, Any]) -> str:
+    if "walk_forward_id" in source:
+        return f"walk_forward {str(source['walk_forward_id'])[:8]}"
+    return str(source["baseline"])
+
+
+def source_scores(
+    root: Any,
+    source: dict[str, Any],
+    prices: pl.DataFrame,
+    market: Market,
+    rules: Rules,
+    draws: int = 1,
+    seed: int = 0,
+) -> list[np.ndarray]:
+    """Score arrays for a grid source: a walk-forward's forecasts (``{"walk_forward_id",
+    "predictions_path"}``, one array per rebalance interval) or a baseline."""
+    if "walk_forward_id" in source:
+        return [walkforward_scores(root, str(source["predictions_path"]), market, rules.rebalance)]
+    return baseline_scores(str(source["baseline"]), prices, market, draws=draws, seed=seed)
 
 
 def niftybees_rules_override() -> dict[str, Any]:
