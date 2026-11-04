@@ -6,6 +6,7 @@ state (xgboost's quantised copy, the ridge's Gram matrix)."""
 
 from __future__ import annotations
 
+import resource
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
@@ -39,6 +40,7 @@ class FitDone:
     rows: int
     sha256: str
     bytes: int
+    peak_rss_mb: int
 
 
 def fit_job(job: FitJob) -> FitDone:
@@ -59,9 +61,14 @@ def fit_job(job: FitJob) -> FitDone:
         if device == "cpu" or not cuda_out_of_memory(exc):
             raise
         # the GPU could not hold the quantised matrix (an 8 GB card against a 20-million-row
-        # fit); the same fit on the CPU is slower and never short of memory
+        # fit); the same fit on the CPU is slower and pages its matrix through the disk. The retry
+        # is outside this block so the failed attempt's matrix is freed first: a traceback
+        # keeps its frames alive.
         device = "cpu"
+        fitted = None
+    if fitted is None:
         fitted = adapter.fit_batches(batches, schema, job.params, device, job.seed)
+    peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     out = Path(job.out_dir)
     info = dict(
         job.info,
@@ -71,10 +78,11 @@ def fit_job(job: FitJob) -> FitDone:
         seed=job.seed,
         rows=rows,
         batch_rows=job.batch_rows,
+        peak_rss_mb=peak_mb,
     )
     artifacts.save(out, fitted, schema, info)
     sha, size = artifacts.archive_hash(out)
-    return FitDone(schema.to_dict(), device, time.time() - t0, rows, sha, size)
+    return FitDone(schema.to_dict(), device, time.time() - t0, rows, sha, size, peak_mb)
 
 
 def cuda_out_of_memory(exc: BaseException) -> bool:
