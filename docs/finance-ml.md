@@ -214,7 +214,10 @@ only its row groups and frees them, where pyarrow's batch reader retained its bu
 builds its `QuantileDMatrix` from the chunks, the 256-bin sketch `hist` uses anyway, about a byte per
 cell; the ridge accumulates the Gram matrix and solves in closed form, identical to scikit-learn's
 `Ridge` on the whole matrix, with medians from a one-pass reservoir sample of a million rows; lightgbm
-and logistic regression concatenate the chunks. A 20-million-row fit that peaked at 27 GB and was
+reads the chunks three times through an `lgb.Sequence` holding one chunk (the labels, the 200,000-row
+binning sample, then every row pushed), so what stays in memory is its binned matrix, about a byte per
+cell, and the fit is the one it makes from the whole matrix (tested against `LGBMRegressor`); logistic
+regression concatenates the chunks. A 20-million-row fit that peaked at 27 GB and was
 killed twice on 2026-10-25 now runs in a few GB. The model's `fit.json` records `rows` and
 `batch_rows`. The worker unit also carries `MemoryMax=24G`, so a fit that still outgrows the box dies
 inside its own cgroup and the model is recorded `failed`, instead of the kernel choosing a victim.
@@ -386,7 +389,9 @@ Design: [finance-portfolio.md §5](finance-portfolio.md). `finance/ml/walkforwar
 - The portfolio rows query (`forecast.portfolio_sql`) finds the exit by a self-join on the stock's
   session number, so any hold duration works; `:sample` > 0 keeps that many of `:durations` per
   (stock, date), drawn by a hash. `fits/round3/portfolio_pooled63_nse_{r,y}_sym.json` train on every
-  hold from 1 to 63 sessions (`forecast.EVERY_DURATION`), 7 per stock-day, and forecast the full curve.
+  hold from 1 to 63 sessions (`forecast.EVERY_DURATION`), 7 per stock-day, and forecast the full curve;
+  `portfolio_pooled63_full_nse_{r,y}_sym.json` (`sample` 0) train on all 63, about 46 million rows,
+  which the streaming fits hold binned.
 - `LoadRows` names the rows file by the hash of (query, params, data revision) and reuses it when
   it exists, so the hundreds of fits of a search query the mirror once per window (`cached` in vars).
 - `PullStore` pulls by manifest: one recursive tree listing (13 s for 21,000 files), then only the

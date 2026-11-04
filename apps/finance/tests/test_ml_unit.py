@@ -127,6 +127,51 @@ def test_each_adapter_fits_predicts_saves_and_loads(algorithm: str, tmp_path: Pa
     assert len(sha1) == 64 and size > 0 and artifacts.archive_hash(tmp_path) == (sha1, size)
 
 
+def test_lightgbm_streams_the_same_fit_as_the_whole_matrix() -> None:
+    """The chunked path (one chunk held, three passes) is the fit LightGBM makes from the matrix:
+    the bins come from the same sample and every row is pushed. Compared against the sklearn
+    estimator the adapter used before it streamed, on a frame whose rows all enter the sample."""
+    import lightgbm as lgb
+
+    s = S.declare(KEY, FEATURES, {"columns": ["fwd"], "task": "regression"})
+    p = data.prepare(frame(600, seed=3), s, fitting=True)
+    assert p.Y is not None
+    X, Y = p.X, p.Y
+    params = E.resolve_params("lightgbm", {"n_estimators": 40, "num_leaves": 7})
+
+    def chunks() -> Any:
+        for i in range(0, 600, 130):  # uneven: the last chunk is 80 rows
+            yield X[i : i + 130], Y[i : i + 130]
+
+    streamed = E.REGISTRY["lightgbm"].fit_batches(chunks, p.schema, params, "cpu", 7)
+    ref: Any = lgb.LGBMRegressor(**params, random_state=7, verbose=-1)
+    ref.fit(X, Y[:, 0])
+    expected = np.asarray(ref.predict(X), dtype="float64")
+    np.testing.assert_allclose(streamed.predict(X)["pred_fwd"], expected, rtol=1e-6, atol=1e-9)
+    # the sequence serves rows, slices across chunks and index lists, as LightGBM asks for them
+    from finance.ml.estimators.lightgbm_ import chunk_sequence_class
+
+    q = chunk_sequence_class()(chunks, 600, 130)
+    assert len(q) == 600 and q[137].dtype == np.float64
+    np.testing.assert_array_equal(q[140:310], X[140:310])
+    np.testing.assert_array_equal(q[[5, 400, 599]], X[[5, 400, 599]].astype("float64"))
+    np.testing.assert_array_equal(q[20], X[20])  # going back restarts the chunks
+    # a classifier and a vector target take the same streamed path
+    sb = S.declare(KEY, FEATURES, {"columns": ["up"], "task": "binary"})
+    pb = data.prepare(frame(300), sb, fitting=True)
+    assert pb.Y is not None
+    fitted = E.REGISTRY["lightgbm"].fit_batches(
+        E.single(pb.X, pb.Y),
+        pb.schema,
+        E.resolve_params("lightgbm", {"n_estimators": 20}),
+        "cpu",
+        1,
+    )
+    out = fitted.predict(pb.X)
+    np.testing.assert_allclose(out["pred_up_0"] + out["pred_up_1"], 1.0, atol=1e-6)
+    assert (np.asarray(out["pred_up"]) == pb.Y[:, 0].astype(int).astype(str)).mean() > 0.9
+
+
 def test_vector_target_and_classification_outputs(tmp_path: Path) -> None:
     f = frame().with_columns((pl.col("fwd") * 2).alias("fwd2"))
     s = S.declare(KEY, FEATURES, {"columns": ["fwd", "fwd2"], "task": "regression"})

@@ -1155,16 +1155,18 @@ def portfolio_fit_definition(
     elif len(durations) > len(DURATIONS) and durations == tuple(
         range(durations[0], durations[-1] + 1)
     ):
-        shape = f"pooled{durations[-1]}"
         params["sample"] = overrides.get("sample", SAMPLE)
+        shape = f"pooled{durations[-1]}" + ("" if params["sample"] else " full")
     else:
         shape = "pooled"
     name = f"portfolio {shape} {market} {target}" + (" sym" if with_symbol else "")
-    span = (
-        f"{durations[0]}..{durations[-1]}, {params['sample']} per stock-day"
-        if len(durations) > len(DURATIONS)
-        else ", ".join(map(str, durations))
-    )
+    if len(durations) <= len(DURATIONS):
+        span = ", ".join(map(str, durations))
+    elif params["sample"]:
+        span = f"{durations[0]}..{durations[-1]}, {params['sample']} per stock-day"
+    else:
+        span = f"{durations[0]}..{durations[-1]}, all"
+
     return {
         "name": name,
         "description": (
