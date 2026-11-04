@@ -1,7 +1,9 @@
 # Holding portfolios for a small account: forecasts for days to a quarter, and a backtest that trades them
 
-Status: **reviewed and agreed**, 2026-10-25, revision 3; **revision 4 (2026-11-03) for review**: one pooled model
-across hold durations, stock-history features with a stock-identity experiment, exit-side calendar, no year (§5). Owner's decisions: no dividends, no shorting,
+Status: **reviewed and agreed**, 2026-10-25, revision 3; revision 4 (2026-11-03) agreed and running as stage 1: one pooled model
+across hold durations, stock-history features with a stock-identity experiment, exit-side calendar, no year (§5);
+**revision 5 (2026-11-04) for review**: every hold duration from a day to a quarter in one model, magnitude
+scores next to the IC, a rule that lets the model choose the hold (§5 and §6). Owner's decisions: no dividends, no shorting,
 search the space as widely as possible, study capital first, target ₹10,000, capitals from ₹10,000
 up, about a day of overnight compute is fine, the affordability tilt is accepted, the US later.
 Builds on [finance-ml.md](finance-ml.md) (Fit, FitRun, Model, InferRun, Evaluation),
@@ -227,6 +229,51 @@ Changes to existing reactions: `RunFit` gains `inline` (FitModel inside the run,
 score the model it just made), `specs` (fit a subset of the search) and `features` (a subset of the
 Fit's features).
 
+### Every hold duration from a day to a quarter (revision 5, 2026-11-04)
+
+Owner's decision: one model trained on **every** hold duration from 1 to 63 sessions, not seven of
+them, and the model's own view of the best duration tested as a portfolio rule. Intraday is out of
+scope for this account (₹20 per intraday order is 0.4 % of ₹10,000 per round trip; delivery is free).
+
+**Rows.** A dense grid is 63 rows per (stock, date), about 46 million training rows and 17 GB of
+float32 features: too much to hold at once. Instead each (stock, date) draws **7 durations from 1..63**
+by a deterministic hash of (symbol, date), so the rows file is byte-identical across runs and the row
+count equals today's. Every duration appears about 82,000 times in the training range; a tree
+reads `h` as a number and learns the return as a smooth function of it (the returns at 30 and 31
+sessions are nearly the same row anyway). Inference asks for the full range, 63 rows per stock-day,
+so a forecast is a curve over the hold, not a point.
+
+| Change | Detail | Why |
+|---|---|---|
+| Exit price and date | A self-join on the stock's session number (`rn + h`) replaces the seven hard-coded `lead(close, h)` columns and the `case` on `h` | Any `h` works; the seven original durations must produce the same `exit_` and `exit_date` as before (tested) |
+| `:durations` | Still a list, so the comparison Fits (`[21]`) and inference (`1..63`) use it unchanged; a new `:sample` parameter (default 0 = keep every listed duration) keeps `k` of them per (stock, date) by `hash(symbol, date, h)` rank | Training rows stay at 7 per stock-day; inference and the h21 Fits are unaffected |
+| `own_h_mean_250` | Becomes `own_ret_mean_250 × h` | The per-duration rolling mean was hard-coded per `h`; stage 1 showed the stock-history features move the IC by less than 0.005 |
+| Fits | `portfolio pooled63 nse r` and `... y` under `fits/round3/`, durations 1..63, sample 7; `portfolio pooled63 full nse r` and `... y`, sample 0, the dense grid | New names; the seven-duration Fits stay as the comparison |
+| Dense fits in batches | The fit child already streams the rows file in million-row chunks: the ridge accumulates its Gram matrix (exact), xgboost fills its quantile matrix. lightgbm now reads the chunks through an `lgb.Sequence` and keeps only its binned matrix, about a byte per cell (4 GB for the dense grid); the same single fit as from the whole matrix, tested against `LGBMRegressor` | The owner asked whether the dense grid could be trained in batches rather than sampled. It can; the cost is training time, about nine times a sampled window's (4 → 35–40 minutes), inside the 2-hour window budget |
+| Scores per window | Next to the Spearman IC per `(date, h)`: Pearson IC; hit rate (sign agreement); cross-sectional calibration slope and R² (realised on predicted after removing each day's mean within `h`); level bias (mean predicted − mean realised); a decile table of mean predicted vs mean realised return, per `h` | The Spearman IC ignores magnitude. The portfolio sizes positions and compares a forecast against costs, so the forecast's scale must be measured. Slope, bias and deciles are in the target's units: return points for a raw-return target, scaled units for the symmetric one |
+| `RescoreWalkForward` | Reaction: recomputes a done walk-forward's scores from its saved predictions parquet and rewrites the summary; `RescoreModelSearch` runs it over a search and rebuilds the leaderboard | Stage 1's 416 walk-forwards get the new scores without refitting |
+
+**What the first finished window said (2026-11-04, LightGBM, h21 raw-return Fit, 2025, best of 154
+by IC, so flattered by selection):** Spearman IC 0.146, hit rate 56.9 %, cross-sectional slope 1.10,
+cross-sectional R² 2.2 %, level bias +3.0 points (the model carried the 2022–24 average into a down
+year). Deciles of the forecast are monotone in realised return: bottom decile predicted −3.9 % and
+realised −9.8 % (21 % rose), top decile predicted +7.4 % and realised +5.7 % (72 % rose), against a
+universe mean of −1.2 % (44 % rose). Relative magnitude is calibrated; the level is not, and no
+cross-sectional model forecasts the level. Consequences for §6: a cost threshold compares the
+**demeaned** forecast plus a conservative market assumption against costs, never the raw level; the
+bottom of the ranking is a sell signal (the existing `score` and `band` exits), not a short, because a
+cash-market short is intraday only and futures lots are ₹5–15 lakh.
+
+**Stage 1b.** After stage 1 closes: the two pooled63 Fits × {ridge alpha 1, the four best tree specs
+of the stage-1 leaderboard} × {all, no_stock}, train through 2024, judged on 2025 like stage 1, about
+20 walk-forwards. Compared with the seven-duration pooled Fits at the shared durations (1, 5, 10, 21,
+42, 63). If pooled63 matches or beats them there, it is the portfolio model and the variable-hold
+rule below is searched in step 2; if it is worse, the seven-duration model stays and the result is
+written up here. Then one dense walk-forward: the best stage-1b tree spec on `pooled63 full`, both
+feature sets, about 11 hours. If it beats the sampled fit at the shared durations by more than the
+spread between stage-1b windows, the dense Fit is the portfolio model and the sample is raised or
+dropped for the remaining specs; otherwise the sampled fit stands and the dense result is recorded.
+
 ## 6. Phase 3: the portfolios
 
 ### The account
@@ -252,9 +299,11 @@ schedule in; daily equity, trades and holdings out. No runtime, fully tested.
 |---|---|---|
 | `top_n` | 1, 2, 3, 4, 5, 6, 8, 10 | Stocks held when full. Phase 1 may narrow this |
 | `rebalance` | every 5, 10, 21, 42, 63, 126 sessions | When the portfolio may change |
+| `hold` | `rebalance` (default), `model` | `model` (revision 5, pooled63 sources only): each stock is scored by the best point on its forecast curve after that duration's costs, per session held; a holding is sold when its own duration is up or at the next rebalance when its re-scored curve no longer puts it in the top N. `rebalance` reads the forecast at the duration nearest the rebalance period |
 | `exit` | `band`, `fixed`, `score`, `stop` | `band`: keep while rank ≤ B, sell below. `fixed`: sell all and re-pick each rebalance. `score`: sell when the calibrated forecast turns negative. `stop`: band plus a sell after a close 8 % below cost or 20 % above, checked daily |
 | `band` | B = N, 1.5N, 2N, 3N | Only for `band` and `stop` |
 | `min_hold` | 0, 1 rebalance | A new holding cannot be sold at the next rebalance |
+| `min_pred_bps` | 0, 50, 100 (revision 5) | Buy only when the demeaned forecast over the hold exceeds this many basis points after the round-trip cost; 0 disables |
 | `slippage_bps` | 5 (selection); 0, 5, 10 (confirmation) | Against the trader on every fill |
 
 8 × 6 × (1 + 1 + 4 + 4) × 2 = 960 rule combinations per source. Sources: the 60 stage-2 forecasts
