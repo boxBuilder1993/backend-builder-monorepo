@@ -218,9 +218,22 @@ reads the chunks three times through an `lgb.Sequence` holding one chunk (the la
 binning sample, then every row pushed), so what stays in memory is its binned matrix, about a byte per
 cell, and the fit is the one it makes from the whole matrix (tested against `LGBMRegressor`); logistic
 regression concatenates the chunks. A 20-million-row fit that peaked at 27 GB and was
-killed twice on 2026-10-25 now runs in a few GB. The model's `fit.json` records `rows` and
-`batch_rows`. The worker unit also carries `MemoryMax=24G`, so a fit that still outgrows the box dies
-inside its own cgroup and the model is recorded `failed`, instead of the kernel choosing a victim.
+killed twice on 2026-10-25 now runs in a few GB. The model's `fit.json` records `rows`,
+`batch_rows` and `peak_rss_mb` (the child's high-water mark, also in `FitModel`'s vars), so the memory
+a fit took is a number on the model rather than a guess. The worker unit also carries `MemoryMax=24G`,
+so a fit that still outgrows the box dies inside its own cgroup and the model is recorded `failed`,
+instead of the kernel choosing a victim.
+
+**External memory (2026-11-05).** The in-core `QuantileDMatrix` is still about a byte per cell, and
+the 46-million-row dense fit (`pooled63 full`, 89 features) was 4 GB of it plus xgboost's working set:
+the fit reached the 24 GB cgroup limit with 12 GB more in swap and the OOM killer took the whole
+worker, not just the child. On the CPU xgboost now builds an `ExtMemQuantileDMatrix` instead: the
+quantised pages are written under `$XDG_CACHE_HOME/finance/xgb-cache/` and streamed through each
+boosting round, so what stays resident is a page or two; the directory is removed when the fit
+returns, whichever way. The GPU path keeps the in-core matrix, the card's 8 GB being its limit anyway,
+and when it runs out the retry on the CPU happens after the failed attempt's matrix is freed (the
+exception's traceback used to keep it alive through the retry). The paged fit is the in-core fit to
+within float rounding (tested against a `QuantileDMatrix` built from the same chunks).
 
 **Budgets.** `PullStore` an hour for a first pull, `RunFit`, `Infer` and `Evaluate` minutes; `FitModel` from the algorithm registry (gradient boosting on
 the GPU 1800 s, linear models 600 s), overridable per `Fit` in `search`. Retries are the runtime's default: every failure a reaction understands is an outcome, so a

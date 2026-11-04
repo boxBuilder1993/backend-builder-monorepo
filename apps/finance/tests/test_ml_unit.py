@@ -386,3 +386,50 @@ def test_ic_groups_by_a_list_of_columns() -> None:
         pos > 0.5 and abs(both["ic.y"]) < 0.15 and both["ic_points.y"] == 60
     )  # opposite signs cancel
     assert metrics.evaluate(t, ["y"], ["ic_points"], {"group": "ts"})["ic_points.y"] == 30
+
+
+def test_xgboost_cpu_fit_pages_through_the_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the CPU the quantised matrix is an ``ExtMemQuantileDMatrix`` cached under the work
+    directory: the fit equals the in-core one from the same chunks, and the cache is gone after."""
+    import xgboost as xgb
+    from finance.ml.estimators import xgboost_
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    path = tmp_path / "rows.parquet"
+    frame(n=600, seed=5).write_parquet(path, row_group_size=64)
+    declared = S.declare(KEY, FEATURES, {"columns": ["fwd"], "task": "regression"})
+    completed = data.complete_schema(path, declared)
+    whole = data.prepare(data.read_rows(path, completed, fitting=True), completed, fitting=True)
+
+    def batches() -> object:
+        return data.iter_batches(path, completed, batch_rows=130)
+
+    xg = E.REGISTRY["xgboost"]
+    params = E.resolve_params("xgboost", {"n_estimators": 30, "max_depth": 3})
+    paged = xg.fit_batches(batches, completed, params, "cpu", 7)  # type: ignore[arg-type]
+    assert list((tmp_path / "cache" / "finance" / "xgb-cache").iterdir()) == []
+
+    class InCore(xgb.DataIter):
+        def __init__(self) -> None:
+            super().__init__(release_data=True)
+            self.it: Any = iter(())
+
+        def reset(self) -> None:
+            self.it = batches()
+
+        def next(self, input_data: Any) -> bool:
+            try:
+                X, Y = next(self.it)
+            except StopIteration:
+                return False
+            input_data(data=X, label=Y[:, 0])
+            return True
+
+    dm = xgb.QuantileDMatrix(InCore(), max_bin=xgboost_.MAX_BIN, missing=np.nan)
+    train = {k: v for k, v in params.items() if k != "n_estimators"}
+    train.update(objective="reg:squarederror", device="cpu", tree_method="hist", seed=7)
+    booster = xgb.train(train, dm, num_boost_round=30)
+    expected = np.asarray(booster.inplace_predict(whole.X), dtype="float64")
+    np.testing.assert_allclose(paged.predict(whole.X)["pred_fwd"], expected, rtol=1e-5)

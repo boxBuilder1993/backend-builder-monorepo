@@ -255,6 +255,7 @@ class FitModel(Reaction):
         model.schema = done.schema
         model.device = done.device
         model.fit_seconds = round(done.seconds, 2)
+        ctx.save("peak_rss_mb", done.peak_rss_mb)
         model.sha256, model.bytes = done.sha256, done.bytes
         model.cache_path = job.out_dir
         model.status = "uploading"
