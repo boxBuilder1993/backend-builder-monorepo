@@ -43,6 +43,23 @@ class FitDone:
     peak_rss_mb: int
 
 
+INCORE_BYTES_PER_CELL = 4.5
+"""What xgboost's in-core quantised matrix costs on the host while it is built from chunks: measured
+at 320 MB per million rows of 88 features on 2026-11-05 (the second pass over the chunks), four
+times the byte per cell the finished index holds."""
+
+INCORE_BUDGET = 8 * 1024**3
+"""The host memory a GPU attempt may spend on that matrix: the card holds 8 GB, so a matrix past
+this never trains on it anyway, and building it (20 GB at 40 million rows) took the worker down."""
+
+
+def gpu_fits(rows: int, features: int, budget: int | None = None) -> bool:
+    """Whether a fit of this size may try the GPU: its in-core matrix must stay within ``budget``
+    (the module's ``INCORE_BUDGET`` by default)."""
+    limit = INCORE_BUDGET if budget is None else budget
+    return rows * features * INCORE_BYTES_PER_CELL <= limit
+
+
 def fit_job(job: FitJob) -> FitDone:
     """Runs in the child."""
     t0 = time.time()
@@ -51,6 +68,10 @@ def fit_job(job: FitJob) -> FitDone:
     rows = data.count_rows(path)
     adapter = E.REGISTRY[job.algorithm]
     device = E.pick_device(adapter, job.device)
+    if device == "cuda" and job.device == "auto" and not gpu_fits(rows, len(schema.feature_names)):
+        # too big for the card, and the host matrix the attempt would build is what the box
+        # cannot hold either: straight to the CPU, which pages its matrix through the disk
+        device = "cpu"
 
     def batches() -> Any:
         return data.iter_batches(path, schema, job.batch_rows)
