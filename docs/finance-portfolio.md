@@ -1,6 +1,6 @@
 # Holding portfolios for a small account: forecasts for days to a quarter, and a backtest that trades them
 
-Status: **reviewed and agreed**, 2026-10-25, revision 3; revision 4 (2026-11-03) agreed and running as stage 1: one pooled model
+Status: **reviewed and agreed**, 2026-10-25, revision 3; step 3 (the 2026 pass) pre-registered 2026-11-15 (§13); revision 4 (2026-11-03) agreed and running as stage 1: one pooled model
 across hold durations, stock-history features with a stock-identity experiment, exit-side calendar, no year (§5);
 **revision 5 (2026-11-04) for review**: every hold duration from a day to a quarter in one model, magnitude
 scores next to the IC, a rule that lets the model choose the hold (§5 and §6). Owner's decisions: no dividends, no shorting,
@@ -515,3 +515,54 @@ Momentum by number of stocks at ₹10,000 (median over rebalance and exit):
   ranking carries into 2025–26 best of the three.
 - **The bar for the model (phase 2):** beat NIFTYBEES and 12-1 momentum with about 10 stocks,
   rebalanced quarterly or half-yearly, at ₹10,000, out of sample.
+
+## 13. Step 3 pre-registration: the 2026 pass (2026-11-15)
+
+Written before any model is scored on 2026, per §7. Nothing below changes after the run starts;
+what 2026 says is reported whatever it is.
+
+**Question.** How well does the pooled model forecast a stock's return at each hold duration from
+1 to 63 sessions, on sessions it never saw: calibration, hit rate, the spread of outcomes around a
+forecast, per duration and, where the data allows, per stock. Portfolios and costs come after, on
+the same forecasts (§6), and are not part of this pass.
+
+**Models**, chosen on the 2025 leaderboards of stage 1 and 1b (fits through 2024, §5), refitted
+through 2025-12-31 with the purge (`max_exit` = train end), scored on 2026-01-01 to the data's end
+at every duration 1..63 (`sample` 0 at inference). Two `RunModelSearch` calls:
+
+| Search | Fits | Specs | Feature sets | Walk-forwards |
+|---|---|---|---|---|
+| A | `portfolio pooled63 nse y sym` (`5150cbdf`), `portfolio pooled63 nse r sym` (`ce2b199f`) | xgboost max_depth 6, n_estimators 300, learning_rate 0.03, subsample 0.8, colsample_bytree 0.7, reg_lambda 5; min_child_weight 50 and 500 | `all` (89, with `stock`), `no_stock` (88) | 8 |
+| B | `portfolio h21 nse y sym v2` (`5003dc15`) | lightgbm num_leaves 15, n_estimators 300, learning_rate 0.03, subsample 0.8, colsample_bytree 0.7, reg_lambda 5, min_child_samples 1000 | `no_stock` | 1 |
+
+Window: train_end 2025-12-31, test 2026-01-01 to 2026-11-13 (the last session in the store when
+this was written; later sessions are included if present at run time).
+
+**Primaries, named now.** Scaled target: pooled63 y, xgboost min_child_weight 50, `all`
+(2025 IC 0.171; the no-identity twin 0.168). Raw target: pooled63 r, min_child_weight 500,
+`no_stock` (2025 IC 0.157). Search B is the pooling control at 21 sessions (2025 IC 0.147). The
+other walk-forwards are reported alongside; none replaces a primary because it did better in 2026.
+
+**Calibration.** Each walk-forward's 2025 window (fit through 2024) gives a slope per duration;
+those slopes multiply the 2026 forecasts as a second prediction column. 2026 slope is reported
+raw and calibrated. Whether the 2025 map transferred is a result, not a knob.
+
+**The report**, one per walk-forward, computed by a reaction over the predictions file and
+published with it:
+
+- Per duration (1, 2, 3, 5, 10, 15, 21 in the body; every duration in an appendix): Spearman and
+  Pearson IC within (date, h); hit rate; slope raw and calibrated; R² against zero and against the
+  day's cross-sectional mean; level bias; a decile table of mean forecast, mean realised return,
+  share that rose, and the p10–p90 range of realised return per decile; all of it by month.
+- Standard errors from non-overlapping decision dates only: for duration h, every h-th session,
+  so overlapping targets do not shrink them.
+- Per stock, durations 1 to 5 only (at least 150 observations each in 2026): count, mean forecast
+  against mean realised, slope, hit rate, error against no skill. Longer durations per stock are
+  not reported: a dozen independent observations is not a measurement.
+- Observations whose exit lies after the data's end are excluded from every realised statistic.
+
+**What is not decided by this pass.** Positions, hold selection, costs, principal. Those are §6,
+run on these forecasts afterwards with the schedule of §8 at ₹10,000 and ₹1 lakh a position.
+
+**After the run, the rule.** Any change to the model, its features, the decision time or the
+durations is a new model, judged on sessions after the last one used here, not on 2026 again.
