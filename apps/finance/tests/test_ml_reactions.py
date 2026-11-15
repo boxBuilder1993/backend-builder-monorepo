@@ -330,9 +330,12 @@ async def test_model_search_walks_forward_and_closes(
     assert all(w.fit_run_id and w.model_id and w.infer_run_id and w.ic for w in wins)
     # the window's model was fitted on rows up to train_end only
     fr = await store.query_raw(
-        "select params, features from fit_run where id = :r", r=wins[0].fit_run_id
+        "select params, features, status, finished_at from fit_run where id = :r",
+        r=wins[0].fit_run_id,
     )
     assert fr[0]["params"]["end_date"] in ("2026-01-15", "2026-01-24")
+    # an inline run closes itself: no FitModel run follows to change a Model and fire CloseFitRun
+    assert fr[0]["status"] == "done" and fr[0]["finished_at"] is not None
     subset = [w for w in wfs if w.feature_set == "close_only"][0]
     sub_win = [w for w in wins if w.walk_forward_id == subset.id][0]
     fr = await store.query_raw("select features from fit_run where id = :r", r=sub_win.fit_run_id)

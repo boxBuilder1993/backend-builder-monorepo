@@ -156,7 +156,9 @@ class RunFit(Reaction):
     before a single fit starts; ``inline`` true fits inside this run instead (a walk-forward window
     scores the model it just made). ``specs`` replaces the Fit's search with the given entries;
     ``features`` fits on a subset of the Fit's features. The run is `running` from here and only
-    CloseFitRun changes it: concurrent FitModel runs never touch the FitRun row."""
+    CloseFitRun changes it: concurrent FitModel runs never touch the FitRun row. An inline run
+    closes itself instead: its models are created and fitted inside this one run, so at commit they
+    are new rows, not changed ones, and the OnChange trigger behind CloseFitRun never fires."""
 
     async def calculate(self, ctx: Context) -> None:
         fit = await ctx.get_by_id(Fit, ctx.input["fit_id"])
@@ -201,6 +203,11 @@ class RunFit(Reaction):
             else:
                 await ctx.trigger(FitModel, payload, deferred=True, timeout=budget)
             models.append(m.id)
+        if ctx.input.get("inline"):
+            fitted = [await ctx.get_by_id(Model, mid) for mid in models]
+            statuses = {m.status for m in fitted if m is not None}
+            run.status = "failed" if statuses == {"failed"} else "done"
+            run.finished_at = _now()
         ctx.save("fit_run_id", run.id)
         ctx.save("models", models)
         ctx.save("rows", run.rows)
